@@ -98,6 +98,30 @@ fn form(body: &[u8]) -> String {
 }
 
 #[test]
+fn d225_a_slash_model_keeps_the_segment_and_escapes_the_rest() {
+    block_on(async {
+        let dir = tempfile::tempdir().expect("scratch");
+        let host = TestHost::open(plugin(), dir.path());
+        let creds = write_creds(dir.path(), &person());
+        host.http().enqueue(token_body("ya29.minted"));
+        host.http().enqueue(REPLY);
+        let provider = build(&host, &local(&creds, ""));
+        provider
+            .execute(
+                Request::new("tuned/gemini 1?x#y"),
+                ProtocolId::GENERATIVE_LANGUAGE,
+            )
+            .await
+            .expect("completion");
+        let calls = host.http().calls();
+        assert_eq!(
+            calls[1].uri(),
+            format!("{ROOT}/publishers/google/models/tuned/gemini%201%3Fx%23y:generateContent")
+        );
+    });
+}
+
+#[test]
 fn a_refresh_token_is_minted_once_and_reused() {
     block_on(async {
         let dir = tempfile::tempdir().expect("scratch");

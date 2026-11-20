@@ -590,6 +590,7 @@ fn decode_usage(usage: &mut Map<String, Value>) -> Result<Usage, CodecError> {
         cache_write_5m_tokens,
         cache_write_1h_tokens,
         reasoning_tokens: None,
+        advisor_calls: Vec::new(),
         extensions: Extensions::from_map(std::mem::take(usage)),
     })
 }

@@ -7,6 +7,52 @@ use crate::message::Message;
 use crate::params::GenerationParams;
 use crate::tools::{Tool, ToolChoice};
 
+/// Spending limit copied from the authenticated gateway key.
+///
+/// This is not a secret. It is enough for a nested call to enforce the same
+/// token and cost caps as the original request.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CallerLimit {
+    /// Window name: day, week, month, days, or hours.
+    pub period: String,
+    /// Number of days in a repeating day window.
+    pub days: u32,
+    /// Number of hours in a repeating hour window.
+    pub hours: u32,
+    /// Token cap; zero means no token cap.
+    pub tokens: u64,
+    /// Cost cap in US dollars; zero means no cost cap.
+    pub cost: f64,
+    /// Whether cache reads count toward the token cap.
+    pub cache_reads: bool,
+    /// Unix seconds at which a repeating cycle began.
+    pub since: i64,
+}
+
+/// The gateway key that started a request, without its secret.
+///
+/// Codecs do not encode this. A bridge callback has no key of its own, so a
+/// nested call carries this stamp and is checked as the original caller.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CallerStamp {
+    /// Authenticated key id.
+    pub key_id: String,
+    /// Authenticated key name.
+    pub key_name: String,
+    /// Issuing key id.
+    pub issuer: String,
+    /// Issuing key name.
+    pub issuer_name: String,
+    /// Model patterns allowed for this key.
+    pub models: Vec<String>,
+    /// Account or provider-key patterns allowed for this key.
+    pub accounts: Vec<String>,
+    /// Spending limits of this key.
+    pub limits: Vec<CallerLimit>,
+    /// Spending limits of the issuing key.
+    pub issuer_limits: Vec<CallerLimit>,
+}
+
 /// Host-supplied identity for one client conversation.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Conversation {
@@ -59,6 +105,9 @@ pub struct Request {
     /// Host identity for affinity and background work on this conversation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation: Option<Conversation>,
+    /// Gateway key that started this request. Not part of any protocol body.
+    #[serde(skip)]
+    pub caller: Option<CallerStamp>,
     /// Top-level fields this version does not model.
     #[serde(default, skip_serializing_if = "Extensions::is_empty")]
     pub extensions: Extensions,
@@ -87,6 +136,7 @@ impl Request {
             params: GenerationParams::default(),
             stream: false,
             conversation: None,
+            caller: None,
             extensions: Extensions::new(),
         }
     }

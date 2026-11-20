@@ -3,7 +3,7 @@
 mod support;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use hofund_control_proto::{API_VERSION, ControlErrorKind, decode_error_envelope};
 use hofund_daemon::{
@@ -24,7 +24,12 @@ const OPEN: &str = "open-sub";
 const WITHDRAWN: &str = "withdrawn-sub";
 
 static OPEN_SPEC: SubscriptionSpec =
-    SubscriptionSpec::from_static(PluginId::from_static(OPEN), "Open", SignInFlowKind::Pkce);
+    SubscriptionSpec::from_static(PluginId::from_static(OPEN), "Open", SignInFlowKind::Pkce)
+        .with_agent_sign_in(AgentSignIn::new(
+            &["open-agent"],
+            "D221_AGENT_HOME",
+            "d221-open",
+        ));
 static WITHDRAWN_SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
     PluginId::from_static(WITHDRAWN),
     "Withdrawn",
@@ -38,6 +43,7 @@ static WITHDRAWN_SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
 
 struct Calls {
     starts: AtomicUsize,
+    discover_open: AtomicBool,
 }
 
 struct Factory {
@@ -116,11 +122,11 @@ impl Subscription for Fake {
     async fn start_sign_in(
         &self,
         _ctx: &SignInCtx,
-        _host: &HostContext,
+        host: &HostContext,
     ) -> Result<SignInChallenge, PluginError> {
         self.calls.starts.fetch_add(1, Ordering::SeqCst);
-        if let Some(refusal) = self.account_enrollment().refusal() {
-            return Err(PluginError::config(refusal));
+        if self.withdrawn() && host.accounts().list().await?.is_empty() {
+            return Err(PluginError::config(REFUSAL));
         }
         Ok(SignInChallenge::OpenUrl {
             url: "https://auth.example.test/authorize".to_owned(),
@@ -206,7 +212,14 @@ impl Subscription for Fake {
         _home: &std::path::Path,
     ) -> Result<Vec<DiscoveredAgentAccount>, PluginError> {
         if !self.withdrawn() {
-            return Ok(Vec::new());
+            if !self.calls.discover_open.load(Ordering::SeqCst) {
+                return Ok(Vec::new());
+            }
+            return Ok(vec![DiscoveredAgentAccount::new(
+                AccountId::from_static("found-open"),
+                "Open found",
+                "open-reference",
+            )?]);
         }
         Ok(vec![DiscoveredAgentAccount::new(
             AccountId::from_static("found-1"),
@@ -309,6 +322,7 @@ impl Rig {
         .expect("config");
         let calls = Arc::new(Calls {
             starts: AtomicUsize::new(0),
+            discover_open: AtomicBool::new(false),
         });
         let running = start_linked(
             &path,
@@ -375,7 +389,7 @@ fn message(status: reqwest::StatusCode, body: &[u8]) -> String {
 }
 
 #[tokio::test]
-async fn d221_control_refuses_new_accounts_and_lists_the_risk_line() {
+async fn d221_control_signs_in_a_stored_account_and_lists_the_risk_line() {
     let rig = Rig::start().await;
 
     let (status, body) = rig
@@ -385,8 +399,13 @@ async fn d221_control_refuses_new_accounts_and_lists_the_risk_line() {
             Some(json!({"version": 1})),
         )
         .await;
-    assert_eq!(message(status, &body), REFUSAL);
-    assert_eq!(rig.calls.starts.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    assert_eq!(rig.calls.starts.load(Ordering::SeqCst), 1);
 
     let (status, body) = rig
         .send(
@@ -401,7 +420,7 @@ async fn d221_control_refuses_new_accounts_and_lists_the_risk_line() {
         "{}",
         String::from_utf8_lossy(&body)
     );
-    assert_eq!(rig.calls.starts.load(Ordering::SeqCst), 1);
+    assert_eq!(rig.calls.starts.load(Ordering::SeqCst), 2);
 
     let (status, body) = rig
         .send(reqwest::Method::GET, "/v1/hofund/subscriptions", None)
@@ -471,6 +490,34 @@ async fn d221_control_refuses_new_accounts_and_lists_the_risk_line() {
         )
         .await;
     assert_eq!(message(status, &body), REFUSAL);
+
+    rig.calls.discover_open.store(true, Ordering::SeqCst);
+    let (status, body) = rig
+        .send(
+            reqwest::Method::POST,
+            "/v1/hofund/accounts/discover",
+            Some(json!({"version": 1, "add": true})),
+        )
+        .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let added: Value = serde_json::from_slice(&body).expect("mixed add");
+    assert_eq!(added["imported"][0], "imported-open");
+    let rows = added["found"].as_array().expect("rows");
+    let open = rows
+        .iter()
+        .find(|row| row["subscription"] == OPEN)
+        .expect("open row");
+    let withdrawn = rows
+        .iter()
+        .find(|row| row["subscription"] == WITHDRAWN)
+        .expect("withdrawn row");
+    assert!(open.get("refused").is_none());
+    assert_eq!(withdrawn["refused"], REFUSAL);
 
     support::shutdown(rig.running).await;
 }

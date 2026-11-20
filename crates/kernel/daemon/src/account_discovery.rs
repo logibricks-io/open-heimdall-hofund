@@ -20,6 +20,8 @@ pub struct DiscoverLine {
     pub id: String,
     /// Already stored before this run.
     pub already_stored: bool,
+    /// Why this row was not imported, when enrollment refused it.
+    pub refused: Option<String>,
 }
 
 /// Outcome of a discovery pass.
@@ -77,7 +79,8 @@ fn accounts_discover_in_inner(
         hofund_config::load_path(path).map_err(|error| DaemonError::new(error.to_string()))?;
     discovery_enabled_inner(&config, true, blocked)?;
     with_opened(path, async |opened| {
-        discover_opened(opened, &crate::RegistryAdapter, &config, import).await
+        let report = discover_opened(opened, &crate::RegistryAdapter, &config, import).await?;
+        reject_refused_only_add(report, import)
     })
 }
 
@@ -91,9 +94,38 @@ pub fn import_if_configured(path: &Path, config: &Config) -> Result<(), DaemonEr
         return Ok(());
     }
     with_opened(path, async |opened| {
-        discover_opened(opened, &crate::RegistryAdapter, config, true).await?;
+        import_opened(opened, &crate::RegistryAdapter, config).await?;
         Ok(())
     })
+}
+
+pub(crate) async fn import_opened(
+    opened: &[Opened],
+    registry: &dyn DaemonRegistry,
+    config: &Config,
+) -> Result<DiscoverReport, DaemonError> {
+    discover_opened(opened, registry, config, true).await
+}
+
+/// Returns the refusal when an explicit add imported nothing and every
+/// discovered row was refused. A configured import keeps going.
+pub(crate) fn reject_refused_only_add(
+    report: DiscoverReport,
+    import: bool,
+) -> Result<DiscoverReport, DaemonError> {
+    if import
+        && report.imported.is_empty()
+        && !report.lines.is_empty()
+        && report.lines.iter().all(|line| line.refused.is_some())
+    {
+        let message = report
+            .lines
+            .iter()
+            .find_map(|line| line.refused.clone())
+            .unwrap_or_else(|| "enrollment refused the discovered account".to_owned());
+        return Err(DaemonError::new(message));
+    }
+    Ok(report)
 }
 
 pub(crate) async fn discover_opened(
@@ -122,16 +154,16 @@ pub(crate) async fn discover_opened(
         for row in found {
             let id = row.id().clone();
             let already_stored = stored.contains(&id);
-            report.lines.push(DiscoverLine {
-                subscription: entry.id.clone(),
-                label: row.label().to_owned(),
-                id: id.to_string(),
-                already_stored,
-            });
-            if import && !already_stored {
-                if let Some(refusal) = entry.instance.account_enrollment().refusal() {
-                    return Err(DaemonError::new(refusal));
-                }
+            let refused = if import && !already_stored {
+                entry
+                    .instance
+                    .account_enrollment()
+                    .refusal()
+                    .map(str::to_owned)
+            } else {
+                None
+            };
+            if refused.is_none() && import && !already_stored {
                 let imported = entry
                     .instance
                     .import_agent_sign_in(&home, row.reference(), &entry.host)
@@ -140,6 +172,13 @@ pub(crate) async fn discover_opened(
                 stored.insert(imported.clone());
                 report.imported.push(imported.to_string());
             }
+            report.lines.push(DiscoverLine {
+                subscription: entry.id.clone(),
+                label: row.label().to_owned(),
+                id: id.to_string(),
+                already_stored,
+                refused,
+            });
         }
     }
     Ok(report)
@@ -150,10 +189,12 @@ pub(crate) async fn discover_opened(
 pub fn format_report(report: &DiscoverReport, import: bool) -> String {
     let mut out = String::new();
     for line in &report.lines {
-        let suffix = if line.already_stored {
-            " (already stored)"
+        let suffix = if let Some(reason) = &line.refused {
+            format!(" (refused: {reason})")
+        } else if line.already_stored {
+            " (already stored)".to_owned()
         } else {
-            ""
+            String::new()
         };
         out.push_str(&format!(
             "{}  {}  {}{suffix}\n",
@@ -174,6 +215,7 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
+    use hofund_plugin_api::SubscriptionFactory;
     use hofund_plugin_sdk::oauth::account_id_from;
 
     use crate::agent_login::push_test_agent_homes;
@@ -436,5 +478,377 @@ mod tests {
         assert_eq!(report.lines.len(), 1);
         assert_eq!(report.lines[0].label, "u@example.test");
         assert!(!default_home.join("auth.json").exists());
+    }
+
+    const OPEN_ID: &str = "open-sub";
+    const WITHDRAWN_ID: &str = "withdrawn-sub";
+    const REFUSAL: &str = "new-account refusal line";
+
+    static OPEN_SPEC: hofund_plugin_api::SubscriptionSpec =
+        hofund_plugin_api::SubscriptionSpec::from_static(
+            hofund_plugin_api::PluginId::from_static(OPEN_ID),
+            "Open",
+            hofund_plugin_api::SignInFlowKind::Pkce,
+        )
+        .with_agent_sign_in(hofund_plugin_api::AgentSignIn::new(
+            &["open-agent"],
+            "D221_OPEN_HOME",
+            "d221-open",
+        ));
+    static WITHDRAWN_SPEC: hofund_plugin_api::SubscriptionSpec =
+        hofund_plugin_api::SubscriptionSpec::from_static(
+            hofund_plugin_api::PluginId::from_static(WITHDRAWN_ID),
+            "Withdrawn",
+            hofund_plugin_api::SignInFlowKind::Pkce,
+        )
+        .with_agent_sign_in(hofund_plugin_api::AgentSignIn::new(
+            &["withdrawn-agent"],
+            "D221_WITHDRAWN_HOME",
+            "d221-withdrawn",
+        ));
+
+    struct DiscoverCalls {
+        imports: std::sync::atomic::AtomicUsize,
+    }
+
+    struct DiscoverFactory {
+        withdrawn: bool,
+        calls: std::sync::Arc<DiscoverCalls>,
+    }
+
+    struct DiscoverEmpty;
+    impl hofund_plugin_api::ValidConfig for DiscoverEmpty {}
+
+    impl hofund_plugin_api::SubscriptionFactory for DiscoverFactory {
+        type Config = DiscoverEmpty;
+
+        fn spec(&self) -> &'static hofund_plugin_api::SubscriptionSpec {
+            if self.withdrawn {
+                &WITHDRAWN_SPEC
+            } else {
+                &OPEN_SPEC
+            }
+        }
+
+        fn config_schema(&self) -> hofund_plugin_api::Schema {
+            hofund_plugin_api::Schema::empty()
+        }
+
+        fn validate(
+            &self,
+            _raw: &hofund_plugin_api::RawTable,
+        ) -> Result<Self::Config, hofund_plugin_api::ConfigError> {
+            Ok(DiscoverEmpty)
+        }
+
+        fn build(
+            &self,
+            _cfg: &Self::Config,
+            _host: &hofund_plugin_api::HostContext,
+        ) -> Result<
+            std::sync::Arc<dyn hofund_plugin_api::Subscription>,
+            hofund_plugin_api::BuildError,
+        > {
+            Ok(std::sync::Arc::new(DiscoverFake {
+                id: hofund_plugin_api::PluginId::from_static(if self.withdrawn {
+                    WITHDRAWN_ID
+                } else {
+                    OPEN_ID
+                }),
+                flow: hofund_plugin_api::SignInFlow::Pkce,
+                withdrawn: self.withdrawn,
+                calls: std::sync::Arc::clone(&self.calls),
+            }))
+        }
+    }
+
+    struct DiscoverFake {
+        id: hofund_plugin_api::PluginId,
+        flow: hofund_plugin_api::SignInFlow,
+        withdrawn: bool,
+        calls: std::sync::Arc<DiscoverCalls>,
+    }
+
+    #[hofund_plugin_sdk::async_trait]
+    impl hofund_plugin_api::Subscription for DiscoverFake {
+        fn id(&self) -> &hofund_plugin_api::PluginId {
+            &self.id
+        }
+
+        fn flow(&self) -> &hofund_plugin_api::SignInFlow {
+            &self.flow
+        }
+
+        fn account_enrollment(&self) -> hofund_plugin_api::AccountEnrollment {
+            if self.withdrawn {
+                hofund_plugin_api::AccountEnrollment::Withdrawn {
+                    risk: "saved-account risk line",
+                    refusal: REFUSAL,
+                }
+            } else {
+                hofund_plugin_api::AccountEnrollment::Open
+            }
+        }
+
+        async fn start_sign_in(
+            &self,
+            _ctx: &hofund_plugin_api::SignInCtx,
+            _host: &hofund_plugin_api::HostContext,
+        ) -> Result<hofund_plugin_api::SignInChallenge, hofund_plugin_api::PluginError> {
+            Err(hofund_plugin_api::PluginError::unsupported("unused"))
+        }
+
+        async fn complete_sign_in(
+            &self,
+            _ctx: &hofund_plugin_api::SignInCtx,
+            _proof: hofund_plugin_api::SignInProof,
+            _host: &hofund_plugin_api::HostContext,
+        ) -> Result<hofund_plugin_api::AccountId, hofund_plugin_api::PluginError> {
+            Err(hofund_plugin_api::PluginError::unsupported("unused"))
+        }
+
+        async fn account_status(
+            &self,
+            _account: &hofund_plugin_api::AccountId,
+            _host: &hofund_plugin_api::HostContext,
+        ) -> Result<hofund_plugin_api::AccountStatus, hofund_plugin_api::PluginError> {
+            Ok(hofund_plugin_api::AccountStatus::Ready)
+        }
+
+        async fn refresh(
+            &self,
+            _account: &hofund_plugin_api::AccountId,
+            _host: &hofund_plugin_api::HostContext,
+        ) -> Result<(), hofund_plugin_api::PluginError> {
+            Ok(())
+        }
+
+        async fn quota(
+            &self,
+            _account: &hofund_plugin_api::AccountId,
+            _host: &hofund_plugin_api::HostContext,
+        ) -> Result<Vec<hofund_plugin_api::QuotaWindow>, hofund_plugin_api::PluginError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_models(
+            &self,
+            _account: &hofund_plugin_api::AccountId,
+            _host: &hofund_plugin_api::HostContext,
+        ) -> Result<hofund_plugin_api::ModelList, hofund_plugin_api::PluginError> {
+            Ok(hofund_plugin_api::ModelList::new(Vec::new(), None))
+        }
+
+        fn upstream(
+            &self,
+            _account: &hofund_plugin_api::AccountId,
+            _host: &hofund_plugin_api::HostContext,
+        ) -> Result<
+            std::sync::Arc<dyn hofund_plugin_api::UpstreamProvider>,
+            hofund_plugin_api::PluginError,
+        > {
+            Err(hofund_plugin_api::PluginError::unsupported("unused"))
+        }
+
+        async fn discover_agent_sign_in(
+            &self,
+            _home: &Path,
+        ) -> Result<Vec<hofund_plugin_api::DiscoveredAgentAccount>, hofund_plugin_api::PluginError>
+        {
+            let (id, label, reference) = if self.withdrawn {
+                ("a-00000000000000d2", "Withdrawn", "withdrawn-reference")
+            } else {
+                ("a-00000000000000d1", "Open", "open-reference")
+            };
+            Ok(vec![hofund_plugin_api::DiscoveredAgentAccount::new(
+                hofund_plugin_api::AccountId::from_static(id),
+                label,
+                reference,
+            )?])
+        }
+
+        async fn import_agent_sign_in(
+            &self,
+            _home: &Path,
+            reference: &str,
+            host: &hofund_plugin_api::HostContext,
+        ) -> Result<hofund_plugin_api::AccountId, hofund_plugin_api::PluginError> {
+            self.calls
+                .imports
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let id = hofund_plugin_api::AccountId::from_static("a-00000000000000d1");
+            let account = host.accounts().account(id.clone(), "Open")?;
+            host.accounts()
+                .upsert(
+                    account,
+                    hofund_plugin_api::SecretString::from(reference.to_owned()),
+                )
+                .await?;
+            Ok(id)
+        }
+    }
+
+    struct DiscoverRegistry {
+        calls: std::sync::Arc<DiscoverCalls>,
+    }
+
+    impl crate::DaemonRegistry for DiscoverRegistry {
+        fn factory(
+            &self,
+            _id: &str,
+        ) -> Option<std::sync::Arc<dyn hofund_plugin_api::DynUpstreamFactory>> {
+            None
+        }
+
+        fn is_kernel_factory(&self, _id: &str) -> bool {
+            false
+        }
+
+        fn builtin_factory_ids(&self) -> &'static [&'static str] {
+            &[]
+        }
+
+        fn builtin_protocols(&self) -> Vec<hofund_plugin_api::ProtocolId> {
+            Vec::new()
+        }
+
+        fn find_preset(
+            &self,
+            _id: &str,
+        ) -> Option<(&'static crate::CompiledPreset, Option<&'static str>)> {
+            None
+        }
+
+        fn agents(&self) -> &'static [&'static hofund_plugin_api::AgentDescription] {
+            &[]
+        }
+
+        fn surfaces(&self) -> Vec<std::sync::Arc<dyn hofund_plugin_api::InboundSurface>> {
+            Vec::new()
+        }
+
+        fn subscription(
+            &self,
+            id: &str,
+        ) -> Option<std::sync::Arc<dyn hofund_plugin_api::DynSubscriptionFactory>> {
+            let withdrawn = match id {
+                OPEN_ID => false,
+                WITHDRAWN_ID => true,
+                _ => return None,
+            };
+            Some(std::sync::Arc::new(DiscoverFactory {
+                withdrawn,
+                calls: std::sync::Arc::clone(&self.calls),
+            }))
+        }
+    }
+
+    fn discover_opened_pair(
+        include_open: bool,
+    ) -> (
+        tempfile::TempDir,
+        Vec<crate::sign_in::Opened>,
+        DiscoverRegistry,
+        std::sync::Arc<DiscoverCalls>,
+        crate::agent_login::TestHomeGuard,
+    ) {
+        let root = tempfile::tempdir().expect("root");
+        let open_home = root.path().join("open");
+        let withdrawn_home = root.path().join("withdrawn");
+        fs::create_dir_all(&open_home).expect("open home");
+        fs::create_dir_all(&withdrawn_home).expect("withdrawn home");
+        let mut homes = BTreeMap::new();
+        homes.insert("D221_OPEN_HOME".to_owned(), open_home);
+        homes.insert("D221_WITHDRAWN_HOME".to_owned(), withdrawn_home);
+        let guard = push_test_agent_homes(homes);
+        let calls = std::sync::Arc::new(DiscoverCalls {
+            imports: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let registry = DiscoverRegistry {
+            calls: std::sync::Arc::clone(&calls),
+        };
+        let mut opened = Vec::new();
+        if include_open {
+            opened.push(discover_entry(root.path(), OPEN_ID, false, &calls));
+        }
+        opened.push(discover_entry(root.path(), WITHDRAWN_ID, true, &calls));
+        (root, opened, registry, calls, guard)
+    }
+
+    fn discover_entry(
+        root: &Path,
+        id: &str,
+        withdrawn: bool,
+        calls: &std::sync::Arc<DiscoverCalls>,
+    ) -> crate::sign_in::Opened {
+        let plugin = hofund_plugin_api::PluginId::from_static(if withdrawn {
+            WITHDRAWN_ID
+        } else {
+            OPEN_ID
+        });
+        let state = root.join(id);
+        fs::create_dir_all(&state).expect("state");
+        let host = hofund_plugin_host::TestHost::open_for(
+            hofund_plugin_api::PluginKind::Subscription,
+            plugin,
+            &state,
+        );
+        let instance = DiscoverFactory {
+            withdrawn,
+            calls: std::sync::Arc::clone(calls),
+        }
+        .build(&DiscoverEmpty, host.context())
+        .expect("build");
+        crate::sign_in::Opened {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            instance,
+            host: host.context().clone(),
+            config_dir: state,
+        }
+    }
+
+    #[test]
+    fn d221_open_import_continues_when_a_discovered_row_is_refused() {
+        let (_root, opened, registry, calls, _guard) = discover_opened_pair(true);
+        let config = minimal_config(true);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let report = runtime
+            .block_on(import_opened(&opened, &registry, &config))
+            .expect("import_if_configured");
+        assert_eq!(report.imported, vec!["a-00000000000000d1".to_owned()]);
+        let open = report
+            .lines
+            .iter()
+            .find(|line| line.subscription == OPEN_ID)
+            .expect("open row");
+        assert!(open.refused.is_none());
+        assert!(!open.already_stored);
+        let withdrawn = report
+            .lines
+            .iter()
+            .find(|line| line.subscription == WITHDRAWN_ID)
+            .expect("withdrawn row");
+        assert_eq!(withdrawn.refused.as_deref(), Some(REFUSAL));
+        assert_eq!(calls.imports.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let printed = format_report(&report, true);
+        assert!(printed.contains("refused:"));
+        assert!(printed.contains(REFUSAL), "{printed}");
+
+        let (_root, only, registry, calls, _guard) = discover_opened_pair(false);
+        let recorded = runtime
+            .block_on(discover_opened(&only, &registry, &config, true))
+            .expect("refused row is recorded");
+        assert!(recorded.imported.is_empty());
+        assert_eq!(recorded.lines[0].refused.as_deref(), Some(REFUSAL));
+        let refused = reject_refused_only_add(recorded, true).expect_err("explicit add");
+        assert!(refused.to_string().contains(REFUSAL), "{refused}");
+        runtime
+            .block_on(import_opened(&only, &registry, &config))
+            .expect("configured import keeps going");
+        assert_eq!(calls.imports.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }

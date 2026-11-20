@@ -9,7 +9,7 @@ use hofund_plugin_api::{
     RawValue, SecretString, SignInChallenge, SignInCtx, SignInProof, Subscription,
     SubscriptionFactory,
 };
-use hofund_plugin_sdk::oauth::SecretObject;
+use hofund_plugin_sdk::oauth::{SecretObject, account_id_from, secret_text};
 
 use crate::project;
 use crate::{ENROLLMENT_REFUSAL, Endpoints, RISK_LINE, client, factory_with_endpoints, version};
@@ -208,8 +208,223 @@ fn d221_a_saved_account_still_refreshes_lists_models_and_serves() {
     let list = block_on(sub.list_models(&id, host.context())).expect("models");
     assert_eq!(list.models()[0].id(), "gemini-3.8-flash-high");
     sub.upstream(&id, host.context()).expect("upstream");
-    let again = block_on(sub.start_sign_in(&ctx(), host.context())).expect_err("still withdrawn");
-    assert_eq!(again.message(), ENROLLMENT_REFUSAL);
+    let challenge = block_on(sub.start_sign_in(&ctx(), host.context())).expect("stored account");
+    assert!(matches!(challenge, SignInChallenge::OpenUrl { .. }));
+    block_on(sub.cancel_sign_in(&ctx(), host.context())).expect("cancel");
+}
+
+#[test]
+fn d221_a_stored_account_can_be_signed_in_and_imported_again() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let email = "u@example.test";
+    let id = account_id_from(&["antigravity", email]);
+    let blob = SecretObject::new()
+        .with_number("v", 1)
+        .with_secret(
+            "refresh_token",
+            &SecretString::from("old-refresh".to_owned()),
+        )
+        .with_text("email", email)
+        .with_text(project::PROJECT, "proj-1")
+        .with_flag(crate::tokens::LAPSED, true);
+    block_on(async {
+        let accounts = host.context().accounts();
+        let account = accounts.account(id.clone(), email).expect("account");
+        accounts
+            .upsert(account, blob.to_secret())
+            .await
+            .expect("seed");
+    });
+    let sub = build(&host, false);
+    assert_eq!(
+        block_on(sub.account_status(&id, host.context())).expect("lapsed"),
+        AccountStatus::NeedsSignIn {
+            reason: crate::tokens::LAPSED_REASON.to_owned(),
+        }
+    );
+    let challenge = block_on(sub.start_sign_in(&ctx(), host.context())).expect("start");
+    let SignInChallenge::OpenUrl { url } = challenge else {
+        panic!("expected an address");
+    };
+    let state = url
+        .split('&')
+        .find_map(|pair| {
+            pair.strip_prefix("state=")
+                .or_else(|| pair.strip_prefix("?state="))
+        })
+        .expect("state")
+        .split('&')
+        .next()
+        .expect("state value");
+    host.http()
+        .enqueue(br#"{"access_token":"acc-new","token_type":"Bearer","expires_in":3600,"refresh_token":"refresh-new"}"#.to_vec());
+    host.http()
+        .enqueue(br#"{"email":"u@example.test"}"#.to_vec());
+    host.http().enqueue(
+        br#"{"currentTier":{"id":"free-tier","name":"Free"},"cloudaicompanionProject":"proj-1"}"#
+            .to_vec(),
+    );
+    let signed = block_on(sub.complete_sign_in(
+        &ctx(),
+        SignInProof::callback("code-1", state),
+        host.context(),
+    ))
+    .expect("same account");
+    assert_eq!(signed, id);
+    let stored = block_on(host.context().accounts().secret(&id))
+        .expect("read")
+        .expect("secret");
+    let stored = SecretObject::parse(&stored).expect("blob");
+    assert!(!stored.flag(crate::tokens::LAPSED));
+    assert_eq!(
+        stored.secret("refresh_token").as_ref().map(secret_text),
+        Some("refresh-new")
+    );
+
+    let challenge = block_on(sub.start_sign_in(&ctx(), host.context())).expect("start again");
+    let SignInChallenge::OpenUrl { url } = challenge else {
+        panic!("expected an address");
+    };
+    let state = url
+        .split('&')
+        .find_map(|pair| {
+            pair.strip_prefix("state=")
+                .or_else(|| pair.strip_prefix("?state="))
+        })
+        .expect("state")
+        .split('&')
+        .next()
+        .expect("state value");
+    let calls = host.http().calls().len();
+    host.http()
+        .enqueue(br#"{"access_token":"acc-other","token_type":"Bearer","expires_in":3600,"refresh_token":"refresh-other"}"#.to_vec());
+    host.http()
+        .enqueue(br#"{"email":"other@example.test"}"#.to_vec());
+    let refused = block_on(sub.complete_sign_in(
+        &ctx(),
+        SignInProof::callback("code-2", state),
+        host.context(),
+    ))
+    .expect_err("new account");
+    assert_eq!(refused.message(), ENROLLMENT_REFUSAL);
+    let other = account_id_from(&["antigravity", "other@example.test"]);
+    assert!(
+        block_on(host.context().accounts().secret(&other))
+            .expect("read")
+            .is_none()
+    );
+    let learned: Vec<_> = host.http().calls().into_iter().skip(calls).collect();
+    assert!(
+        learned.iter().any(|call| call.uri() == TOKEN_URL),
+        "token exchange learns the refresh token"
+    );
+    assert!(
+        learned
+            .iter()
+            .any(|call| call.uri() == "https://oauth.test/userinfo"),
+        "userinfo learns the account id"
+    );
+    assert!(
+        learned.iter().all(|call| {
+            !call.uri().contains("loadCodeAssist") && !call.uri().contains("onboardUser")
+        }),
+        "a refused account makes no Code Assist setup call: {learned:?}"
+    );
+
+    let before = host.http().calls().len();
+    let same = block_on(sub.import_accounts(
+        r#"{"type":"antigravity","refresh_token":"refresh-new","email":"u@example.test"}"#,
+        host.context(),
+    ))
+    .expect("same refresh");
+    assert_eq!(same, vec![id.clone()]);
+    assert_eq!(host.http().calls().len(), before);
+    host.http()
+        .enqueue(br#"{"access_token":"acc-imp","token_type":"Bearer","expires_in":3600}"#.to_vec());
+    host.http()
+        .enqueue(br#"{"email":"u@example.test"}"#.to_vec());
+    host.http().enqueue(
+        br#"{"currentTier":{"id":"free-tier","name":"Free"},"cloudaicompanionProject":"proj-1"}"#
+            .to_vec(),
+    );
+    let imported = block_on(sub.import_accounts(
+        r#"{"type":"antigravity","refresh_token":"refresh-imported","email":"u@example.test"}"#,
+        host.context(),
+    ))
+    .expect("new refresh for the stored account");
+    assert_eq!(imported, vec![id]);
+    let after = host.http().calls().len();
+    let fresh = block_on(sub.import_accounts(
+        r#"{"type":"antigravity","refresh_token":"refresh-brand-new","email":"new@example.test"}"#,
+        host.context(),
+    ))
+    .expect_err("new import");
+    assert_eq!(fresh.message(), ENROLLMENT_REFUSAL);
+    assert_eq!(host.http().calls().len(), after);
+    let missing = account_id_from(&["antigravity", "new@example.test"]);
+    assert!(
+        block_on(host.context().accounts().list())
+            .expect("list")
+            .iter()
+            .all(|account| account.id() != &missing)
+    );
+}
+
+#[test]
+fn d221_an_unverified_refresh_is_not_written_onto_a_stored_email() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let email = "u@example.test";
+    let id = account_id_from(&["antigravity", email]);
+    let blob = SecretObject::new()
+        .with_number("v", 1)
+        .with_secret(
+            "refresh_token",
+            &SecretString::from("old-refresh".to_owned()),
+        )
+        .with_text("email", email)
+        .with_text(project::PROJECT, "proj-1");
+    block_on(async {
+        let accounts = host.context().accounts();
+        let account = accounts.account(id.clone(), email).expect("account");
+        accounts
+            .upsert(account, blob.to_secret())
+            .await
+            .expect("seed");
+    });
+    let sub = build(&host, false);
+    let before = host.http().calls().len();
+    host.http()
+        .enqueue(br#"{"access_token":"acc-bad","token_type":"Bearer","expires_in":3600}"#.to_vec());
+    host.http().enqueue_response(401, &[], b"nope");
+    let error = block_on(sub.import_accounts(
+        r#"{"type":"antigravity","refresh_token":"refresh-other","email":"u@example.test"}"#,
+        host.context(),
+    ))
+    .expect_err("unverified refresh");
+    assert!(
+        error
+            .message()
+            .contains("Google didn't say which account signed in"),
+        "{}",
+        error.message()
+    );
+    let stored = block_on(host.context().accounts().secret(&id))
+        .expect("read")
+        .expect("secret");
+    let stored = SecretObject::parse(&stored).expect("blob");
+    assert_eq!(
+        stored.secret("refresh_token").as_ref().map(secret_text),
+        Some("old-refresh")
+    );
+    let calls: Vec<_> = host.http().calls().into_iter().skip(before).collect();
+    assert!(
+        calls.iter().all(|call| {
+            !call.uri().contains("loadCodeAssist") && !call.uri().contains("onboardUser")
+        }),
+        "an unverified refresh makes no Code Assist call: {calls:?}"
+    );
 }
 
 #[test]

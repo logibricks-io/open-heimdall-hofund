@@ -173,6 +173,14 @@ share an id become two ids, and each result is kept with its call. A body
 that is already in shape is not written again. Create, token counting, and a
 translated build share this pass.
 
+An advisor server tool (`type` beginning `advisor_`, such as
+`advisor_20260301`) decodes without `input_schema`. Its `type` and `model`
+stay on the tool. Encode writes `{type, name, model}` and does not merge the
+extension bag. `usage.iterations` is read, not written back. An entry whose
+`type` is `advisor_message` becomes one advisor call on `Usage`. A stream
+`message_delta` whose list contains an advisor call replaces the previous
+list. A usage object with no advisor entry leaves the list unchanged.
+
 Chat Completions keeps `system` and `developer` in the message array.
 
 Tool results:

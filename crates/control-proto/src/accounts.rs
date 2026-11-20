@@ -499,6 +499,9 @@ pub struct DiscoveredAccount {
     pub label: String,
     /// Whether this identity is already stored.
     pub already_stored: bool,
+    /// Why this row was not imported, when enrollment refused it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<String>,
 }
 
 /// Account discovery response.
@@ -561,6 +564,9 @@ pub struct AccountDiscoverImportResponse {
     pub version: u32,
     /// Newly imported account ids.
     pub imported: Vec<String>,
+    /// Discovered rows. A refused row carries [`DiscoveredAccount::refused`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub found: Vec<DiscoveredAccount>,
 }
 
 impl Default for AccountDiscoverImportResponse {
@@ -568,6 +574,7 @@ impl Default for AccountDiscoverImportResponse {
         Self {
             version: API_VERSION,
             imported: Vec::new(),
+            found: Vec::new(),
         }
     }
 }

@@ -89,6 +89,8 @@ pub(crate) struct Runtime {
     quota_refresh: Mutex<crate::quota_refresh::RefreshStamps>,
     remote_quotas: Arc<crate::remote_quotas::RemoteQuotaCache>,
     remote_http: reqwest::Client,
+    /// Nested model calls for subscription bridges, filled once the gateway exists.
+    ask: Mutex<Option<Arc<dyn hofund_plugin_api::AskBackend>>>,
 }
 
 impl Candidate {
@@ -153,6 +155,7 @@ impl Runtime {
                 .timeout(Duration::from_secs(8))
                 .build()
                 .expect("remote quota client"),
+            ask: Mutex::new(None),
         })
     }
 
@@ -215,6 +218,7 @@ impl Runtime {
                 .timeout(Duration::from_secs(8))
                 .build()
                 .expect("remote quota client"),
+            ask: Mutex::new(None),
         })
     }
 
@@ -319,6 +323,19 @@ impl Runtime {
         self.model_catalog.get().cloned()
     }
 
+    /// Installs the gateway's nested-call backend on every live subscription.
+    pub(crate) fn set_ask(&self, backend: Arc<dyn hofund_plugin_api::AskBackend>) {
+        *self.ask.lock().expect("ask backend") = Some(Arc::clone(&backend));
+        let plan = self.plan.lock().expect("published plan");
+        for state in plan.subscriptions.values() {
+            state.install_ask(Arc::clone(&backend));
+        }
+    }
+
+    fn current_ask(&self) -> Option<Arc<dyn hofund_plugin_api::AskBackend>> {
+        self.ask.lock().expect("ask backend").clone()
+    }
+
     pub(crate) fn initial_snapshot(
         &self,
         config: &Config,
@@ -330,6 +347,7 @@ impl Runtime {
             self.max_idle_per_host,
             &self.registry,
             None,
+            self.current_ask(),
         )?;
         let RouterParts {
             snapshot,
@@ -464,6 +482,7 @@ impl Runtime {
             self.max_idle_per_host,
             &self.registry,
             Some(&previous),
+            self.current_ask(),
         )?;
         drop(previous);
         let mut fingerprints = HashMap::new();
