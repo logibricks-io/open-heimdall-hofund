@@ -995,7 +995,10 @@ fn host_header(url: &url::Url) -> String {
     }
 }
 
-/// The model as one escaped path segment, without a leading `models/`.
+/// The model path after one `models/` prefix.
+///
+/// Each `/`-separated segment is escaped and the slashes stay. An empty
+/// segment, `.`, or `..` escapes the whole remaining id as one segment.
 ///
 /// # Errors
 ///
@@ -1006,7 +1009,26 @@ pub fn model_segment(model: &str) -> Result<String, PluginError> {
     if model.is_empty() {
         return Err(PluginError::status_error(400, "model is empty"));
     }
-    Ok(path_segment(model))
+    Ok(model_path(model))
+}
+
+/// Escapes each `/`-separated segment and keeps the slashes.
+///
+/// An empty segment, `.`, or `..` escapes the whole remaining id as one
+/// segment, so the path cannot leave `models/`.
+fn model_path(model: &str) -> String {
+    let segments: Vec<&str> = model.split('/').collect();
+    if segments
+        .iter()
+        .any(|segment| segment.is_empty() || *segment == "." || *segment == "..")
+    {
+        return path_segment(model);
+    }
+    segments
+        .into_iter()
+        .map(path_segment)
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Percent-encoding for one URL path segment. Unreserved characters and
@@ -1790,8 +1812,8 @@ mod tests {
 
     use super::{
         AwsSigner, Events, Method, Path, Target, classify_count, consume_fields, converse_call,
-        endpoint_unsupported, failure_of, host_header, message_from, omit_max_tokens, path_segment,
-        rewritten, route, sigv4, strip_billing_header, url_for,
+        endpoint_unsupported, failure_of, host_header, message_from, model_segment,
+        omit_max_tokens, path_segment, rewritten, route, sigv4, strip_billing_header, url_for,
     };
     use hofund_plugin_api::CountOutcome;
 
@@ -2248,7 +2270,7 @@ mod tests {
         .expect("escaped");
         assert_eq!(
             escaped,
-            "https://gl.example/v1beta/models/a%2Fb%20c:tag$&+=@~%C3%A9:generateContent"
+            "https://gl.example/v1beta/models/a/b%20c:tag$&+=@~%C3%A9:generateContent"
         );
         assert_eq!(path_segment("Az09-_.~"), "Az09-_.~");
         assert_eq!(path_segment("?#%"), "%3F%23%25");
@@ -2258,6 +2280,31 @@ mod tests {
             };
             assert_eq!(error.status(), Some(400), "{model:?}");
             assert_eq!(error.message(), "model is empty");
+        }
+    }
+
+    #[test]
+    fn d225_model_segment_keeps_slashes() {
+        let cases = [
+            ("gemini-2.5-pro", "gemini-2.5-pro"),
+            ("claude-sonnet-4-5@20250929", "claude-sonnet-4-5@20250929"),
+            ("qwen3:8b", "qwen3:8b"),
+            ("example/model-demo", "example/model-demo"),
+            ("a/b/c", "a/b/c"),
+            ("models/publishers/x/models/y", "publishers/x/models/y"),
+            ("ex ample/model?x#y", "ex%20ample/model%3Fx%23y"),
+            ("ns/100%", "ns/100%25"),
+            ("../secret", "..%2Fsecret"),
+            ("a/../b", "a%2F..%2Fb"),
+            ("a/./b", "a%2F.%2Fb"),
+            ("a//b", "a%2F%2Fb"),
+            ("/abs", "%2Fabs"),
+            ("trail/", "trail%2F"),
+            ("%2e%2e/x", "%252e%252e/x"),
+            ("a/b c:tag$&+=@~é", "a/b%20c:tag$&+=@~%C3%A9"),
+        ];
+        for (model, want) in cases {
+            assert_eq!(model_segment(model).expect(model), want, "{model}");
         }
     }
 

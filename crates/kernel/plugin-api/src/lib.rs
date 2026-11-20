@@ -117,7 +117,9 @@ pub use session::{
     SessionParse, SessionParser, SessionPart, SessionRecord, SessionRows, SessionStore,
     SessionTokens, SessionTranscript, SessionTranscriptParser, SessionUsageEvent, SessionValue,
 };
-pub use subscription::{DynSubscriptionFactory, Subscription, SubscriptionFactory};
+pub use subscription::{
+    AccountEnrollment, DynSubscriptionFactory, Subscription, SubscriptionFactory,
+};
 pub use upstream::{
     BuildContext, CredentialStyle, DynUpstreamFactory, HeaderName, ListKind, UpstreamFactory,
     UpstreamProvider, UpstreamSpec,

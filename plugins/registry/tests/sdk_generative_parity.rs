@@ -33,7 +33,7 @@ type Build = fn() -> Request;
 
 const KEY: &str = "parity-key";
 const MODEL: &str = "models/demo-1.5:tag/x";
-const MODEL_PATH: &str = "/gateway/models/demo-1.5:tag%2Fx";
+const MODEL_PATH: &str = "/gateway/models/demo-1.5:tag/x";
 
 const GENERATIVE_UNARY: &str = r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":1,"totalTokenCount":4},"modelVersion":"demo"}"#;
 const GENERATIVE_STREAM: &str = concat!(

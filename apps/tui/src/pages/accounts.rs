@@ -40,6 +40,7 @@ struct Row {
     name: String,
     flow: SubscriptionFlow,
     account: Option<SubscriptionAccount>,
+    notice: Option<String>,
 }
 
 #[derive(Clone)]
@@ -157,12 +158,14 @@ impl AccountsPage {
                     name: subscription.name.clone(),
                     flow: subscription.flow,
                     account: None,
+                    notice: subscription.notice.clone(),
                 }];
                 rows.extend(subscription.accounts.into_iter().map(|account| Row {
                     subscription: subscription.id.clone(),
                     name: subscription.name.clone(),
                     flow: subscription.flow,
                     account: Some(account),
+                    notice: None,
                 }));
                 rows
             })
@@ -764,12 +767,17 @@ fn selection_key(row: &Row) -> (String, Option<String>) {
 
 fn row_text(row: &Row) -> String {
     let Some(account) = &row.account else {
-        return format!(
+        let mut text = format!(
             "{} ({}) · {}",
             row.name,
             row.subscription,
             flow_name(row.flow)
         );
+        if let Some(notice) = &row.notice {
+            text.push_str(" · ");
+            text.push_str(notice);
+        }
+        return text;
     };
     let status = if account.ready {
         "ready".to_owned()
@@ -867,4 +875,47 @@ fn move_cursor(cursor: &mut usize, len: usize, delta: i32) {
         return;
     }
     *cursor = (*cursor as i32 + delta).rem_euclid(len as i32) as usize;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AccountsPage, row_text};
+    use hofund_control_client::hofund_control_proto::{SubscriptionAccount, SubscriptionEntry};
+
+    #[test]
+    fn d221_saved_account_header_shows_the_risk_line() {
+        let mut page = AccountsPage::new();
+        let mut saved = SubscriptionAccount::default();
+        saved.id = "saved".to_owned();
+        saved.label = "saved".to_owned();
+        saved.ready = true;
+        let mut withdrawn = SubscriptionEntry::default();
+        withdrawn.id = "antigravity".to_owned();
+        withdrawn.name = "Google Antigravity".to_owned();
+        withdrawn.notice = Some("saved-account risk line".to_owned());
+        withdrawn.accounts = vec![saved];
+        let mut open = SubscriptionEntry::default();
+        open.id = "gemini".to_owned();
+        open.name = "Gemini CLI".to_owned();
+        page.apply_load(vec![withdrawn, open]);
+        let header = page
+            .rows
+            .iter()
+            .find(|row| row.subscription == "antigravity" && row.account.is_none())
+            .expect("header");
+        assert!(row_text(header).contains("saved-account risk line"));
+        let account = page
+            .rows
+            .iter()
+            .find(|row| row.account.is_some())
+            .expect("account");
+        assert!(!row_text(account).contains("saved-account risk line"));
+        let gemini = page
+            .rows
+            .iter()
+            .find(|row| row.subscription == "gemini")
+            .expect("gemini");
+        assert!(gemini.notice.is_none());
+        assert!(!row_text(gemini).contains("risk"));
+    }
 }

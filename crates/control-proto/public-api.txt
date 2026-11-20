@@ -1289,6 +1289,7 @@ SubscriptionEntry.accounts
 SubscriptionEntry.flow
 SubscriptionEntry.id
 SubscriptionEntry.name
+SubscriptionEntry.notice
 SubscriptionFlow #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (rename_all = "snake_case")]
 SubscriptionFlow::Bridge
 SubscriptionFlow::Device

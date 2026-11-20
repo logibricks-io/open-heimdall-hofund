@@ -111,6 +111,7 @@ image::fn fit_base64 (encoded : & str , limit : usize) -> Result < Fitted , FitE
 image::fn fit_claude (media_type : & str , encoded : & str) -> ClaudeImage
 inflate::fn compress (input : & [u8]) -> Result < Vec < u8 > , PluginError >
 inflate::fn gzip (input : & [u8]) -> Result < Vec < u8 > , PluginError >
+instructions_after_input
 json
 json_error_message
 jwt::KeyError #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
