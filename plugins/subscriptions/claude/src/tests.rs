@@ -2220,3 +2220,95 @@ mod d226 {
         );
     }
 }
+
+fn claude_for(host: &TestHost) -> crate::Claude {
+    crate::Claude {
+        command: Some(PathBuf::from(PROGRAM)),
+        flow: hofund_plugin_api::SignInFlow::Bridge {
+            command: crate::COMMAND,
+        },
+        spawn_host: host.context().clone(),
+        pending: std::sync::Mutex::new(std::collections::HashMap::new()),
+        bridge: crate::bridge::Bridge::new(),
+        limits: crate::limits::Store::new(),
+    }
+}
+
+#[test]
+fn d237_header_during_usage_does_not_refresh_the_previous_reading() {
+    use std::time::Duration;
+
+    use hofund_plugin_api::QuotaWindow;
+
+    let reset = hofund_plugin_sdk::time::parse_rfc3339("2026-11-26T13:00:00Z").expect("reset");
+    let now = reset - Duration::from_secs(24 * 60 * 60);
+    let earlier = now - Duration::from_secs(5 * 60 * 60);
+    let dir = tempfile::tempdir().expect("dir");
+    let host = TestHost::open_for_at(PluginKind::Subscription, plugin(), dir.path(), now);
+    let id = account_id_from(&["claude", UUID]);
+    store(&host, &id, &signed_in_blob());
+    let claude = claude_for(&host);
+    let session = QuotaWindow::new(
+        "5 hours",
+        1,
+        Some(100),
+        Some(earlier + Duration::from_secs(60 * 60)),
+    )
+    .expect("session");
+    let week = QuotaWindow::new("7 days", 10, Some(100), Some(reset)).expect("week");
+    claude
+        .limits
+        .record_usage(&id, vec![session, week], earlier, &[], None);
+    claude.limits.clear_tried(&id);
+
+    let limits = claude.limits.clone();
+    let noted = id.clone();
+    host.process().script_piped(
+        PipedScript::new().exits(move |_| {
+            let mut decoder = crate::bridge::decode::Decoder::new();
+            let step = decoder
+                .push_line(
+                    r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"seven_day","utilization":0.12,"resetsAt":1800000000}}"#,
+                )
+                .expect("line");
+            let crate::bridge::decode::Step::RateLimit(info) = step else {
+                panic!("rate limit");
+            };
+            limits.note(&noted, &info, now);
+            vec![
+                "Current week (all models): 12% used · resets 2026-11-26T13:00:00Z\n".to_owned(),
+            ]
+        }),
+    );
+
+    let windows = block_on(claude.quota_windows(
+        &id,
+        host.context(),
+        crate::usage_cadence::QuotaIntent::Asked,
+    ))
+    .expect("quota");
+    let five = windows
+        .iter()
+        .find(|window| window.name() == "5 hours")
+        .expect("unstarted after a stale reading");
+    assert_eq!(five.used(), 0);
+}
+
+#[test]
+fn d237_save_reading_reports_a_failure() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    let id = account_id_from(&["claude", UUID]);
+    store(&host, &id, &signed_in_blob());
+    let account_dir = crate::account::account_dir(host.context(), &id).expect("dir");
+    std::fs::create_dir_all(&account_dir).expect("account");
+    std::fs::create_dir(account_dir.join(crate::limits::READING_FILE)).expect("blocker");
+    host.process()
+        .script_piped(PipedScript::new().exits(|_| vec!["Current session: 5% used\n".to_owned()]));
+    let err = block_on(sub.quota(&id, host.context())).expect_err("save");
+    assert_eq!(err.kind(), PluginErrorKind::Io);
+    assert_eq!(err.message(), "cannot store the Claude usage reading");
+    assert!(!err.message().contains("at-1"));
+    assert!(!err.message().contains("rt-1"));
+}

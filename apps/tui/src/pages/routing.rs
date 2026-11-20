@@ -19,8 +19,15 @@ use crate::ui::list_window;
 
 const REVISION_LEN: usize = 64;
 const ROUTINGS: &[&str] = &[
-    "smart", "order", "rotate", "usage", "pace", "weight", "free", "fast", "cheap", "drain",
+    "smart", "order", "rotate", "usage", "pace", "weight", "free", "fast", "cheap", "drain", "fit",
 ];
+
+fn routing_label(name: &str) -> &str {
+    match name {
+        "fit" => "small context first",
+        other => other,
+    }
+}
 const STAYS: &[&str] = &["auto", "session", "turn", "off", "strict"];
 const EFFORTS: &[&str] = &["", "low", "medium", "high", "xhigh", "max"];
 const RULE_HINT: &str = "use=<model> tokens=200k images effort=high agents=<id> intent=\"a quick question\" · the daemon parses the line";
@@ -969,7 +976,7 @@ impl RoutingPage {
                         group.members.len(),
                         plural(group.members.len())
                     ),
-                    group.routing.clone(),
+                    routing_label(&group.routing).to_owned(),
                 ];
                 if group.stays != "auto" && !group.stays.is_empty() {
                     notes.push(format!("stays {}", group.stays));
@@ -1022,7 +1029,7 @@ impl RoutingPage {
         };
         let mut head = vec![
             format!("group/{}", group.id),
-            group.routing.clone(),
+            routing_label(&group.routing).to_owned(),
             format!("stays {}", group.stays),
         ];
         if let Some(context) = group.context {
@@ -1470,8 +1477,15 @@ mod tests {
     #[test]
     fn routing_cycle_skips_unsupported_names() {
         assert_eq!(next_name(super::ROUTINGS, "smart"), "order");
-        assert_eq!(next_name(super::ROUTINGS, "drain"), "smart");
         assert_eq!(next_name(super::ROUTINGS, "manual"), "smart");
+    }
+
+    #[test]
+    fn d239_fit_follows_drain_and_is_labelled() {
+        assert_eq!(next_name(super::ROUTINGS, "drain"), "fit");
+        assert_eq!(next_name(super::ROUTINGS, "fit"), "smart");
+        assert_eq!(super::routing_label("fit"), "small context first");
+        assert_eq!(super::routing_label("cheap"), "cheap");
     }
 
     #[test]
