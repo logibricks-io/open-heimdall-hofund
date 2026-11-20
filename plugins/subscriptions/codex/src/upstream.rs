@@ -39,6 +39,12 @@ pub(crate) struct CodexUpstream {
     endpoints: Arc<Endpoints>,
     prompts: Arc<Prompts>,
     versions: Arc<ClientVersion>,
+    /// Headers the last [`Self::target`] put on the routed call.
+    ///
+    /// `Target` marks those values sensitive, so the recording client keeps
+    /// only the names. Tests read this copy.
+    #[cfg(test)]
+    signed: Mutex<Vec<(String, String)>>,
 }
 
 impl CodexUpstream {
@@ -55,7 +61,18 @@ impl CodexUpstream {
             endpoints,
             prompts,
             versions,
+            #[cfg(test)]
+            signed: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Headers the last routed call was signed with.
+    #[cfg(test)]
+    pub(crate) fn signed_headers(&self) -> Vec<(String, String)> {
+        self.signed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// The instructions Codex CLI sends `model` with: kept from a model
@@ -179,10 +196,18 @@ impl CodexUpstream {
         let posted_capture = Arc::clone(&posted);
         let trimmed_body = Arc::clone(&trimmed);
         let codex = codex.map(str::to_owned);
+        let signed = headers(access.account.as_deref(), &self.versions.current());
+        #[cfg(test)]
+        {
+            *self
+                .signed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = signed.clone();
+        }
         let mut target = Target::new(ProtocolId::OPENAI_RESPONSES, self.endpoints.base.clone())
             .credential(CredentialStyle::Bearer)
             .chatgpt_codex_zstd(true)
-            .headers(headers(access.account.as_deref(), &self.versions.current()))
+            .headers(signed)
             .rewrite(Arc::new(move |body| {
                 if let Some(raw) = trimmed_body
                     .lock()

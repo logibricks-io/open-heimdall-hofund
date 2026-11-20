@@ -205,7 +205,7 @@ fn device_post(url: String, body: Value, version: &str) -> Call {
         .header("accept", "application/json")
         .header("originator", "codex_cli_rs")
         .header("version", version)
-        .sensitive_header(
+        .header(
             "user-agent",
             upstream::user_agent(std::env::consts::OS, std::env::consts::ARCH, version),
         )

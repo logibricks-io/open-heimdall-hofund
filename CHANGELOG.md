@@ -11,7 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - D-231: ChatGPT model-list asks, the `version` header, the User-Agent, and
   device sign-in name the newest plain `x.y.z` among a `0.169.1` floor, npm's
-  latest `@openai/codex` release (read at most every six hours), and a newer
+  latest `@openai/codex` release (read at most every six hours on the host
+  monotonic clock), and a newer
   Codex client already seen on a routed request. A model list asked at an
   older client version is fetched again. Refs the reference.
 

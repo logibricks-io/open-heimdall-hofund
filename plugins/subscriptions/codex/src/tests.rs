@@ -1445,10 +1445,7 @@ fn missing_prompt_asks_the_model_list_once() {
     let calls = host.http().calls();
     assert_eq!(
         calls[0].uri(),
-        format!(
-            "{BASE}/models?client_version={}",
-            version::CODEX_VERSION_FLOOR
-        )
+        format!("{BASE}/models?client_version=0.169.1")
     );
     assert!(
         calls[0]
@@ -1899,7 +1896,13 @@ fn d58_1_device_sign_in_polls_then_trades_the_callback_code() {
         start.uri(),
         "https://auth.test/api/accounts/deviceauth/usercode"
     );
-    assert_eq!(start.sensitive_headers(), ["user-agent".to_owned()]);
+    assert!(start.sensitive_headers().is_empty());
+    assert_eq!(start.header("version"), Some("0.169.1"));
+    assert!(
+        start
+            .header("user-agent")
+            .is_some_and(|agent| agent.starts_with("codex_cli_rs/0.169.1 ("))
+    );
 
     host.http().enqueue_response(403, &[], device_forbidden());
     host.http().enqueue_response(403, &[], device_forbidden());
@@ -2417,13 +2420,86 @@ fn headers_user_agent_model_list_and_device_sign_in_carry_the_effective_version(
         .into_iter()
         .find(|call| call.uri().ends_with("/deviceauth/usercode"))
         .expect("user code");
+    let agent = upstream::user_agent(std::env::consts::OS, std::env::consts::ARCH, version);
     assert_eq!(start.header("version"), Some(version));
+    assert_eq!(start.header("user-agent"), Some(agent.as_str()));
+    assert!(agent.starts_with(&format!("codex_cli_rs/{version} (")));
+}
+
+fn signed_value<'a>(pairs: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    pairs
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
+fn assert_responses_signed(upstream: &CodexUpstream, host: &TestHost) {
+    let version = "0.200.0";
+    let calls = host.http().calls();
+    let sent = calls
+        .iter()
+        .find(|call| call.uri().ends_with("/responses"))
+        .expect("routed responses call");
     assert!(
-        start
-            .sensitive_headers()
+        sent.sensitive_headers()
+            .iter()
+            .any(|name| name == "version")
+    );
+    assert!(
+        sent.sensitive_headers()
             .iter()
             .any(|name| name == "user-agent")
     );
+    let pairs = upstream.signed_headers();
+    assert_eq!(signed_value(&pairs, "version"), Some(version));
+    assert!(
+        signed_value(&pairs, "User-Agent")
+            .is_some_and(|agent| agent.starts_with(&format!("codex_cli_rs/{version} (")))
+    );
+}
+
+#[test]
+fn routed_responses_carry_a_seen_client_version() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    let upstream = upstream_for(&host, &id);
+    host.http()
+        .enqueue(b"event: response.completed\ndata: {}\n\n".to_vec());
+    let mut request = streaming_request();
+    request.extensions.insert(
+        version::CLIENT_HEADERS,
+        json!({
+            "originator": "codex_cli_rs",
+            "version": "0.200.0",
+            "user-agent": "codex_cli_rs/0.200.0 (Linux; x86_64) unknown",
+        }),
+    );
+    block_on(upstream.execute(request, ProtocolId::OPENAI_RESPONSES)).expect("execute");
+    assert_responses_signed(&upstream, &host);
+}
+
+#[test]
+fn routed_responses_carry_an_npm_release() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    let mut endpoints = endpoints();
+    let npm = "https://npm.test/@openai/codex/latest";
+    endpoints.npm_latest = Some(npm.to_owned());
+    let upstream = CodexUpstream::new(
+        id,
+        host.context().clone(),
+        Arc::new(endpoints),
+        Arc::default(),
+        Arc::default(),
+    );
+    host.http().enqueue(br#"{"version":"0.200.0"}"#.to_vec());
+    host.http()
+        .enqueue(b"event: response.completed\ndata: {}\n\n".to_vec());
+    block_on(upstream.execute(streaming_request(), ProtocolId::OPENAI_RESPONSES)).expect("execute");
+    assert_eq!(host.http().calls()[0].uri(), npm);
+    assert_responses_signed(&upstream, &host);
 }
 
 #[test]

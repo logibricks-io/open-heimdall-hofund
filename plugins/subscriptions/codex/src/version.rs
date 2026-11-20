@@ -3,8 +3,9 @@
 //! The effective version is the newest plain `x.y.z` among a fixed floor,
 //! npm's latest `@openai/codex` release, and a Codex client already seen on
 //! a routed request. The npm document is read lazily, at most once every
-//! six hours, with a short timeout, through the host HTTP client. A failed
-//! or non-release read keeps the last good value, or the floor when none
+//! six hours on the host monotonic clock, with a short timeout, through the
+//! host HTTP client. A failed or non-release read keeps the last good value,
+//! or the floor when none
 //! is stored. Tests leave [`crate::Endpoints::npm_latest`] empty, so they
 //! do not call the registry.
 //!
@@ -12,7 +13,7 @@
 //! version, so an installed CLI is not a source.
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use hofund_plugin_api::{HostContext, Request};
 use hofund_plugin_sdk::Call;
@@ -39,7 +40,7 @@ const BODY_CAP: usize = 4 << 20;
 #[derive(Default)]
 struct State {
     published: String,
-    asked_at: Option<SystemTime>,
+    asked_at: Option<Duration>,
     asking: bool,
     seen: String,
 }
@@ -87,7 +88,7 @@ impl ClientVersion {
         let Some(url) = npm.map(str::trim).filter(|url| !url.is_empty()) else {
             return;
         };
-        let now = host.clock().now();
+        let now = host.clock().monotonic();
         {
             let mut guard = self.lock();
             if guard.asking || fresh(&guard, now) {
@@ -105,7 +106,7 @@ impl ClientVersion {
             if let Some(version) = found {
                 guard.published = version;
             }
-            guard.asked_at = Some(host.clock().now());
+            guard.asked_at = Some(host.clock().monotonic());
             guard.asking = false;
         }
         hold.armed = false;
@@ -120,29 +121,11 @@ impl ClientVersion {
         else {
             return;
         };
-        if let Some(client_version) = field(map, "client_version") {
-            self.note_release(client_version);
-        }
-        if let Some(query) = field(map, "query") {
-            self.note_query(query);
-        }
         self.note_headers(
             field(map, "originator").unwrap_or(""),
             field(map, "user-agent").unwrap_or(""),
             field(map, "version").unwrap_or(""),
         );
-    }
-
-    /// Notes `client_version` from a query string already observed.
-    pub(crate) fn note_query(&self, query: &str) {
-        for pair in query.split('&') {
-            let Some((key, value)) = pair.split_once('=') else {
-                continue;
-            };
-            if key == "client_version" {
-                self.note_release(value.trim());
-            }
-        }
     }
 
     /// Notes the version header, or else the User-Agent, of one Codex client.
@@ -207,10 +190,12 @@ fn pick(left: &str, right: &str) -> String {
     }
 }
 
-fn fresh(state: &State, now: SystemTime) -> bool {
+fn fresh(state: &State, now: Duration) -> bool {
+    // A reading behind `asked_at` is not fresh: the interval is monotonic, and
+    // a step backwards must not stretch the six hours.
     state
         .asked_at
-        .is_some_and(|at| now.duration_since(at).unwrap_or(Duration::ZERO) < PUBLISHED_EVERY)
+        .is_some_and(|at| now >= at && now.saturating_sub(at) < PUBLISHED_EVERY)
 }
 
 fn field<'a>(map: &'a json::Map<String, Value>, name: &str) -> Option<&'a str> {
@@ -276,7 +261,7 @@ fn parse_published(body: &[u8]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::Duration;
 
     use hofund_kit_subscription::{TestHost, block_on};
     use hofund_plugin_api::{PluginId, PluginKind, Request};
@@ -286,13 +271,13 @@ mod tests {
 
     const NPM: &str = "https://npm.test/@openai/codex/latest";
 
-    fn host_at(now: SystemTime) -> (tempfile::TempDir, TestHost) {
+    fn host_at(monotonic: Duration) -> (tempfile::TempDir, TestHost) {
         let dir = tempfile::tempdir().expect("dir");
-        let host = TestHost::open_for_at(
+        let host = TestHost::open_for_with_monotonic(
             PluginKind::Subscription,
             PluginId::from_static("codex"),
             dir.path(),
-            now,
+            monotonic,
         );
         (dir, host)
     }
@@ -304,7 +289,7 @@ mod tests {
     #[test]
     fn floor_wins_when_no_other_source_is_set() {
         let versions = ClientVersion::default();
-        let (_dir, host) = host_at(UNIX_EPOCH);
+        let (_dir, host) = host_at(Duration::ZERO);
         block_on(versions.refresh(host.context(), None));
         assert_eq!(versions.current(), CODEX_VERSION_FLOOR);
         assert!(
@@ -316,7 +301,7 @@ mod tests {
     #[test]
     fn npm_release_newer_than_the_floor_wins() {
         let versions = ClientVersion::default();
-        let (_dir, host) = host_at(UNIX_EPOCH);
+        let (_dir, host) = host_at(Duration::ZERO);
         host.http().enqueue(npm_body("9.1.0"));
         block_on(versions.refresh(host.context(), Some(NPM)));
         assert_eq!(versions.current(), "9.1.0");
@@ -326,7 +311,7 @@ mod tests {
     #[test]
     fn npm_release_older_than_the_floor_keeps_the_floor() {
         let versions = ClientVersion::default();
-        let (_dir, host) = host_at(UNIX_EPOCH);
+        let (_dir, host) = host_at(Duration::ZERO);
         host.http().enqueue(npm_body("0.100.0"));
         block_on(versions.refresh(host.context(), Some(NPM)));
         assert_eq!(versions.current(), CODEX_VERSION_FLOOR);
@@ -334,7 +319,7 @@ mod tests {
 
     #[test]
     fn prerelease_npm_versions_are_ignored() {
-        let base = UNIX_EPOCH + Duration::from_secs(10_000);
+        let base = Duration::from_secs(10_000);
         for suffix in ["9.2.0-alpha.3", "9.2.0-beta.1", "9.2.0-rc.1", "v9.2.0"] {
             let versions = ClientVersion::default();
             let (_dir, host) = host_at(base);
@@ -349,7 +334,7 @@ mod tests {
     #[test]
     fn failed_npm_read_keeps_the_last_good_release() {
         let versions = ClientVersion::default();
-        let base = UNIX_EPOCH + Duration::from_secs(10_000);
+        let base = Duration::from_secs(10_000);
         let (_early_dir, early) = host_at(base);
         early.http().enqueue(npm_body("9.1.0"));
         block_on(versions.refresh(early.context(), Some(NPM)));
@@ -370,7 +355,7 @@ mod tests {
     #[test]
     fn npm_is_read_at_most_once_every_six_hours() {
         let versions = ClientVersion::default();
-        let base = UNIX_EPOCH + Duration::from_secs(10_000);
+        let base = Duration::from_secs(10_000);
         let (_early_dir, early) = host_at(base);
         early.http().enqueue(npm_body("9.1.0"));
         block_on(versions.refresh(early.context(), Some(NPM)));
@@ -397,7 +382,7 @@ mod tests {
     #[test]
     fn a_newer_codex_client_wins_over_the_floor_and_npm() {
         let versions = ClientVersion::default();
-        let (_dir, host) = host_at(UNIX_EPOCH);
+        let (_dir, host) = host_at(Duration::ZERO);
         host.http().enqueue(npm_body("0.170.0"));
         block_on(versions.refresh(host.context(), Some(NPM)));
         assert_eq!(versions.current(), "0.170.0");
@@ -431,13 +416,6 @@ mod tests {
         );
         assert_eq!(versions.current(), "0.200.0");
 
-        versions.note_query("flag&client_version=0.210.0");
-        assert_eq!(versions.current(), "0.210.0");
-        versions.note_query("client_version=0.150.0");
-        assert_eq!(versions.current(), "0.210.0");
-        versions.note_query("client_version=0.210.0-rc.1");
-        assert_eq!(versions.current(), "0.210.0");
-
         let mut request = Request::new("gpt-5");
         request.extensions.insert(
             CLIENT_HEADERS,
@@ -449,16 +427,29 @@ mod tests {
         );
         versions.note_request(&request);
         assert_eq!(versions.current(), "0.220.0");
+    }
 
-        let mut queried = Request::new("gpt-5");
-        queried.extensions.insert(
-            CLIENT_HEADERS,
-            json!({
-                "originator": "codex_cli_rs",
-                "query": "client_version=0.230.0",
-            }),
+    #[test]
+    fn floor_is_0_169_1_and_covers_gpt_6_2() {
+        assert_eq!(CODEX_VERSION_FLOOR, "0.169.1");
+        assert!(
+            !is_newer("0.166.0", CODEX_VERSION_FLOOR),
+            "the floor must not be older than GPT-6.2's minimal client version"
         );
-        versions.note_request(&queried);
-        assert_eq!(versions.current(), "0.230.0");
+    }
+
+    #[test]
+    fn a_backwards_monotonic_clock_reads_npm_again() {
+        let versions = ClientVersion::default();
+        let (_early_dir, early) = host_at(Duration::from_secs(6 * 60 * 60));
+        early.http().enqueue(npm_body("9.1.0"));
+        block_on(versions.refresh(early.context(), Some(NPM)));
+        assert_eq!(versions.current(), "9.1.0");
+
+        let (_back_dir, back) = host_at(Duration::from_secs(1));
+        back.http().enqueue(npm_body("9.4.0"));
+        block_on(versions.refresh(back.context(), Some(NPM)));
+        assert_eq!(back.http().calls().len(), 1);
+        assert_eq!(versions.current(), "9.4.0");
     }
 }
