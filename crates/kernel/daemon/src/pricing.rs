@@ -17,6 +17,14 @@ pub(crate) fn effective_pricer(
 ) -> EffectivePricer {
     EffectivePricer::new(settings, catalog, Arc::new(ModelsList { models }))
         .with_doubled_one_hour_models(DOUBLED_ONE_HOUR.iter().map(|id| (*id).to_owned()).collect())
+        .with_id_aliases(role_aliases())
+}
+
+fn role_aliases() -> Vec<(String, String)> {
+    hofund_plugin_sdk::orchestrator_price_ids()
+        .iter()
+        .map(|(from, to)| ((*from).to_owned(), (*to).to_owned()))
+        .collect()
 }
 
 struct ModelsList {
@@ -35,5 +43,34 @@ impl ListPriceLookup for ModelsList {
             cache_write: 0.0,
             cache_write_1h: 0.0,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn d222_orchestrator_aliases_are_the_named_models() {
+        let aliases = super::role_aliases();
+        assert!(
+            aliases
+                .iter()
+                .any(|(from, to)| { from == "gemini-pro-orchestrator" && to == "gemini-4-carbon" })
+        );
+        assert!(aliases.iter().any(|(from, to)| {
+            from == "gemini-pro-orchestrator-carbon" && to == "gemini-4-carbon"
+        }));
+        assert!(aliases.iter().any(|(from, to)| {
+            from == "gemini-pro-orchestrator-argon" && to == "gemini-4-argon"
+        }));
+        assert!(
+            aliases.iter().any(|(from, to)| {
+                from == "gemini-flash-worker-agy" && to == "gemini-4-hydrogen"
+            })
+        );
+        assert!(
+            aliases
+                .iter()
+                .all(|(from, _)| *from != "gemini-pro-orchestrator-neon")
+        );
     }
 }

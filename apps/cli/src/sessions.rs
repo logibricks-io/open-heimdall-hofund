@@ -613,11 +613,17 @@ fn pricing(config: &Path) -> Option<EffectivePricer> {
     let data_root = config_dir(config).join(".hofund");
     let fetcher = Arc::new(ReqwestFetcher::new().ok()?);
     let catalog = ModelCatalog::open(&data_root, settings.catalog, fetcher).ok()?;
-    Some(EffectivePricer::new(
-        settings.usage,
-        catalog,
-        Arc::new(NoListPrices),
-    ))
+    Some(
+        EffectivePricer::new(settings.usage, catalog, Arc::new(NoListPrices))
+            .with_id_aliases(role_aliases()),
+    )
+}
+
+fn role_aliases() -> Vec<(String, String)> {
+    hofund_plugin_sdk::orchestrator_price_ids()
+        .iter()
+        .map(|(from, to)| ((*from).to_owned(), (*to).to_owned()))
+        .collect()
 }
 
 fn price_record(record: &mut SessionRecord, pricing: Option<&EffectivePricer>) {
@@ -703,6 +709,31 @@ mod tests {
         let out = stats(&[record], &options, 0, Local::now(), Some(&pricing)).expect("stats");
         let value: Value = serde_json::from_str(&out).expect("JSON");
         assert_eq!(value["cost"], 0.00001);
+    }
+
+    #[test]
+    fn d222_sessions_price_an_orchestrator_role_as_the_named_model() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path().join("hofund.toml");
+        std::fs::write(
+            &config,
+            "[usage.prices.\"*/gemini-4-carbon\"]\ninput = 1.0\noutput = 1.0\ncache_read = 1.0\ncache_write = 1.0\n",
+        )
+        .expect("config");
+        let pricing = pricing(&config).expect("pricing");
+        let mut record = SessionRecord::new("fake", "fake:role", "unused.jsonl");
+        record.add_usage("gemini-pro-orchestrator", SessionTokens::new(4, 3, 2, 1));
+        price_record(&mut record, Some(&pricing));
+        assert!((record.cost - 0.00001).abs() < f64::EPSILON);
+        assert_eq!(record.unpriced, 0);
+        let mut near = SessionRecord::new("fake", "fake:near", "unused.jsonl");
+        near.add_usage(
+            "gemini-pro-orchestrator-neon",
+            SessionTokens::new(4, 3, 2, 1),
+        );
+        price_record(&mut near, Some(&pricing));
+        assert_eq!(near.cost, 0.0);
+        assert_eq!(near.unpriced, 1);
     }
 
     #[test]

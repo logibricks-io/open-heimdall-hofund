@@ -282,7 +282,7 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-plugin-plan-quota` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-upstream` (tests) |
 | `hofund-plugin-relay` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-upstream` (tests) |
 | `hofund-plugin-retrieval` | `hofund-plugin-api`, `hofund-plugin-sdk` |
-| `hofund-plugin-registry` | `hofund-plugin-api`, `hofund-plugin-agent-claude`, `hofund-plugin-agent-codex`, `hofund-plugin-agent-gemini`, `hofund-plugin-agent-omp`, `hofund-plugin-agent-opencode`, `hofund-plugin-agent-pi`, `hofund-plugin-sdk`, `hofund-plugin-codex-catalog`, `hofund-plugin-echo`, `hofund-plugin-muse`, `hofund-plugin-ollama`, `hofund-plugin-plan-quota`, `hofund-plugin-relay`, `hofund-plugin-retrieval`, `hofund-plugin-subscription-antigravity`, `hofund-plugin-subscription-claude`, `hofund-plugin-subscription-chatgpt-api`, `hofund-plugin-subscription-cline`, `hofund-plugin-subscription-codex`, `hofund-plugin-subscription-copilot`, `hofund-plugin-subscription-cursor`, `hofund-plugin-subscription-devin`, `hofund-plugin-subscription-factory`, `hofund-plugin-subscription-gemini`, `hofund-plugin-subscription-grok`, `hofund-plugin-subscription-kiro`, `hofund-plugin-subscription-qoder`, `hofund-plugin-subscription-workbuddy`, `hofund-plugin-subscription-zed`, `hofund-plugin-subscription-zcode`, `hofund-provider`, `hofund-quirks`, `hofund-agent` (tests), `hofund-kit-upstream` (tests), `hofund-kit-agent` (tests), `hofund-kit-subscription` (tests) |
+| `hofund-plugin-registry` | `hofund-plugin-api`, `hofund-plugin-agent-claude`, `hofund-plugin-agent-codex`, `hofund-plugin-agent-gemini`, `hofund-plugin-agent-omp`, `hofund-plugin-agent-opencode`, `hofund-plugin-agent-pi`, `hofund-plugin-sdk`, `hofund-plugin-codex-catalog`, `hofund-plugin-echo`, `hofund-plugin-muse`, `hofund-plugin-ollama`, `hofund-plugin-plan-quota`, `hofund-plugin-relay`, `hofund-plugin-retrieval`, `hofund-plugin-subscription-agy-cli`, `hofund-plugin-subscription-antigravity`, `hofund-plugin-subscription-claude`, `hofund-plugin-subscription-chatgpt-api`, `hofund-plugin-subscription-cline`, `hofund-plugin-subscription-codex`, `hofund-plugin-subscription-copilot`, `hofund-plugin-subscription-cursor`, `hofund-plugin-subscription-devin`, `hofund-plugin-subscription-factory`, `hofund-plugin-subscription-gemini`, `hofund-plugin-subscription-grok`, `hofund-plugin-subscription-kiro`, `hofund-plugin-subscription-qoder`, `hofund-plugin-subscription-workbuddy`, `hofund-plugin-subscription-zed`, `hofund-plugin-subscription-zcode`, `hofund-provider`, `hofund-quirks`, `hofund-agent` (tests), `hofund-kit-upstream` (tests), `hofund-kit-agent` (tests), `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-devin` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-factory` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-kiro` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
@@ -296,6 +296,7 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-plugin-subscription-codex` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-copilot` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-cursor` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
+| `hofund-plugin-subscription-agy-cli` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-antigravity` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-gemini` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
 | `hofund-plugin-subscription-grok` | `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-kit-subscription` (tests) |
@@ -316,7 +317,7 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-agent` | `hofund-config`, `hofund-plugin-api` |
 | `hofund-daemon` | `hofund-codec`, `hofund-config`, `hofund-control-proto`, `hofund-gateway`, `hofund-model-catalog`, `hofund-plugin-api`, `hofund-plugin-host`, `hofund-plugin-registry` (tests also enable `test-fixtures`), `hofund-plugin-sdk`, `hofund-provider`, `hofund-quirks`, `hofund-router`, `hofund-secrets`, `hofund-usage`, `hofund-agent`, `hofund-control-client` (tests; dev `hofund-agent` enables `test-fixtures`, dev `hofund-plugin-agent-pi` and `hofund-plugin-agent-omp` for offline session resume and carry route tests, dev `hofund-plugin-subscription-antigravity` for the setup-token import test, dev `hofund-plugin-subscription-chatgpt-api` for the service-tier attempt base) |
 | `hofund-daemon-bin` | `hofund-daemon`, `hofund-plugin-api`, `hofund-plugin-registry`, `hofund-bridge-mcp` |
-| `hofund-cli` | `hofund-config`, `hofund-control-client`, `hofund-model-catalog`, `hofund-plugin-agent-agy`, `hofund-plugin-agent-alma`, `hofund-plugin-agent-cindy`, `hofund-plugin-agent-claude`, `hofund-plugin-agent-cline`, `hofund-plugin-agent-codex`, `hofund-plugin-agent-cursor`, `hofund-plugin-agent-droid`, `hofund-plugin-agent-dsh`, `hofund-plugin-agent-gemini`, `hofund-plugin-agent-grok`, `hofund-plugin-agent-hermes`, `hofund-plugin-agent-kimi`, `hofund-plugin-agent-minimax-code`, `hofund-plugin-agent-omp`, `hofund-plugin-agent-opencode`, `hofund-plugin-agent-pi`, `hofund-plugin-agent-qoder`, `hofund-plugin-agent-raft`, `hofund-plugin-agent-workbuddy`, `hofund-plugin-agent-zcode`, `hofund-plugin-api`, `hofund-secrets`, `hofund-sessions`, `hofund-usage`, `hofund-bridge-mcp` |
+| `hofund-cli` | `hofund-config`, `hofund-control-client`, `hofund-model-catalog`, `hofund-plugin-agent-agy`, `hofund-plugin-agent-alma`, `hofund-plugin-agent-cindy`, `hofund-plugin-agent-claude`, `hofund-plugin-agent-cline`, `hofund-plugin-agent-codex`, `hofund-plugin-agent-cursor`, `hofund-plugin-agent-droid`, `hofund-plugin-agent-dsh`, `hofund-plugin-agent-gemini`, `hofund-plugin-agent-grok`, `hofund-plugin-agent-hermes`, `hofund-plugin-agent-kimi`, `hofund-plugin-agent-minimax-code`, `hofund-plugin-agent-omp`, `hofund-plugin-agent-opencode`, `hofund-plugin-agent-pi`, `hofund-plugin-agent-qoder`, `hofund-plugin-agent-raft`, `hofund-plugin-agent-workbuddy`, `hofund-plugin-agent-zcode`, `hofund-plugin-api`, `hofund-plugin-sdk`, `hofund-secrets`, `hofund-sessions`, `hofund-usage`, `hofund-bridge-mcp` |
 | `hofund-tui` | `hofund-config`, `hofund-control-client`, `hofund-control-proto`, `hofund-secrets` |
 | `hofund-desktop` | `hofund-daemon`, `hofund-agent` |
 | `xtask` | — |
@@ -389,6 +390,7 @@ The `control-client` and gateway `control-proto` edges landed in L3; the
 | `plugin-subscription-codex` | ChatGPT (Codex) subscription: browser sign-in, token refresh, and the Responses upstream. |
 | `plugin-subscription-claude` | Claude Code subscription: sign-in and refresh by running the `claude` command line in a private config directory. |
 | `plugin-subscription-copilot` | GitHub Copilot subscription, on github.com or a `<name>.ghe.com` enterprise host: device sign-in, session tokens, quota, the account model list, and per-model Chat Completions, Responses and Messages routing. |
+| `plugin-subscription-agy-cli` | Antigravity through the user's own `agy` CLI. Each account has its own home. Saved Antigravity accounts move in through `import_accounts`, carrying a proxy the user already set. Quota and verification replies rest through vendor-neutral flags. hofund does not download the CLI; set `command` to its absolute path. |
 | `plugin-subscription-antigravity` | Google Antigravity subscription: browser sign-in, Code Assist project setup, token refresh, account-pooled models, quota, and the daily request upstream. New sign-in, import, and discovered-account add are refused. Saved accounts keep working and clients show a risk line. Gemini CLI is unchanged. The installed-app OAuth client is not shipped; set `client_id` / `client_secret` on the plugin or `HOFUND_ANTIGRAVITY_CLIENT_ID` / `HOFUND_ANTIGRAVITY_CLIENT_SECRET`. |
 | `plugin-subscription-gemini` | Gemini CLI (Code Assist) subscription: browser sign-in, Code Assist project setup, and token refresh. |
 | `plugin-subscription-grok` | Grok Build subscription: CLI device sign-in, auth.json import, CLI token renewal, Responses upstream, and allowance quota. |
@@ -459,8 +461,10 @@ Other subscription accounts stay at 30 minutes. Named credit resets cap at 35
 days, generic/rate/quota header hints cap at one hour, and passive window resets
 cap at eight days. New events never shorten a longer active rest. A vendor-restricted account,
 signaled by a plugin flag rather than by words in the router, rests the whole
-member for two hours and does not climb a ladder. The group still asks the
-next member, including that provider's other accounts. A 400 carries that
+member for two hours and does not climb a ladder. Unserved-model wording does
+not narrow that rest, and a background model-list probe neither arms nor lifts
+it. The group still asks the next member, including that provider's other
+accounts. A 400 carries that
 flag only when the plugin that knows the account set it. The same sentences
 from any other host are a separate ordinary-failure mark: the group moves on
 and the member takes the generic failure rest.
@@ -517,7 +521,9 @@ the next member is asked. The order is fixed:
    sentences itself.
 4. A response-protection refusal skips every member of the same provider, and
    a request-shape refusal asks the next member, whatever the status list
-   says. Neither rests the member, nor does a refusal of the prompt.
+   says. Neither rests the member, nor does a refusal of the prompt. A
+   plugin-marked account restriction does not skip the provider, even when
+   the text also matches the protection words.
 5. A 400, 413, 422, or 5xx with no clear cause, on a member whose known window
    is below the estimated input times 1.2, is told to the client as a prompt
    too long, and the overflow rule above applies.

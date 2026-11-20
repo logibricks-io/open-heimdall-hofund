@@ -220,8 +220,15 @@ pub(crate) fn outgrown(error: &PluginError) -> bool {
 
 /// Whether `error` says the vendor refuses the request's content on every
 /// account of its provider, so none of them is asked it again
-/// (`reference: internal/gateway/fallback.go:1425`).
+/// (`reference: internal/gateway/fallback.go:1425`). A plugin-marked account
+/// restriction does not: that provider's other accounts are still asked.
 pub(crate) fn skips_provider(error: &PluginError) -> bool {
+    // The plugin already decided this account was restricted. Other accounts
+    // of the provider are still asked, even when the text also matches the
+    // protection words. The router does not match the sentences.
+    if error.is_account_restricted() {
+        return false;
+    }
     error
         .status()
         .is_some_and(|status| status >= 400 && PROTECTION_WORDS.is_match(error.message()))

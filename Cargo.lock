@@ -2191,6 +2191,7 @@ dependencies = [
  "hofund-plugin-agent-workbuddy",
  "hofund-plugin-agent-zcode",
  "hofund-plugin-api",
+ "hofund-plugin-sdk",
  "hofund-secrets",
  "hofund-sessions",
  "hofund-usage",
@@ -2802,6 +2803,7 @@ dependencies = [
  "hofund-plugin-remote-gateway",
  "hofund-plugin-retrieval",
  "hofund-plugin-sdk",
+ "hofund-plugin-subscription-agy-cli",
  "hofund-plugin-subscription-antigravity",
  "hofund-plugin-subscription-chatgpt-api",
  "hofund-plugin-subscription-claude",
@@ -2893,6 +2895,16 @@ dependencies = [
  "url",
  "webp",
  "zstd",
+]
+
+[[package]]
+name = "hofund-plugin-subscription-agy-cli"
+version = "0.2.0-rc.2"
+dependencies = [
+ "hofund-kit-subscription",
+ "hofund-plugin-api",
+ "hofund-plugin-sdk",
+ "tempfile",
 ]
 
 [[package]]

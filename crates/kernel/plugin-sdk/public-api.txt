@@ -93,6 +93,9 @@ futures::empty
 futures::unfold
 gemini_models
 gemini_models_with_dropped
+google_rest::fn asks_for_verification (message : & str) -> bool
+google_rest::fn is_model_pool_quota (message : & str) -> bool
+google_rest::fn note_google_sign_in (error : PluginError) -> PluginError
 gzip
 image::ClaudeImage derives(Clone, Debug, PartialEq, Eq)
 image::ClaudeImage.data
@@ -135,6 +138,7 @@ mod daily_warmup
 mod digest
 mod enc_v1
 mod futures
+mod google_rest
 mod image
 mod inflate
 mod jwt
@@ -146,6 +150,7 @@ mod probe
 mod process
 mod protobuf
 mod register
+mod role_price
 mod rsa
 mod sigv4
 mod time
@@ -161,6 +166,7 @@ netproxy::is_socks
 netproxy::parse_proxy
 next_cursor
 next_ready
+note_google_sign_in
 oauth::AccessToken
 oauth::AccessToken::const fn expires_in (& self) -> Duration
 oauth::AccessToken::fn expose_secret (& self) -> & str
@@ -197,6 +203,7 @@ oauth::secret_text
 oauth::token_error
 oauth::unverified_claims
 opened_url::fn took_opened_url (args : & [impl AsRef < str >]) -> bool
+orchestrator_price_ids
 page::PageError derives(Clone, Copy, Debug, PartialEq, Eq)
 page::PageError::const fn kind (& self) -> PageErrorKind
 page::PageErrorKind #[non_exhaustive] derives(Clone, Copy, Debug, PartialEq, Eq)
@@ -273,6 +280,7 @@ register::Contribution::fn surface (mut self , surface : impl InboundSurface) ->
 register::Contribution::fn surfaces (& self) -> & [Arc < dyn InboundSurface >]
 register::Contribution::fn upstream (mut self , factory : impl DynUpstreamFactory) -> Self
 register::Contribution::fn upstreams (& self) -> & [Arc < dyn DynUpstreamFactory >]
+role_price::fn orchestrator_price_ids () -> & 'static [(& 'static str , & 'static str)]
 rsa::PrivateKey
 rsa::PrivateKey::fn decrypt (& self , encoded : & str) -> Result < SecretString , PluginError >
 rsa::PrivateKey::fn generate () -> Result < Self , PluginError >
