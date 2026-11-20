@@ -450,7 +450,7 @@ Remaining verification is live-account acceptance; all evidence here is determin
 | n | error classification | 429 “turned away” prompts (`codeassist.go:51-66`) | `upstream.rs` distinguishes prompt refusal from real quota and returns a non-cooling 400 with the reference hint | Done | — |
 | o | check-in / warmup | N/A | N/A | N/A | — |
 | p | agent sign-in | Antigravity desktop agent separate | Desktop `agent.toml` only; no subscription sign-in switch | Missing | No safe reference writer; switching remains out of scope |
-| q | extras | Ban-risk warning in UI; version manifest URL (`google.go:68`) | D-221 refuses new sign-in, import, and add. Saved accounts keep working and show a risk line that points at the agy CLI route. Gemini CLI is unchanged. `version.rs` fetches the manifest through `host.http()` with a six-hour cache, `2.9.1` cold fallback, and `r49e_*` offline fixtures | Done | — |
+| q | extras | Ban-risk warning in UI; version manifest URL (`google.go:68`) | D-221 lets a stored account id be signed in or imported again, including after the sign-in lapses, and refuses a new account id before Code Assist setup. Import of a different refresh token requires userinfo to confirm that stored id. The risk line shows whenever the plugin is configured and points at the agy CLI route. Gemini CLI is unchanged. `version.rs` fetches the manifest through `host.http()` with a six-hour cache, `2.9.1` cold fallback, and `r49e_*` offline fixtures | Done | — |
 
 **Gaps**
 

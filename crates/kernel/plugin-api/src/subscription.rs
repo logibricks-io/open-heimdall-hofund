@@ -18,8 +18,10 @@ use crate::records::{
 /// Whether new accounts may be created for a subscription.
 ///
 /// Saved accounts keep their refresh, quota, model list, and upstream when
-/// enrollment is withdrawn. Sign-in, file import, and discovered-account add
-/// use [`AccountEnrollment::refusal`].
+/// enrollment is withdrawn. A sign-in or file import whose resulting account
+/// id is already stored stays available, so a lapsed saved account can be
+/// signed in again. A new account id, including a discovered add, uses
+/// [`AccountEnrollment::refusal`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AccountEnrollment {
@@ -28,7 +30,7 @@ pub enum AccountEnrollment {
     Open,
     /// New accounts are refused. Saved accounts stay usable.
     Withdrawn {
-        /// Shown when at least one account is already stored.
+        /// Shown whenever the subscription is configured.
         risk: &'static str,
         /// Returned when a caller tries to create an account.
         refusal: &'static str,
@@ -45,7 +47,7 @@ impl AccountEnrollment {
         }
     }
 
-    /// The message for a subscription that already has a saved account.
+    /// The message shown whenever the subscription is configured.
     #[must_use]
     pub const fn risk(self) -> Option<&'static str> {
         match self {

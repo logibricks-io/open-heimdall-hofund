@@ -16,6 +16,7 @@ use std::future::Future;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use futures_util::{Stream, StreamExt};
@@ -115,7 +116,8 @@ pub struct SubscriptionListing {
     pub flow: &'static str,
     /// Accounts ordered by label and then id.
     pub accounts: Vec<AccountListing>,
-    /// Risk line when new enrollment is withdrawn and an account is saved.
+    /// Risk line when new enrollment is withdrawn. Shown whenever the
+    /// subscription is configured.
     pub notice: Option<String>,
 }
 
@@ -230,6 +232,65 @@ pub(crate) fn open_built(
         });
     }
     opened
+}
+
+/// Risk lines for configured subscriptions, from built enrollment state.
+///
+/// Builds each plugin and reads [`Subscription::account_enrollment`]. It does
+/// not prepare accounts or ask for account status.
+///
+/// # Errors
+///
+/// Returns [`DaemonError`] when the config does not load or a plugin does not build.
+pub fn configured_subscription_risks(path: &Path) -> Result<Vec<String>, DaemonError> {
+    let registry: Arc<dyn DaemonRegistry> = Arc::new(RegistryAdapter);
+    let loopback = Arc::new(LoopbackRegistry::new());
+    let opened = open(path, &registry, &loopback)?;
+    Ok(risk_lines(
+        opened.iter().map(|entry| entry.instance.as_ref()),
+    ))
+}
+
+fn risk_lines<'a>(instances: impl IntoIterator<Item = &'a dyn Subscription>) -> Vec<String> {
+    instances
+        .into_iter()
+        .filter_map(|instance| instance.account_enrollment().risk().map(str::to_owned))
+        .collect()
+}
+
+/// Built subscription enrollment, read from a running daemon.
+///
+/// The desktop menu uses this while the gateway is up. It does not build a
+/// second set of plugins and does not run account hooks.
+#[derive(Clone)]
+pub struct SubscriptionRisks {
+    runtime: Arc<crate::runtime::Runtime>,
+}
+
+impl SubscriptionRisks {
+    pub(crate) fn new(runtime: Arc<crate::runtime::Runtime>) -> Self {
+        Self { runtime }
+    }
+
+    fn lines(&self) -> Vec<String> {
+        risk_lines(
+            self.runtime
+                .subscription_states()
+                .values()
+                .map(|state| state.instance().as_ref()),
+        )
+    }
+}
+
+/// Risk lines from the daemon that `running` is serving.
+///
+/// Empty when this server was not started with subscription state attached.
+#[must_use]
+pub fn subscription_risk_lines(running: &crate::Running) -> Vec<String> {
+    running
+        .resource::<SubscriptionRisks>()
+        .map(SubscriptionRisks::lines)
+        .unwrap_or_default()
 }
 
 pub(crate) fn find<'a>(opened: &'a [Opened], id: &str) -> Result<&'a Opened, DaemonError> {
@@ -417,6 +478,7 @@ pub(crate) async fn list_in(opened: &[Opened]) -> Result<Vec<SubscriptionListing
     for entry in opened {
         let mut accounts = Vec::new();
         for account in sorted_accounts(entry).await? {
+            note_account_hook();
             let needs_sign_in = match entry.instance.account_status(&account.0, &entry.host).await {
                 Ok(AccountStatus::Ready) => None,
                 Ok(AccountStatus::NeedsSignIn { reason }) => Some(reason),
@@ -429,15 +491,11 @@ pub(crate) async fn list_in(opened: &[Opened]) -> Result<Vec<SubscriptionListing
                 needs_sign_in,
             });
         }
-        let notice = if accounts.is_empty() {
-            None
-        } else {
-            entry
-                .instance
-                .account_enrollment()
-                .risk()
-                .map(str::to_owned)
-        };
+        let notice = entry
+            .instance
+            .account_enrollment()
+            .risk()
+            .map(str::to_owned);
         listings.push(SubscriptionListing {
             id: entry.id.clone(),
             name: entry.name.clone(),
@@ -450,9 +508,26 @@ pub(crate) async fn list_in(opened: &[Opened]) -> Result<Vec<SubscriptionListing
 }
 
 /// Account ids and labels, ordered by label and then id.
+static ACCOUNT_HOOKS: AtomicU64 = AtomicU64::new(0);
+
+/// How many `prepare_accounts` and `account_status` calls this process has made.
+///
+/// A menu snapshot must not move this. The count is process-wide so a
+/// desktop test can see a direct hook, not only a listing pass.
+#[doc(hidden)]
+#[must_use]
+pub fn subscription_account_hooks() -> u64 {
+    ACCOUNT_HOOKS.load(Ordering::SeqCst)
+}
+
+pub(crate) fn note_account_hook() {
+    ACCOUNT_HOOKS.fetch_add(1, Ordering::SeqCst);
+}
+
 pub(crate) async fn sorted_accounts(
     entry: &Opened,
 ) -> Result<Vec<(AccountId, String)>, DaemonError> {
+    note_account_hook();
     if let Err(error) = entry
         .instance
         .prepare_accounts(&entry.config_dir, &entry.host)
@@ -2145,7 +2220,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn d221_risk_line_is_listed_only_for_a_saved_account() {
+    async fn d221_risk_line_is_listed_whenever_enrollment_is_withdrawn() {
         const RISK: &str = "saved-account risk line";
         const REFUSAL: &str = "new-account refusal line";
         let withdrawn = AccountEnrollment::Withdrawn {
@@ -2155,8 +2230,8 @@ mod tests {
         let empty = new_enrolled_rig(Mode::Device, withdrawn);
         let listings = list_in(&empty.opened()).await.expect("list");
         assert!(listings[0].accounts.is_empty());
-        assert!(listings[0].notice.is_none());
-        assert!(!subscriptions_json(&listings).contains("notice"));
+        assert_eq!(listings[0].notice.as_deref(), Some(RISK));
+        assert!(subscriptions_json(&listings).contains(RISK));
 
         let saved = new_enrolled_rig(Mode::Device, withdrawn);
         saved.add_account("saved", "Saved").await;
