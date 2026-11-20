@@ -6,7 +6,7 @@ smoke stays with Palmer — is
 [docs/release-v0.2.0-checklist.md](release-v0.2.0-checklist.md). That
 checklist does not bump the version or create a tag. **The final `v0.2.0`
 tag has not been pushed.** Preview prereleases may already exist
-(`v0.2.0-rc.1` does). Do not move or delete a published prerelease tag.
+(`v0.2.0-rc.1` and `v0.2.0-rc.2` do). Do not move or delete a published prerelease tag.
 Pushing a new version tag publishes a GitHub release. Do not push a tag
 until the changelog and the version agree.
 
@@ -215,7 +215,7 @@ pin on every pull request and checks `tauri --version`.
 | `windows-latest` | `nsis`, `msi` |
 
 WiX rejects a non-numeric prerelease identifier, so a tag such as
-`v0.2.0-rc.1` or `v0.2.0-rc.2` ships the Windows NSIS installer only.
+`v0.2.0-rc.1`, `v0.2.0-rc.2`, or `v0.2.0-rc.3` ships the Windows NSIS installer only.
 Restore `nsis,msi` for a final `v0.2.0` tag.
 
 Linux needs WebKitGTK 4.1, Ayatana AppIndicator, librsvg, patchelf, and
