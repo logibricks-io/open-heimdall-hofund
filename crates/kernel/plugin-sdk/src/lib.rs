@@ -25,6 +25,7 @@
 pub use async_trait::async_trait;
 pub use bytes;
 pub use chrono;
+pub use hofund_codec::instructions_after_input;
 pub use hofund_codec::plain_code_assist_tools;
 pub use hofund_quirks::apply as apply_quirks;
 pub use hofund_quirks::{refused_passthrough, without_passthrough};
