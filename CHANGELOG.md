@@ -15,6 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - D-229: A Copilot turn refused with "too many images" learns that model's cap, replaces the oldest images outside the latest user message with a placeholder, and sends the turn once more. Later turns for that account and model are fitted before they are sent. A turn already within the cap is unchanged. When the latest user message alone is over the cap, the refusal is returned unchanged. The cap comes from the refusal, not from the model list.
+- D-234: A Claude subscription account, or an Anthropic API key whose upstream is
+  `api.anthropic.com`, that the vendor has turned off rests for two hours and
+  the routing group asks the next member, including that provider's other
+  accounts. The same words from a relay fail over with an ordinary failure
+  rest, not a restricted one. A token count, and a 200 body that is only an
+  error object, rest the same way. Extra-usage and Usage Policy refusals are
+  unchanged. Refs D-234.
 - D-228: A Messages body whose `tool_use` and `tool_result` blocks do not pair is
   mended before it is sent to a Messages upstream. An unanswered call gets a
   synthetic error result, a result with no call becomes the text it said, a
