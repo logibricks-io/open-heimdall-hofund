@@ -139,6 +139,14 @@ impl EffectivePricer {
         None
     }
 
+    /// Whether `model` on `provider_id` has an operator price override.
+    ///
+    /// An override is billed as written. Tier multipliers do not apply.
+    #[must_use]
+    pub fn uses_custom_price(&self, provider_id: &str, model: &str) -> bool {
+        self.custom_price(provider_id, model).is_some()
+    }
+
     fn custom_price(&self, provider_id: &str, model: &str) -> Option<Price> {
         for key in [
             format!("{provider_id}/{model}"),

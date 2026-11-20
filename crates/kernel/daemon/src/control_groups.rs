@@ -83,13 +83,12 @@ pub(crate) async fn patch_group(
     let members = request.members.as_ref().map(|entries| {
         entries
             .iter()
-            .map(|member| {
-                (
-                    member.reference.clone(),
-                    member.effort.clone(),
-                    member.fast,
-                    member.enabled,
-                )
+            .map(|member| hofund_config::MemberEdit {
+                reference: member.reference.clone(),
+                effort: member.effort.clone(),
+                fast: member.fast,
+                ultra: member.ultra,
+                enabled: member.enabled,
             })
             .collect::<Vec<_>>()
     });
@@ -367,6 +366,7 @@ fn member_from_upstream(upstream: &hofund_config::Upstream) -> GroupMember {
     member.reference = reference;
     member.effort = upstream.effort.clone().unwrap_or_default();
     member.fast = upstream.fast;
+    member.ultra = upstream.ultra;
     member.enabled = upstream.enabled;
     member
 }

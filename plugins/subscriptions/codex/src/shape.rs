@@ -52,6 +52,7 @@ pub(crate) fn body(body: &mut Map<String, Value>, codex: Option<&str>) -> Vec<(S
     for key in DELETED_KEYS {
         body.remove(key);
     }
+    hofund_plugin_sdk::service_tier::rewrite_fast_word(body);
     let tier = body.get("service_tier").and_then(Value::as_str);
     if !tier.is_some_and(|tier| KEPT_TIERS.contains(&tier)) {
         body.remove("service_tier");

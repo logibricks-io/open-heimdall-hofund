@@ -240,6 +240,14 @@ impl UpstreamProvider for Direct {
     ) -> Result<hofund_plugin_api::ProbeReport, PluginError> {
         self.bridged.probe(query).await
     }
+
+    fn attempt_base(&self) -> String {
+        self.target.base_url().to_owned()
+    }
+
+    fn attempt_protocol(&self) -> String {
+        self.target.protocol().as_str().to_owned()
+    }
 }
 
 impl UpstreamFactory for AnthropicFactory {
