@@ -1620,22 +1620,35 @@ fn replayed_search_declares_the_cached_tool() {
     assert_eq!(out["tools"], json!([cached.clone()]));
     assert_eq!(out["tool_choice"], json!("none"));
     let function = json!({"type": "function", "name": "f"});
+    let strict_function = json!({"type": "function", "name": "f", "strict": false});
     let (out, _) = shaped(
         json!({"input": searched.clone(), "tools": [function.clone()]}),
         None,
     );
-    assert_eq!(out["tools"], json!([function.clone(), cached.clone()]));
+    assert_eq!(
+        out["tools"],
+        json!([strict_function.clone(), cached.clone()])
+    );
     assert_eq!(out["tool_choice"], json!("auto"));
-    for declared in [
-        json!({"type": "web_search_preview"}),
-        json!({"type": "function", "name": "web.run"}),
-        json!({"type": "namespace", "name": "web", "tools": [{"type": "function", "name": "run"}]}),
+    for (declared, expected) in [
+        (
+            json!({"type": "web_search_preview"}),
+            json!({"type": "web_search_preview"}),
+        ),
+        (
+            json!({"type": "function", "name": "web.run"}),
+            json!({"type": "function", "name": "web.run", "strict": false}),
+        ),
+        (
+            json!({"type": "namespace", "name": "web", "tools": [{"type": "function", "name": "run"}]}),
+            json!({"type": "namespace", "name": "web", "tools": [{"type": "function", "name": "run", "strict": false}]}),
+        ),
     ] {
         let (out, _) = shaped(
-            json!({"input": searched.clone(), "tools": [declared.clone()]}),
+            json!({"input": searched.clone(), "tools": [declared]}),
             None,
         );
-        assert_eq!(out["tools"], json!([declared]));
+        assert_eq!(out["tools"], json!([expected]));
     }
     assert!(!shape::declares_search(&[
         json!({"type": "namespace", "name": "web", "tools": [{"type": "function", "name": "open"}]})
@@ -1654,11 +1667,86 @@ fn replayed_search_declares_the_cached_tool() {
     let mut items = searched.as_array().expect("items").clone();
     items.push(json!({"type": "additional_tools", "tools": [function.clone()]}));
     let (out, _) = shaped(json!({"input": items}), None);
-    assert_eq!(out["input"][2]["tools"], json!([function, cached]));
+    assert_eq!(out["input"][2]["tools"], json!([strict_function, cached]));
     assert_eq!(out["tool_choice"], json!("auto"));
     assert!(out.get("tools").is_none());
     let (out, _) = shaped(json!({"input": searched, "tools": "odd"}), None);
     assert_eq!(out["tools"], json!("odd"));
+}
+
+#[test]
+fn d242_wire_cross_protocol_strict_is_posted() {
+    let compiles = r#"{"type":"object","additionalProperties":false,"properties":{"q":{"oneOf":[{"type":"string"},{"type":"number"}]}},"required":["q"]}"#;
+    let refused = r#"{"type":"object","additionalProperties":false,"properties":{"q":{"allOf":[{"type":"string"}]}},"required":["q"]}"#;
+    let chat = format!(
+        r#"{{"model":"gpt-5","messages":[{{"role":"user","content":"go"}}],"tools":[
+            {{"type":"function","function":{{"name":"compiles","strict":true,"parameters":{compiles}}}}},
+            {{"type":"function","function":{{"name":"refused","strict":true,"parameters":{refused}}}}},
+            {{"type":"function","function":{{"name":"omitted","parameters":{compiles}}}}}
+        ]}}"#
+    );
+    let messages = format!(
+        r#"{{"model":"gpt-5","max_tokens":16,"messages":[{{"role":"user","content":"go"}}],"tools":[
+            {{"name":"compiles","strict":true,"input_schema":{compiles}}},
+            {{"name":"refused","strict":true,"input_schema":{refused}}},
+            {{"name":"omitted","input_schema":{compiles}}}
+        ]}}"#
+    );
+    for (label, inbound, raw) in [
+        ("chat", ProtocolId::OPENAI_CHAT, chat.as_str()),
+        (
+            "messages",
+            ProtocolId::ANTHROPIC_MESSAGES,
+            messages.as_str(),
+        ),
+    ] {
+        let mut request = hofund_plugin_sdk::wire::decode_inbound(inbound, raw.as_bytes())
+            .unwrap_or_else(|error| panic!("{label} decode: {error}"));
+        request.stream = true;
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let id = seed(&host, &access_token("first", 10_000));
+        host.http()
+            .enqueue(b"event: response.completed\ndata: {}\n\n".to_vec());
+        block_on(upstream_for(&host, &id).execute(request, inbound)).expect(label);
+        let body: Value = json::from_slice(host.http().calls()[0].body()).expect("json");
+        let tool = |name: &str| {
+            body["tools"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{label} tools"))
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap_or_else(|| panic!("{label} no {name}"))
+        };
+        let posted_compiles = tool("compiles");
+        assert_eq!(posted_compiles["strict"], json!(true), "{label}");
+        assert!(
+            posted_compiles["parameters"]["properties"]["q"]
+                .get("oneOf")
+                .is_none()
+        );
+        assert_eq!(
+            posted_compiles["parameters"]["properties"]["q"]["anyOf"]
+                .as_array()
+                .map(Vec::len),
+            Some(2),
+            "{label}"
+        );
+        let posted_refused = tool("refused");
+        assert_eq!(posted_refused["strict"], json!(false), "{label}");
+        assert_eq!(
+            posted_refused["parameters"],
+            json::from_str::<Value>(refused).expect("schema"),
+            "{label}"
+        );
+        let posted_omitted = tool("omitted");
+        assert_eq!(posted_omitted["strict"], json!(false), "{label}");
+        assert_eq!(
+            posted_omitted["parameters"],
+            json::from_str::<Value>(compiles).expect("schema"),
+            "{label}"
+        );
+    }
 }
 
 #[test]

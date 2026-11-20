@@ -405,6 +405,7 @@ wire::async fn execute (http : & HttpHandle , target : & Target , secret : Optio
 wire::async fn forward (http : & HttpHandle , target : & Target , secret : Option < & SecretString > , path : & str , body : RawBody ,) -> Result < RawAnswer , PluginError >
 wire::async fn send (http : & HttpHandle , target : & Target , secret : Option < & SecretString > , request : Request , inbound : ProtocolId ,) -> Result < Sent , PluginError >
 wire::fn converse_call (target : & Target , model : & str , stream : bool , body : Vec < u8 > ,) -> Result < (String , Call) , PluginError >
+wire::fn decode_inbound (inbound : ProtocolId , bytes : & [u8]) -> Result < Request , PluginError >
 wire::fn encode_outbound (outbound : ProtocolId , inbound : ProtocolId , request : Request ,) -> Result < Vec < u8 > , PluginError >
 wire::fn failure_from_body (status : u16 , body : & [u8]) -> PluginError
 wire::fn model_segment (model : & str) -> Result < String , PluginError >
