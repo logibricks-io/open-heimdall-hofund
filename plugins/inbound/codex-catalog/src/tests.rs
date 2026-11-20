@@ -322,7 +322,7 @@ fn failure_messages_take_the_most_specific_text() {
 }
 
 #[test]
-fn d224_catalog_offers_ultrafast_for_the_family() {
+fn d224_catalog_copies_tiers_the_model_list_already_offers() {
     let listed = [
         ListedModel {
             id: "gpt-6.2-sol".to_owned(),
@@ -351,11 +351,7 @@ fn d224_catalog_offers_ultrafast_for_the_family() {
             .expect(slug)["service_tiers"]
             .clone()
     };
-    let sol = tiers("gpt-6.2-sol");
-    assert_eq!(sol[0]["id"], "priority");
-    assert_eq!(sol[0]["name"], "Fast");
-    assert_eq!(sol[1]["id"], "ultrafast");
-    assert_eq!(sol[1]["name"], "Ultrafast");
+    assert!(tiers("gpt-6.2-sol").as_array().expect("tiers").is_empty());
     let pool = tiers("pool");
     assert_eq!(pool[1]["name"], "Ultrafast");
     assert!(tiers("glm-4.6").as_array().expect("tiers").is_empty());

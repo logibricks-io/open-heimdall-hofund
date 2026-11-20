@@ -1481,4 +1481,37 @@ mod tests {
             String::from_utf8_lossy(first_line)
         );
     }
+
+    #[test]
+    fn d224_prepare_body_downgrades_public_chat_ultrafast() {
+        use super::{Credential, Endpoint, Upstream, prepare_body};
+        use hofund_codec::{Codec, OpenAiChat};
+        use hofund_ir::Request;
+        use reqwest::header::HeaderMap;
+
+        let endpoint = Endpoint {
+            id: "public".to_owned(),
+            base_url: "https://api.openai.com/v1".to_owned(),
+            preset: None,
+            api_key: String::new(),
+            credential: Credential::Default,
+            headers: Vec::new(),
+            pass_headers: Vec::new(),
+            quirks: None,
+            timeout: Duration::from_secs(1),
+            client: None,
+            client_slot: None,
+            client_refresh: None,
+        };
+        let upstream =
+            Upstream::open(endpoint, "chat/completions", HeaderMap::new()).expect("upstream");
+        let mut request = Request::new("gpt-6.2-sol");
+        request
+            .extensions
+            .insert("service_tier", serde_json::json!("ultrafast"));
+        let body =
+            prepare_body(&upstream, &OpenAiChat, request, None, OpenAiChat.id()).expect("body");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(value["service_tier"], "priority");
+    }
 }

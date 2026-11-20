@@ -515,28 +515,34 @@ impl Router {
 
     /// Service tier ids `/v1/models` should offer for `model`.
     ///
-    /// Ultrafast is offered when `model` is a GPT Sol, Astra, or Terra family,
-    /// when a hop sends Ultrafast, or when a hop's wire model is that family.
-    /// Fast (`priority`) is listed beside it. Other models offer no tier here.
+    /// Each hop contributes the tiers its host, protocol, and configured
+    /// Ultrafast flag support. There is no per-account plan list.
     #[must_use]
     pub fn service_tier_ids(&self, model: &str) -> Vec<&'static str> {
-        let mut ultra = hofund_codec::service_tier::offers_ultra_family(model);
+        let mut fast = false;
+        let mut ultra = false;
         if let Some(route) = self.routes.get(model) {
             for hop in &route.hops {
-                if hop.service_tier == "ultrafast" {
-                    ultra = true;
-                }
-                if hop
-                    .wire_model
-                    .as_deref()
-                    .is_some_and(hofund_codec::service_tier::offers_ultra_family)
-                {
-                    ultra = true;
+                let attempt = hop.member.attempt();
+                let wire = hop.wire_model.as_deref().unwrap_or(model);
+                for id in hofund_codec::service_tier::offered_tier_ids(
+                    &attempt.base_url,
+                    attempt.protocol.as_str(),
+                    wire,
+                    hop.service_tier == "ultrafast",
+                ) {
+                    match id {
+                        "priority" => fast = true,
+                        "ultrafast" => ultra = true,
+                        _ => {}
+                    }
                 }
             }
         }
         if ultra {
             hofund_codec::service_tier::ULTRA_OFFER.to_vec()
+        } else if fast {
+            vec!["priority"]
         } else {
             Vec::new()
         }
@@ -855,6 +861,7 @@ impl Router {
             trace,
             strategies: Arc::clone(&self.strategies),
             drain_moves: ordered.drain_moves,
+            clear_placeholder_served: false,
             walk_started: wait_hook
                 .as_ref()
                 .map_or_else(Instant::now, |hook| hook.now()),
@@ -1658,6 +1665,8 @@ struct DispatchState {
     walk_started: Instant,
     group_walk_budget: Duration,
     tier_sent: String,
+    /// Drop placeholder `auto` and `default` served words for this hop's host.
+    clear_placeholder_served: bool,
 }
 
 /// One member's answer within a dispatch round.
@@ -1668,6 +1677,7 @@ struct Answered {
     upstream_model: String,
     completion: Completion,
     tier_sent: String,
+    clear_placeholder_served: bool,
 }
 
 fn region_key(provider: &str, model: &str) -> String {
@@ -1781,6 +1791,7 @@ impl DispatchState {
                             completion: answered.completion,
                             affinity_reason,
                             service_tier_sent: answered.tier_sent,
+                            clear_placeholder_served: answered.clear_placeholder_served,
                             continuation: Some(continuation),
                         });
                     }
@@ -1800,6 +1811,7 @@ impl DispatchState {
                         provider_key_id: answered.provider_key_id,
                         upstream_model: answered.upstream_model,
                         service_tier_sent: answered.tier_sent,
+                        clear_placeholder_served: answered.clear_placeholder_served,
                         completion: answered.completion,
                         affinity_reason,
                         continuation: None,
@@ -1899,6 +1911,9 @@ impl DispatchState {
             let mut attempt = self.request.clone();
             apply_wire(&mut attempt, &hop, &self.resolved.bare);
             self.tier_sent = hofund_codec::service_tier::extension_tier(&attempt.extensions);
+            self.clear_placeholder_served = hofund_codec::service_tier::clear_placeholder_served(
+                &hop.member.attempt().base_url,
+            );
             let upstream_model = attempt.model.clone();
             let plugin_id = hop.member.plugin_id();
             if self.refused_providers.contains(hop.member.route_id())
@@ -2057,6 +2072,7 @@ impl DispatchState {
                         upstream_model,
                         completion,
                         tier_sent: self.tier_sent.clone(),
+                        clear_placeholder_served: self.clear_placeholder_served,
                     }));
                 }
                 Err(error) => {
@@ -2268,6 +2284,8 @@ pub struct Routed {
     pub completion: Completion,
     /// Service tier sent to the member that answered.
     pub service_tier_sent: String,
+    /// Drop placeholder `auto` and `default` served words for this member's host.
+    pub clear_placeholder_served: bool,
     continuation: Option<RouteContinuation>,
 }
 

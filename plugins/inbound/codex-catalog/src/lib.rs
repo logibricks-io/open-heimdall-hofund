@@ -9,9 +9,10 @@
 //!
 //! None of it opens a socket: the list is the gateway's own, read in
 //! process. Effort levels and images still come from the model catalog when
-//! that catalog has them. Service tiers are copied from `/v1/models`, and a
-//! GPT Sol, Astra, or Terra model is offered Fast and Ultrafast when the list
-//! omitted them. Codex before
+//! that catalog has them. Service tiers are copied from `/v1/models`. That
+//! list already applied the family rule for a ChatGPT-backend hop, the public
+//! Responses list, and a member configured ultra. This writer does not invent
+//! a tier the list omitted, and there is no per-account plan list. Codex before
 //! 0.166.0 reads at most [`MOST`] bytes of a catalog and loads none of it
 //! past that, so entries that would go past are left out, the last first, and
 //! the `x-hofund-left-out` header says how many. From 0.166.0 on, Codex
@@ -319,17 +320,9 @@ pub(crate) fn entry(
     value
 }
 
-/// Writes Fast and Ultrafast onto `entry` when the list or the model family offers them.
-fn attach_service_tiers(entry: &mut Value, id: &str, listed: &[String]) {
-    let mut ids = listed.to_vec();
-    if hofund_plugin_sdk::service_tier::offers_ultra_family(id) {
-        if !ids.iter().any(|tier| tier == "priority") {
-            ids.insert(0, "priority".to_owned());
-        }
-        if !ids.iter().any(|tier| tier == "ultrafast") {
-            ids.push("ultrafast".to_owned());
-        }
-    }
+/// Copies the tiers `/v1/models` already listed onto `entry`.
+fn attach_service_tiers(entry: &mut Value, _id: &str, listed: &[String]) {
+    let ids = listed.to_vec();
     if ids.is_empty() {
         return;
     }

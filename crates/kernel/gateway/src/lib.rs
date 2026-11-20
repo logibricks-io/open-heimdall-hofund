@@ -2201,6 +2201,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
                 &routed.upstream_model,
                 &routed.provider_key_id,
                 &routed.service_tier_sent,
+                routed.clear_placeholder_served,
                 routed.completion,
                 continuation,
                 routed.affinity_reason,
@@ -2350,6 +2351,7 @@ fn held_response(
                                 &routed.upstream_model,
                                 &routed.provider_key_id,
                                 &routed.service_tier_sent,
+                                routed.clear_placeholder_served,
                                 routed.completion,
                                 continuation,
                                 routed.affinity_reason,
@@ -2821,6 +2823,7 @@ async fn success(
     upstream_model: &str,
     provider_key_id: &str,
     service_tier_sent: &str,
+    clear_placeholder_served: bool,
     completion: Completion,
     continuation: Option<hofund_router::RouteContinuation>,
     affinity_reason: Option<String>,
@@ -2844,6 +2847,7 @@ async fn success(
     if !service_tier_sent.is_empty() {
         meta.tier_sent = service_tier_sent.to_owned();
     }
+    meta.clear_placeholder_served = clear_placeholder_served;
     meta.provider_key_id = provider_key_id.to_owned();
     let member = Some(upstream.to_owned());
     let capture = prev_response::ReplyCapture::new(capture);
@@ -3053,6 +3057,7 @@ async fn raw_body(
             track: Some(owned),
             member,
             protocol: codec.id().to_owned(),
+            pricer: app.pricer.clone(),
         };
         let stream = futures_util::stream::unfold(relay, |mut relay| async move {
             let next = relay.next().await?;
@@ -3081,15 +3086,16 @@ async fn raw_body(
         track.end_with(member, StatusCode::BAD_GATEWAY.as_u16(), None, None);
         return coded(codec.as_ref(), StatusCode::BAD_GATEWAY, error.message());
     }
-    if let Ok(response) = codec.decode_response(&bytes)
-        && let Some(usage) = response.usage.as_ref()
-    {
-        limits::observe_usage(
-            &mut meta,
-            usage,
-            codec.id(),
-            message_saw_reasoning(&response.message),
-        );
+    if let Ok(response) = codec.decode_response(&bytes) {
+        note_served_tier(&response.extensions, &mut meta);
+        if let Some(usage) = response.usage.as_ref() {
+            limits::observe_usage(
+                &mut meta,
+                usage,
+                codec.id(),
+                message_saw_reasoning(&response.message),
+            );
+        }
     } else if codec.id() == ProtocolId::OPENAI_RESPONSES.as_str()
         && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
         && let Some(object) = value.as_object()
@@ -3276,6 +3282,8 @@ struct UsageMeta {
     tier_asked: String,
     tier_sent: String,
     tier_served: String,
+    /// Drop placeholder `auto` and `default` served words for this member's host.
+    clear_placeholder_served: bool,
 }
 
 impl UsageMeta {
@@ -3309,6 +3317,7 @@ impl UsageMeta {
             tier_asked: hofund_codec::service_tier::extension_tier(&request.extensions),
             tier_sent: hofund_codec::service_tier::extension_tier(&request.extensions),
             tier_served: String::new(),
+            clear_placeholder_served: false,
         }
     }
 
@@ -3464,6 +3473,7 @@ struct RawRelay<E> {
     track: Option<RequestTrack>,
     member: Option<String>,
     protocol: String,
+    pricer: Option<Arc<hofund_model_catalog::EffectivePricer>>,
 }
 
 impl<E> RawRelay<E>
@@ -3471,11 +3481,14 @@ where
     E: Fn(u16, &str) -> Vec<u8>,
 {
     fn finish(&mut self, status: StatusCode) {
-        write_usage_simple(
+        write_usage(
             &self.usage,
             &self.meta,
             Some((self.meta.input, self.meta.output)),
             status,
+            self.pricer.as_deref(),
+            false,
+            "",
         );
         if let Some(track) = self.track.as_mut() {
             track.end_with(
@@ -3510,6 +3523,7 @@ where
         if extra.saw_reasoning {
             self.meta.saw_reasoning = true;
         }
+        note_served_word(&self.tap.served_tier(), &mut self.meta);
         self.meta.details.reasoning_hidden = reasoning_hidden(
             &self.protocol,
             self.meta.saw_reasoning || extra.saw_reasoning,
@@ -3706,15 +3720,31 @@ fn frame_closed(bytes: &[u8]) -> bool {
 }
 
 fn note_served_tier(extensions: &hofund_ir::Extensions, meta: &mut UsageMeta) {
-    let tier = hofund_codec::service_tier::extension_tier(extensions);
-    if hofund_usage::meaningful_served_tier(&tier) {
-        meta.tier_served = tier;
+    note_served_word(
+        &hofund_codec::service_tier::extension_tier(extensions),
+        meta,
+    );
+}
+
+fn note_served_word(tier: &str, meta: &mut UsageMeta) {
+    if tier.is_empty() {
+        return;
     }
+    if meta.clear_placeholder_served && matches!(tier, "auto" | "default") {
+        return;
+    }
+    meta.tier_served = tier.to_owned();
 }
 
 fn note_usage(event: &StreamEvent, record: &mut RecordOnEnd) {
-    if let StreamEvent::MessageStart(start) = event {
-        note_served_tier(&start.extensions, &mut record.meta);
+    match event {
+        StreamEvent::MessageStart(start) => {
+            note_served_tier(&start.extensions, &mut record.meta);
+        }
+        StreamEvent::MessageDelta(delta) => {
+            note_served_tier(&delta.extensions, &mut record.meta);
+        }
+        _ => {}
     }
     let saw_reasoning = matches!(event, StreamEvent::ThinkingDelta(_))
         || matches!(

@@ -112,16 +112,20 @@ pub fn token_bearing(input: Option<i64>, output: Option<i64>) -> bool {
 /// from it onward.
 pub const GPT62_ULTRAFAST_FULL_RATE_UNIX: i64 = 1_803_888_000;
 
-/// Whether a reply's tier is the one to bill.
+/// Whether a reply's tier replaces the tier that was sent.
 ///
-/// `auto`, `default`, and `standard` mean the upstream did not name a tier.
+/// An empty served tier, and `auto`, fall back to what was sent. `default`
+/// and `standard` are the standard rate. A ChatGPT backend that says those
+/// words as placeholders drops them before this check.
 #[must_use]
 pub fn meaningful_served_tier(tier: &str) -> bool {
-    !matches!(tier, "" | "auto" | "default" | "standard")
+    !matches!(tier, "" | "auto")
 }
 
-/// The tier a row is priced at: the served tier when the reply named one,
-/// otherwise the tier that was sent.
+/// The tier a row is priced at.
+///
+/// The served word wins, including `default` and `standard` at 1x. Only an
+/// empty served tier or `auto` falls back to the tier that was sent.
 #[must_use]
 pub fn billed_tier<'a>(served: &'a str, sent: &'a str) -> &'a str {
     if meaningful_served_tier(served) {
@@ -258,9 +262,27 @@ mod tests {
         let plain = price_at_tier(list(), "gpt-6-sol", "", day);
         assert_eq!(plain, list());
         assert_eq!(billed_tier("auto", "priority"), "priority");
-        assert_eq!(billed_tier("default", "ultrafast"), "ultrafast");
-        assert_eq!(billed_tier("flex", "priority"), "flex");
         assert_eq!(billed_tier("", "priority"), "priority");
+        assert_eq!(billed_tier("flex", "priority"), "flex");
+        assert_eq!(billed_tier("priority", "ultrafast"), "priority");
+        let served_priority = price_at_tier(
+            list(),
+            "gpt-6-sol",
+            billed_tier("priority", "ultrafast"),
+            day,
+        );
+        assert_eq!(served_priority.input, 2.0);
+        assert_eq!(billed_tier("default", "ultrafast"), "default");
+        assert_eq!(billed_tier("standard", "ultrafast"), "standard");
+        let served_default = price_at_tier(
+            list(),
+            "gpt-6.2-sol",
+            billed_tier("default", "ultrafast"),
+            day,
+        );
+        assert_eq!(served_default, list());
+        assert_eq!(tier_multiplier("gpt-6.2-sol", "default", day), 1.0);
+        assert_eq!(tier_multiplier("gpt-6.2-sol", "standard", day), 1.0);
     }
 
     #[test]

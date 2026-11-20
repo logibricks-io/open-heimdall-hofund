@@ -67,6 +67,51 @@ pub fn is_openai_api_host(base_url: &str) -> bool {
     host_of(base_url).eq_ignore_ascii_case("api.openai.com")
 }
 
+/// `true` when `base_url` is the ChatGPT backend Codex subscriptions use.
+#[must_use]
+pub fn chatgpt_backend(base_url: &str) -> bool {
+    let host = host_of(base_url);
+    host.eq_ignore_ascii_case("chatgpt.com") || host.ends_with(".chatgpt.com")
+}
+
+/// Whether `auto` and `default` on a reply are placeholders.
+///
+/// The ChatGPT backend says those words whether a faster tier ran or not.
+/// The public API means them: `default` and `standard` are the 1x rate.
+#[must_use]
+pub fn clear_placeholder_served(base_url: &str) -> bool {
+    chatgpt_backend(base_url)
+}
+
+/// Tier ids `/v1/models` should offer for one hop.
+///
+/// A ChatGPT-backend hop offers Ultrafast for any GPT Sol, Astra, or Terra
+/// model. A public `api.openai.com` Responses hop offers it only for
+/// [`openai_responses_ultrafast`]. A Chat hop on that host does not. A member
+/// configured `ultra` offers it on any model. There is no per-account plan list.
+#[must_use]
+pub fn offered_tier_ids(
+    base_url: &str,
+    protocol: &str,
+    model: &str,
+    member_ultra: bool,
+) -> Vec<&'static str> {
+    let family = offers_ultra_family(model);
+    let public_host = is_openai_api_host(base_url);
+    let backend = chatgpt_backend(base_url);
+    let ultra = member_ultra
+        || (backend && family)
+        || (public_host && protocol == "openai-responses" && openai_responses_ultrafast(model));
+    let fast = ultra || ((public_host || backend) && family);
+    if ultra {
+        ULTRA_OFFER.to_vec()
+    } else if fast {
+        vec!["priority"]
+    } else {
+        Vec::new()
+    }
+}
+
 /// The replacement tier when `api.openai.com` must not be sent `ultrafast`.
 ///
 /// Chat Completions never carries `ultrafast`. Responses carries it only for
@@ -234,9 +279,9 @@ fn host_of(base_url: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        adjust_encoded_body, apply_outbound, comparable_model, configured_tier,
-        downgrade_openai_ultrafast, offers_ultra_family, openai_responses_ultrafast,
-        rewrite_fast_word,
+        adjust_encoded_body, apply_outbound, chatgpt_backend, clear_placeholder_served,
+        comparable_model, configured_tier, downgrade_openai_ultrafast, offered_tier_ids,
+        offers_ultra_family, openai_responses_ultrafast, rewrite_fast_word,
     };
     use hofund_ir::Request;
     use serde_json::{Map, Value};
@@ -428,5 +473,58 @@ mod tests {
         );
         assert_eq!(configured_tier(true, false), "priority");
         assert_eq!(configured_tier(false, false), "");
+    }
+
+    #[test]
+    fn d224_public_offers_follow_the_host_and_the_protocol() {
+        let public_api = "https://api.openai.com/v1";
+        let chat = "openai-chat";
+        let responses = "openai-responses";
+        assert_eq!(
+            offered_tier_ids(public_api, responses, "gpt-6-sol", false),
+            ["priority"]
+        );
+        assert_eq!(
+            offered_tier_ids(public_api, chat, "gpt-6.2-sol", false),
+            ["priority"]
+        );
+        assert!(!offered_tier_ids(public_api, chat, "gpt-6.2-sol", false).contains(&"ultrafast"));
+        assert_eq!(
+            offered_tier_ids(public_api, responses, "gpt-6.2-sol", false),
+            ["priority", "ultrafast"]
+        );
+        assert_eq!(
+            offered_tier_ids(public_api, responses, "gpt-6-astra", false),
+            ["priority", "ultrafast"]
+        );
+        assert_eq!(
+            offered_tier_ids(public_api, responses, "gpt-6.1-sol", false),
+            ["priority", "ultrafast"]
+        );
+        let backend = "https://chatgpt.com/backend-api/codex";
+        assert!(chatgpt_backend(backend));
+        assert!(clear_placeholder_served(backend));
+        assert!(!clear_placeholder_served(public_api));
+        assert_eq!(
+            offered_tier_ids(backend, responses, "gpt-6-sol", false),
+            ["priority", "ultrafast"]
+        );
+        assert_eq!(
+            offered_tier_ids(backend, responses, "gpt-6.2-astra", false),
+            ["priority", "ultrafast"]
+        );
+        assert_eq!(
+            offered_tier_ids(backend, chat, "gpt-5.6-terra", false),
+            ["priority", "ultrafast"]
+        );
+        assert!(offered_tier_ids(public_api, chat, "glm-4.6", false).is_empty());
+        assert_eq!(
+            offered_tier_ids(public_api, chat, "glm-4.6", true),
+            ["priority", "ultrafast"]
+        );
+        assert!(
+            offered_tier_ids("https://relay.example/v1", responses, "gpt-6.2-sol", false)
+                .is_empty()
+        );
     }
 }
