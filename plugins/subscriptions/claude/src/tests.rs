@@ -1534,7 +1534,7 @@ fn r5_40_setup_token_daily_warmup_is_no_op() {
 }
 
 #[test]
-fn r5_23_agent_switch_refuses_setup_token() {
+fn r5_23_agent_switch_writes_setup_token_env() {
     let dir = tempfile::tempdir().expect("dir");
     let agent_home = dir.path().join("claude");
     std::fs::create_dir_all(&agent_home).expect("home");
@@ -1546,11 +1546,15 @@ fn r5_23_agent_switch_refuses_setup_token() {
         host.context(),
     ))
     .expect("store");
-    let error =
-        block_on(sub.write_agent_sign_in(&id, &agent_home, host.context())).expect_err("switch");
-    assert!(
-        error.to_string().contains(crate::setup_token::AGENT_SWITCH),
-        "{error}"
+    let before = agent_home.join(creds::CREDENTIALS_FILE);
+    std::fs::write(&before, "stored-sign-in").expect("sentinel");
+    block_on(sub.write_agent_sign_in(&id, &agent_home, host.context())).expect("switch");
+    let settings = std::fs::read_to_string(agent_home.join("settings.json")).expect("settings");
+    assert!(settings.contains("CLAUDE_CODE_OAUTH_TOKEN"), "{settings}");
+    assert!(settings.contains(SETUP_TOKEN), "{settings}");
+    assert_eq!(
+        std::fs::read_to_string(&before).expect("sentinel"),
+        "stored-sign-in"
     );
 }
 
@@ -1785,5 +1789,434 @@ mod usage_cadence_poll {
         store(&host, &active, &signed_in_blob());
         let _ = block_on(sub.quota_poll(&saved, host.context())).expect("kept");
         assert_eq!(host.process().piped_spawns().len(), runs);
+    }
+}
+
+mod d226 {
+    use super::*;
+
+    use hofund_plugin_sdk::digest::sha256;
+    use hofund_plugin_sdk::json::Value;
+
+    const USER_TOKEN: &str = "sk-ant-oat01-users-own";
+    const OTHER_TOKEN: &str = "sk-ant-oat01-other-account-token";
+
+    fn setup_id(host: &TestHost, sub: &Arc<dyn Subscription>, token: &str) -> AccountId {
+        block_on(sub.complete_sign_in(
+            &ctx(),
+            SignInProof::Token(SecretString::from(token.to_owned())),
+            host.context(),
+        ))
+        .expect("setup account")
+    }
+
+    fn oauth_id(host: &TestHost) -> AccountId {
+        let id = account_id_from(&["claude", UUID]);
+        store(host, &id, &signed_in_blob());
+        id
+    }
+
+    fn settings_value(home: &Path) -> Value {
+        let text = std::fs::read_to_string(home.join("settings.json")).expect("settings");
+        hofund_plugin_sdk::json::from_str(&text).expect("settings json")
+    }
+
+    fn env_token(value: &Value) -> Option<&str> {
+        value
+            .get("env")
+            .and_then(|env| env.get(cli::OAUTH_TOKEN_VAR))
+            .and_then(Value::as_str)
+    }
+
+    fn token_hash(token: &str) -> String {
+        sha256(token.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    fn record_text(host: &TestHost) -> String {
+        std::fs::read_to_string(state(host).join("claude-token-env.json")).expect("hash record")
+    }
+
+    fn write_settings(home: &Path, text: &str) {
+        std::fs::create_dir_all(home).expect("home");
+        std::fs::write(home.join("settings.json"), text).expect("settings");
+    }
+
+    #[test]
+    fn d226_use_writes_env_token_and_keeps_other_settings() {
+        let dir = tempfile::tempdir().expect("dir");
+        let home = dir.path().join("claude");
+        write_settings(
+            &home,
+            "{\n  // kept\n  \"model\": \"opus\",\n  \"env\": { \"FOO\": \"bar\", },\n}\n",
+        );
+        let host = host(&dir);
+        let sub = subscription(&host);
+        let id = setup_id(&host, &sub, SETUP_TOKEN);
+        block_on(sub.write_agent_sign_in(&id, &home, host.context())).expect("use");
+        let value = settings_value(&home);
+        assert_eq!(value.get("model").and_then(Value::as_str), Some("opus"));
+        assert_eq!(
+            value
+                .get("env")
+                .and_then(|env| env.get("FOO"))
+                .and_then(Value::as_str),
+            Some("bar")
+        );
+        assert_eq!(env_token(&value), Some(SETUP_TOKEN));
+        let record = record_text(&host);
+        assert!(record.contains(&token_hash(SETUP_TOKEN)), "{record}");
+        assert!(!record.contains(SETUP_TOKEN), "{record}");
+        #[cfg(unix)]
+        {
+            assert_eq!(mode(&state(&host).join("claude-token-env.json")) & 0o077, 0);
+        }
+    }
+
+    #[test]
+    fn d226_use_leaves_a_stored_sign_in_file_alone() {
+        let dir = tempfile::tempdir().expect("dir");
+        let home = dir.path().join("claude");
+        std::fs::create_dir_all(&home).expect("home");
+        let creds = home.join(creds::CREDENTIALS_FILE);
+        std::fs::write(&creds, "stored-sign-in").expect("creds");
+        let host = host(&dir);
+        let sub = subscription(&host);
+        let id = setup_id(&host, &sub, SETUP_TOKEN);
+        block_on(sub.write_agent_sign_in(&id, &home, host.context())).expect("use");
+        assert_eq!(
+            std::fs::read_to_string(&creds).expect("creds"),
+            "stored-sign-in"
+        );
+    }
+
+    #[test]
+    fn d226_use_writes_the_env_token_without_a_named_live_profile() {
+        let creds_text =
+            r#"{"claudeAiOauth":{"accessToken":"at-live","refreshToken":"rt-live","expiresAt":1}}"#;
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let sub = subscription(&host);
+        let id = setup_id(&host, &sub, SETUP_TOKEN);
+
+        let over = dir.path().join("over-cap");
+        std::fs::create_dir_all(&over).expect("over");
+        let over_creds = over.join(creds::CREDENTIALS_FILE);
+        std::fs::write(&over_creds, creds_text).expect("creds");
+        let mut big = vec![b'x'; (1024 * 1024) + 1];
+        big[0] = b'{';
+        std::fs::write(over.join(creds::PROFILE_FILE), &big).expect("profile");
+        let before = std::fs::read(&over_creds).expect("before");
+        block_on(sub.write_agent_sign_in(&id, &over, host.context())).expect("over cap");
+        assert_eq!(std::fs::read(&over_creds).expect("after"), before);
+        assert_eq!(env_token(&settings_value(&over)), Some(SETUP_TOKEN));
+
+        let unnamed = dir.path().join("no-oauth");
+        std::fs::create_dir_all(&unnamed).expect("unnamed");
+        let unnamed_creds = unnamed.join(creds::CREDENTIALS_FILE);
+        std::fs::write(&unnamed_creds, creds_text).expect("creds");
+        std::fs::write(unnamed.join(creds::PROFILE_FILE), r#"{"oauthAccount":{}}"#)
+            .expect("profile");
+        let before = std::fs::read(&unnamed_creds).expect("before");
+        block_on(sub.write_agent_sign_in(&id, &unnamed, host.context())).expect("no oauth");
+        assert_eq!(std::fs::read(&unnamed_creds).expect("after"), before);
+        assert_eq!(env_token(&settings_value(&unnamed)), Some(SETUP_TOKEN));
+    }
+
+    #[test]
+    fn d226_user_set_token_is_left_alone() {
+        let dir = tempfile::tempdir().expect("dir");
+        let home = dir.path().join("claude");
+        write_settings(
+            &home,
+            &format!(
+                r#"{{"env":{{"{key}":"{USER_TOKEN}"}}}}"#,
+                key = cli::OAUTH_TOKEN_VAR
+            ),
+        );
+        let host = host(&dir);
+        let sub = subscription(&host);
+        let setup = setup_id(&host, &sub, SETUP_TOKEN);
+        let oauth = oauth_id(&host);
+        let error = block_on(sub.write_agent_sign_in(&setup, &home, host.context()))
+            .expect_err("use over a user value");
+        let message = error.to_string();
+        assert!(message.contains("of your own"), "{message}");
+        assert!(!message.contains(SETUP_TOKEN), "{message}");
+        assert!(!message.contains(USER_TOKEN), "{message}");
+        assert!(!state(&host).join("claude-token-env.json").exists());
+        block_on(sub.write_agent_sign_in(&oauth, &home, host.context())).expect("signed-in use");
+        assert_eq!(env_token(&settings_value(&home)), Some(USER_TOKEN));
+    }
+
+    #[test]
+    fn d226_user_edit_after_use_is_not_removed() {
+        let dir = tempfile::tempdir().expect("dir");
+        let home = dir.path().join("claude");
+        std::fs::create_dir_all(&home).expect("home");
+        let host = host(&dir);
+        let sub = subscription(&host);
+        let setup = setup_id(&host, &sub, SETUP_TOKEN);
+        let oauth = oauth_id(&host);
+        block_on(sub.write_agent_sign_in(&setup, &home, host.context())).expect("use");
+        write_settings(
+            &home,
+            &format!(
+                r#"{{"env":{{"FOO":"bar","{key}":"sk-ant-oat01-users-later"}}}}"#,
+                key = cli::OAUTH_TOKEN_VAR
+            ),
+        );
+        block_on(sub.write_agent_sign_in(&oauth, &home, host.context())).expect("switch back");
+        let value = settings_value(&home);
+        assert_eq!(env_token(&value), Some("sk-ant-oat01-users-later"));
+        assert_eq!(
+            value
+                .get("env")
+                .and_then(|env| env.get("FOO"))
+                .and_then(Value::as_str),
+            Some("bar")
+        );
+        let record = record_text(&host);
+        assert!(record.contains(&token_hash(SETUP_TOKEN)), "{record}");
+        assert!(!record.contains(SETUP_TOKEN), "{record}");
+        assert!(!record.contains("sk-ant-oat01-users-later"), "{record}");
+    }
+
+    #[test]
+    fn d226_clear_on_another_home_keeps_the_marker() {
+        let dir = tempfile::tempdir().expect("dir");
+        let home = dir.path().join("claude");
+        let other = dir.path().join("other");
+        write_settings(&home, r#"{"env":{"FOO":"bar"}}"#);
+        let host = host(&dir);
+        let sub = subscription(&host);
+        let setup = setup_id(&host, &sub, SETUP_TOKEN);
+        let oauth = oauth_id(&host);
+        block_on(sub.write_agent_sign_in(&setup, &home, host.context())).expect("use");
+        block_on(sub.write_agent_sign_in(&oauth, &other, host.context())).expect("other home");
+        assert_eq!(env_token(&settings_value(&home)), Some(SETUP_TOKEN));
+        let record = record_text(&host);
+        assert!(record.contains(&token_hash(SETUP_TOKEN)), "{record}");
+        let home_json = serde_json::to_string(&home.display().to_string()).expect("home json");
+        assert!(record.contains(&home_json), "{record}");
+        assert!(!record.contains(SETUP_TOKEN), "{record}");
+        let other_settings = other.join("settings.json");
+        if other_settings.is_file() {
+            let text = std::fs::read_to_string(&other_settings).expect("other settings");
+            assert!(!text.contains(SETUP_TOKEN), "{text}");
+            assert!(!text.contains(cli::OAUTH_TOKEN_VAR));
+        }
+    }
+
+    #[test]
+    fn d226_unreadable_settings_blocks_the_sign_in_move() {
+        let dir = tempfile::tempdir().expect("dir");
+        let home = dir.path().join("claude");
+        std::fs::create_dir_all(&home).expect("home");
+        let host = host(&dir);
+        let sub = subscription(&host);
+        let setup = setup_id(&host, &sub, SETUP_TOKEN);
+        let oauth = oauth_id(&host);
+        let broken = home.join("settings.json");
+        std::fs::write(&broken, "{\"env\": {").expect("broken");
+        let error =
+            block_on(sub.write_agent_sign_in(&setup, &home, host.context())).expect_err("use");
+        assert!(error.to_string().contains("left on the account"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&broken).expect("broken"),
+            "{\"env\": {"
+        );
+        assert!(!state(&host).join("claude-token-env.json").exists());
+
+        write_settings(&home, r#"{"model":"opus"}"#);
+        block_on(sub.write_agent_sign_in(&setup, &home, host.context())).expect("use");
+        std::fs::write(&broken, "{\"env\": {").expect("broken again");
+        let creds = home.join(creds::CREDENTIALS_FILE);
+        std::fs::write(&creds, "KEEP").expect("sentinel");
+        let error =
+            block_on(sub.write_agent_sign_in(&oauth, &home, host.context())).expect_err("switch");
+        assert!(error.to_string().contains("can't be read"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&broken).expect("broken"),
+            "{\"env\": {"
+        );
+        assert_eq!(std::fs::read_to_string(&creds).expect("sentinel"), "KEEP");
+        assert!(record_text(&host).contains(&token_hash(SETUP_TOKEN)));
+
+        write_settings(
+            &home,
+            &format!(
+                r#"{{"env":{{"FOO":"bar","{key}":"{SETUP_TOKEN}"}}}}"#,
+                key = cli::OAUTH_TOKEN_VAR
+            ),
+        );
+        block_on(sub.write_agent_sign_in(&oauth, &home, host.context())).expect("switch");
+        let value = settings_value(&home);
+        assert!(env_token(&value).is_none());
+        assert_eq!(
+            value
+                .get("env")
+                .and_then(|env| env.get("FOO"))
+                .and_then(Value::as_str),
+            Some("bar")
+        );
+        assert!(!state(&host).join("claude-token-env.json").exists());
+        assert!(
+            std::fs::read_to_string(&creds)
+                .expect("creds")
+                .contains("rt-1")
+        );
+    }
+
+    #[test]
+    fn d226_switch_back_removes_only_our_token() {
+        let dir = tempfile::tempdir().expect("dir");
+        let home = dir.path().join("claude");
+        write_settings(&home, r#"{"env":{"FOO":"bar"},"model":"opus"}"#);
+        let host = host(&dir);
+        let sub = subscription(&host);
+        let setup = setup_id(&host, &sub, SETUP_TOKEN);
+        let oauth = oauth_id(&host);
+        block_on(sub.write_agent_sign_in(&setup, &home, host.context())).expect("use");
+        block_on(sub.write_agent_sign_in(&setup, &home, host.context())).expect("again");
+        assert_eq!(env_token(&settings_value(&home)), Some(SETUP_TOKEN));
+        block_on(sub.write_agent_sign_in(&oauth, &home, host.context())).expect("back");
+        let value = settings_value(&home);
+        assert!(env_token(&value).is_none());
+        assert_eq!(
+            value
+                .get("env")
+                .and_then(|env| env.get("FOO"))
+                .and_then(Value::as_str),
+            Some("bar")
+        );
+        assert_eq!(value.get("model").and_then(Value::as_str), Some("opus"));
+        assert!(!state(&host).join("claude-token-env.json").exists());
+    }
+
+    #[test]
+    fn d226_remove_clears_our_token_and_keeps_a_user_value() {
+        let dir = tempfile::tempdir().expect("dir");
+        let home = dir.path().join("claude");
+        write_settings(&home, r#"{"env":{"FOO":"bar"}}"#);
+        let host = host(&dir);
+        let sub = subscription(&host);
+        let setup = setup_id(&host, &sub, SETUP_TOKEN);
+        block_on(sub.write_agent_sign_in(&setup, &home, host.context())).expect("use");
+        std::fs::write(home.join("settings.json"), "{\"env\": {").expect("broken");
+        let error = block_on(sub.remove_account(&setup, host.context())).expect_err("remove");
+        assert!(error.to_string().contains("can't be read"), "{error}");
+        assert!(!error.to_string().contains(SETUP_TOKEN), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(home.join("settings.json")).expect("settings"),
+            "{\"env\": {"
+        );
+        assert!(state(&host).join("claude-token-env.json").exists());
+
+        write_settings(
+            &home,
+            &format!(
+                r#"{{"env":{{"FOO":"bar","{key}":"{SETUP_TOKEN}"}}}}"#,
+                key = cli::OAUTH_TOKEN_VAR
+            ),
+        );
+        block_on(sub.remove_account(&setup, host.context())).expect("remove");
+        let value = settings_value(&home);
+        assert!(env_token(&value).is_none());
+        assert_eq!(
+            value
+                .get("env")
+                .and_then(|env| env.get("FOO"))
+                .and_then(Value::as_str),
+            Some("bar")
+        );
+        assert!(!state(&host).join("claude-token-env.json").exists());
+
+        let other = setup_id(&host, &sub, OTHER_TOKEN);
+        block_on(sub.write_agent_sign_in(&other, &home, host.context())).expect("other");
+        write_settings(
+            &home,
+            &format!(
+                r#"{{"env":{{"{key}":"{USER_TOKEN}"}}}}"#,
+                key = cli::OAUTH_TOKEN_VAR
+            ),
+        );
+        block_on(sub.remove_account(&other, host.context())).expect("remove other");
+        assert_eq!(env_token(&settings_value(&home)), Some(USER_TOKEN));
+    }
+
+    #[test]
+    fn d226_use_replaces_our_previous_token() {
+        let dir = tempfile::tempdir().expect("dir");
+        let home = dir.path().join("claude");
+        std::fs::create_dir_all(&home).expect("home");
+        let host = host(&dir);
+        let sub = subscription(&host);
+        let first = setup_id(&host, &sub, SETUP_TOKEN);
+        let second = setup_id(&host, &sub, OTHER_TOKEN);
+        block_on(sub.write_agent_sign_in(&first, &home, host.context())).expect("first");
+        block_on(sub.write_agent_sign_in(&second, &home, host.context())).expect("second");
+        assert_eq!(env_token(&settings_value(&home)), Some(OTHER_TOKEN));
+        let record = record_text(&host);
+        assert!(record.contains(&token_hash(OTHER_TOKEN)), "{record}");
+        assert!(!record.contains(OTHER_TOKEN), "{record}");
+        assert!(!record.contains(SETUP_TOKEN), "{record}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn d226_settings_file_is_owner_readable_only() {
+        for existed in [true, false] {
+            let dir = tempfile::tempdir().expect("dir");
+            let home = dir.path().join("claude");
+            std::fs::create_dir_all(&home).expect("home");
+            let settings = home.join("settings.json");
+            if existed {
+                std::fs::write(&settings, r#"{"model":"opus"}"#).expect("settings");
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&settings, std::fs::Permissions::from_mode(0o644))
+                    .expect("mode");
+            }
+            let host = host(&dir);
+            let sub = subscription(&host);
+            let id = setup_id(&host, &sub, SETUP_TOKEN);
+            block_on(sub.write_agent_sign_in(&id, &home, host.context())).expect("use");
+            assert_eq!(env_token(&settings_value(&home)), Some(SETUP_TOKEN));
+            assert_eq!(mode(&settings) & 0o077, 0, "mode {:o}", mode(&settings));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn d226_symlink_target_receives_the_token() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("dir");
+        let home = dir.path().join("claude");
+        let real_dir = dir.path().join("real");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::create_dir_all(&real_dir).expect("real");
+        let target = real_dir.join("settings.json");
+        std::fs::write(&target, r#"{"model":"opus"}"#).expect("target");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).expect("mode");
+        std::os::unix::fs::symlink(&target, home.join("settings.json")).expect("link");
+        let host = host(&dir);
+        let sub = subscription(&host);
+        let id = setup_id(&host, &sub, SETUP_TOKEN);
+        block_on(sub.write_agent_sign_in(&id, &home, host.context())).expect("use");
+        assert!(
+            home.join("settings.json")
+                .symlink_metadata()
+                .expect("link")
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(env_token(&settings_value(&home)), Some(SETUP_TOKEN));
+        assert_eq!(mode(&target) & 0o077, 0);
+        assert_eq!(
+            settings_value(&home).get("model").and_then(Value::as_str),
+            Some("opus")
+        );
     }
 }
