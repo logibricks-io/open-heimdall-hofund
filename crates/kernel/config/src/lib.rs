@@ -28,8 +28,8 @@ pub use allow::{
     trust_proxy_env,
 };
 pub use groups_write::{
-    edit_group_copy, edit_group_create, edit_group_delete, edit_group_patch, edit_group_restore,
-    group_id_from_name, validate_group_rules,
+    MemberEdit, edit_group_copy, edit_group_create, edit_group_delete, edit_group_patch,
+    edit_group_restore, group_id_from_name, validate_group_rules,
 };
 pub use provider_rename::{
     GATEWAY_PROVIDER_ID, GROUP_ROUTE_PREFIX, edit_provider_rename, provider_id_valid, renamed_ref,
@@ -1002,6 +1002,8 @@ pub struct Upstream {
     pub effort: Option<String>,
     /// Fast mode for this member.
     pub fast: bool,
+    /// Ultrafast mode for this member.
+    pub ultra: bool,
     /// Whether this member takes requests.
     pub enabled: bool,
 }
@@ -1773,12 +1775,14 @@ fn upstream_of(
 ) -> Result<Upstream, ConfigError> {
     let mut effort = None;
     let mut fast = false;
+    let mut ultra = false;
     let mut enabled = true;
     let (target, model, max_output_tokens, weight) = match upstream {
         RawUpstream::Id(provider) => (UpstreamTarget::Provider(provider), None, None, None),
         RawUpstream::Mapped(mapped) => {
             effort = mapped.effort.filter(|effort| !effort.trim().is_empty());
             fast = mapped.fast;
+            ultra = mapped.ultra;
             enabled = mapped.on;
             if mapped.weight == Some(0) {
                 return Err(ConfigError::Invalid(format!(
@@ -1890,6 +1894,7 @@ fn upstream_of(
         weight,
         effort,
         fast,
+        ultra,
         enabled,
     })
 }
@@ -2710,6 +2715,8 @@ struct RawMappedUpstream {
     effort: Option<String>,
     #[serde(default)]
     fast: bool,
+    #[serde(default)]
+    ultra: bool,
     #[serde(default = "default_true")]
     on: bool,
 }

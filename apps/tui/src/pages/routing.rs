@@ -1071,8 +1071,9 @@ impl RoutingPage {
             if !member.effort.is_empty() {
                 notes.push(format!("effort {}", member.effort));
             }
-            if member.fast {
-                notes.push("fast".to_owned());
+            if let Some(speed) = hofund_control_proto::member_speed_label(member.fast, member.ultra)
+            {
+                notes.push(speed.to_owned());
             }
             if !member.enabled {
                 notes.push("disabled".to_owned());
@@ -1220,6 +1221,7 @@ fn member_wires(members: &[GroupMember]) -> Vec<GroupMemberWire> {
             let mut wire = GroupMemberWire::new(member.reference.clone());
             wire.effort = member.effort.clone();
             wire.fast = member.fast;
+            wire.ultra = member.ultra;
             wire.enabled = member.enabled;
             wire
         })
@@ -1357,6 +1359,16 @@ fn ask_lines(ask: &Ask, theme: &Theme) -> Vec<Line<'static>> {
     lines
 }
 
+fn decision_tier_suffix(decision: &hofund_control_proto::RoutingDecision) -> String {
+    decision
+        .tries
+        .iter()
+        .rev()
+        .find(|attempt| !attempt.tier.is_empty())
+        .map(|attempt| format!("  {}", attempt.tier))
+        .unwrap_or_default()
+}
+
 fn route_lines(state: &RouteState, height: u16, theme: &Theme) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(Span::styled(
         "  route decisions · v returns to groups",
@@ -1412,14 +1424,15 @@ fn route_lines(state: &RouteState, height: u16, theme: &Theme) -> Vec<Line<'stat
         };
         lines.push(selected_line(
             format!(
-                "{marker}{} -> {}  {}{}",
+                "{marker}{} -> {}  {}{}{}",
                 decision.asked,
                 served,
                 decision.routing,
                 decision
                     .status
                     .map(|status| format!("  {status}"))
-                    .unwrap_or_default()
+                    .unwrap_or_default(),
+                decision_tier_suffix(decision)
             ),
             index == state.cursor,
             theme,
@@ -1459,6 +1472,33 @@ mod tests {
         assert_eq!(next_name(super::ROUTINGS, "smart"), "order");
         assert_eq!(next_name(super::ROUTINGS, "drain"), "smart");
         assert_eq!(next_name(super::ROUTINGS, "manual"), "smart");
+    }
+
+    #[test]
+    fn d224_ultrafast_member_is_labelled_ultrafast() {
+        assert_eq!(
+            hofund_control_proto::member_speed_label(true, true),
+            Some("Ultrafast")
+        );
+        assert_eq!(
+            hofund_control_proto::member_speed_label(false, true),
+            Some("Ultrafast")
+        );
+        assert_eq!(
+            hofund_control_proto::member_speed_label(true, false),
+            Some("fast")
+        );
+        assert_eq!(
+            hofund_control_proto::sent_tier_label("ultrafast"),
+            "Ultrafast"
+        );
+        assert_eq!(hofund_control_proto::sent_tier_label("priority"), "fast");
+        let mut decision = hofund_control_proto::RoutingDecision::default();
+        decision.tries.push(
+            hofund_control_proto::RouteTry::new("m", "p", "gpt-6.2-sol", true, Some(200), "")
+                .with_tier("Ultrafast"),
+        );
+        assert_eq!(super::decision_tier_suffix(&decision), "  Ultrafast");
     }
 
     #[test]

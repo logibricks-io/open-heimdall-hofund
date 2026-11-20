@@ -18,6 +18,9 @@ pub struct GroupMember {
     /// Whether the member is sent in fast mode.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fast: bool,
+    /// Whether the member is sent Ultrafast.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ultra: bool,
     /// Whether the member takes requests.
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -25,6 +28,18 @@ pub struct GroupMember {
 
 fn default_true() -> bool {
     true
+}
+
+/// Speed note for a group member. Ultrafast wins over fast.
+#[must_use]
+pub fn member_speed_label(fast: bool, ultra: bool) -> Option<&'static str> {
+    if ultra {
+        Some("Ultrafast")
+    } else if fast {
+        Some("fast")
+    } else {
+        None
+    }
 }
 
 /// One routing rule line stored in config.
@@ -187,6 +202,9 @@ pub struct GroupMemberWire {
     /// Whether the member is sent in fast mode.
     #[serde(default)]
     pub fast: bool,
+    /// Whether the member is sent Ultrafast.
+    #[serde(default)]
+    pub ultra: bool,
     /// Whether the member takes requests.
     #[serde(default = "default_member_enabled")]
     pub enabled: bool,
@@ -204,6 +222,7 @@ impl GroupMemberWire {
             reference,
             effort: String::new(),
             fast: false,
+            ultra: false,
             enabled: true,
         }
     }

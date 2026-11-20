@@ -429,6 +429,7 @@ pub(crate) fn expand(
                     free: hop.free,
                     stays: hop.stays,
                     cold_after: hop.cold_after,
+                    service_tier: hop.service_tier.clone(),
                     units: hop.units.clone(),
                 });
                 built.entry(key).or_insert(member.built);

@@ -55,6 +55,8 @@ mod control_sessions;
 mod control_settings;
 mod credits_modes;
 #[cfg(test)]
+mod d224_service_tiers;
+#[cfg(test)]
 mod d226_import;
 mod events;
 mod log_tail;
@@ -1171,6 +1173,7 @@ fn expand_route(
                     upstream.max_output_tokens,
                     upstream.weight.unwrap_or(1),
                     fallback,
+                    hofund_codec::service_tier::configured_tier(upstream.fast, upstream.ultra),
                     parents.clone(),
                     context,
                     seen,
@@ -1199,6 +1202,7 @@ fn expand_route(
                                     None,
                                     1,
                                     true,
+                                    String::new(),
                                     parents.clone(),
                                     context,
                                     seen,
@@ -1259,6 +1263,10 @@ fn expand_route(
                     } else {
                         hofund_router::affinity::CACHE_COLD
                     },
+                    service_tier: hofund_codec::service_tier::configured_tier(
+                        upstream.fast,
+                        upstream.ultra,
+                    ),
                     units,
                 });
             }
@@ -1334,6 +1342,7 @@ fn push_provider(
     max_output_tokens: Option<u64>,
     weight: u64,
     fallback: bool,
+    service_tier: String,
     mut parents: Vec<Unit>,
     context: &RoutePlanContext<'_>,
     seen: &mut BTreeSet<(String, String)>,
@@ -1404,6 +1413,7 @@ fn push_provider(
             free: free_hop(provider_free, listed.as_ref()),
             stays: effective_stays(root, &context.providers, &context.subscriptions),
             cold_after,
+            service_tier: service_tier.clone(),
             units: parents.clone(),
         });
     }
