@@ -23,7 +23,9 @@ Chat Completions and Responses read a top-level string `service_tier`. The word
 `gpt-6.2-sol`, `gpt-6-astra`, and `gpt-6.1-sol`, including dated snapshots of
 those ids. A ChatGPT-backend hop drops every other word, including `flex`,
 before the sent tier is recorded; the Codex body filter repeats that
-keep-list. A Responses stream copies a top-level `service_tier`, or
+keep-list. A subscription hop reports the backend base its plugin calls,
+including when the provider row stores no base URL, and these host rules
+read that attempt base. A Responses stream copies a top-level `service_tier`, or
 `response.service_tier` on `response.created` and `response.completed`, onto
 the start and delta events.
 

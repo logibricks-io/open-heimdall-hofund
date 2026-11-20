@@ -508,6 +508,15 @@ pub trait UpstreamProvider: Send + Sync + 'static {
 
     /// Drops idle keep-alive connections before the next upstream attempt.
     fn close_idle_connections(&self) {}
+
+    /// Base URL this upstream calls, or empty when it has no fixed base.
+    ///
+    /// A subscription adapter copies this onto the hop the router sees. The
+    /// provider row's own base URL is not that hop. The default is empty, so
+    /// an upstream that does not call one host leaves the hop unset.
+    fn attempt_base(&self) -> String {
+        String::new()
+    }
 }
 
 #[cfg(test)]

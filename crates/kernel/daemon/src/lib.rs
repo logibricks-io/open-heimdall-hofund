@@ -54,6 +54,8 @@ mod control_provider_write;
 mod control_sessions;
 mod control_settings;
 mod credits_modes;
+#[cfg(test)]
+mod d224_service_tiers;
 mod events;
 mod log_tail;
 mod measurements;

@@ -572,6 +572,26 @@ fn upstream_for(host: &TestHost, id: &AccountId) -> CodexUpstream {
     )
 }
 
+#[test]
+fn d224_attempt_base_is_the_backend_the_upstream_calls() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = AccountId::from_static("a-0000000000000001");
+    let production = CodexUpstream::new(
+        id.clone(),
+        host.context().clone(),
+        Arc::new(Endpoints::default()),
+        Arc::default(),
+        Arc::default(),
+    );
+    assert_eq!(production.attempt_base(), Endpoints::default().base);
+    assert_eq!(
+        production.attempt_base(),
+        "https://chatgpt.com/backend-api/codex"
+    );
+    assert_eq!(upstream_for(&host, &id).attempt_base(), BASE);
+}
+
 const EXPIRED_401: &[u8] = br#"{"error":{"message":"Provided authentication token is expired. Please try signing in again.","type":"invalid_request_error","code":"token_expired"}}"#;
 
 #[test]

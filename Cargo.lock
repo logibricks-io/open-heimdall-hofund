@@ -2263,6 +2263,7 @@ name = "hofund-daemon"
 version = "0.2.0-rc.2"
 dependencies = [
  "async-trait",
+ "axum",
  "bytes",
  "chrono",
  "futures-util",
