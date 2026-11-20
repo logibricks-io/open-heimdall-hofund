@@ -348,6 +348,7 @@ mod tests {
             router,
             listen,
             Arc::new(crate::responses_ws::SocketRegistry::default()),
+            Arc::new(crate::realtime::Registry::new()),
         )
         .await
         .expect("serve")

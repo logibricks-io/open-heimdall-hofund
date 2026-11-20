@@ -2757,6 +2757,43 @@ mod tests {
     }
 
     #[test]
+    fn d230_a_declared_realtime_path_replaces_the_provider_base_path() {
+        let config = hofund_config::load(
+            "[[providers]]\nid = \"plan\"\npreset = \"qwen-token-plan\"\napi_key = \"test-key\"\n",
+        )
+        .expect("config");
+        let planned = super::super::plan(&config.providers[0]).expect("plan");
+        assert_eq!(
+            planned.realtime_url,
+            "https://token-plan.maas.qianwenaiapi.com/api-ws/v1/realtime"
+        );
+        let endpoint =
+            super::super::endpoint_for(&config.providers[0], &planned).expect("endpoint");
+        assert_eq!(endpoint.realtime_url, planned.realtime_url);
+
+        let config = hofund_config::load(
+            "[[providers]]\nid = \"chat\"\npreset = \"openai\"\napi_key = \"test-key\"\n",
+        )
+        .expect("config");
+        let planned = super::super::plan(&config.providers[0]).expect("plan");
+        assert_eq!(planned.realtime_url, "https://api.openai.com/v1/realtime");
+
+        let config = hofund_config::load(
+            "[[providers]]\nid = \"plain\"\npreset = \"deepseek\"\napi_key = \"test-key\"\n",
+        )
+        .expect("config");
+        let planned = super::super::plan(&config.providers[0]).expect("plan");
+        assert_eq!(planned.realtime_url, "");
+
+        let config = hofund_config::load(
+            "[[providers]]\nid = \"custom\"\npreset = \"openai\"\napi_key = \"test-key\"\n[providers.options]\nrealtime = \"https://voice.example.test/session\"\n",
+        )
+        .expect("config");
+        let planned = super::super::plan(&config.providers[0]).expect("plan");
+        assert_eq!(planned.realtime_url, "https://voice.example.test/session");
+    }
+
+    #[test]
     fn list_only_raw_has_exact_keys_and_options_never_cross_plugins() {
         let config = hofund_config::load(
             "[[providers]]\nid = \"configured\"\npreset = \"google\"\nprotocol = \"openai-chat\"\napi_key = \"test-key\"\nheaders = { x-test = \"header-value\" }\n[providers.options]\nlocation = \"env:LOCATION\"\n[providers.models]\nurl = \"env:MODELS_URL\"\n",
@@ -2768,6 +2805,7 @@ mod tests {
             wire: Wire::Chat,
             protocol: Some(hofund_plugin_api::ProtocolId::OPENAI_CHAT),
             credential: Credential::Bearer,
+            realtime_url: String::new(),
         };
         let endpoint = super::endpoint_for(provider, &planned).expect("endpoint");
         let model_plan = ModelPlan {

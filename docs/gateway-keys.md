@@ -84,8 +84,8 @@ A read-only key may use only `GET` or `HEAD` on `/health`, `/me`, `/v1/hofund/me
 `/v1/hofund/limit`, `/v1/hofund/quotas`, and `/v1/hofund/quotas/history`. Every other route is
 refused before its handler or any upstream call with HTTP 403 and error code
 `gateway_key_read_only` in a `permission_error` envelope. Model lists and calls,
-token counts, writes, inbound surfaces, and both Responses WebSocket upgrades
-are refused. Route construction records every method and path; the
+token counts, writes, inbound surfaces, both Responses WebSocket upgrades, and
+both Realtime WebSocket upgrades are refused. Route construction records every method and path; the
 `r2_every_registered_route_is_allowed_or_refused_and_exercised` test fails when
 a route is unclassified, and exercises both lists. Restoring full access takes
 effect on the next request.

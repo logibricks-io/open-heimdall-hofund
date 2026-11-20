@@ -1611,6 +1611,8 @@ fn providers(
                     key_id: key.id.clone(),
                     http_profile: HttpProfile::direct(),
                     http_limits: limits,
+                    realtime_url: planned.realtime_url.clone(),
+                    realtime_authorization: realtime_authorization(&endpoint.api_key),
                 },
             );
             instances.insert(instance_id, instance);
@@ -1664,6 +1666,7 @@ fn provider_fingerprint(
         field(&mut hash, &format!("header:{name}"), value);
     }
     field(&mut hash, "base_url", &endpoint.base_url);
+    field(&mut hash, "realtime_url", &endpoint.realtime_url);
     Ok(hash
         .finalize()
         .iter()
@@ -1679,6 +1682,7 @@ fn endpoint_for(
     endpoint.preset = provider.preset.clone();
     endpoint.api_key = hofund_secrets::resolve(&provider.api_key).map_err(show)?;
     endpoint.credential = planned.credential;
+    endpoint.realtime_url = planned.realtime_url.clone();
     endpoint.headers = provider
         .headers
         .iter()
@@ -2134,6 +2138,8 @@ struct Planned {
     wire: Wire,
     protocol: Option<ProtocolId>,
     credential: Credential,
+    /// Absolute realtime endpoint before the model query. Empty when unset.
+    realtime_url: String,
 }
 
 fn compiled_credential(
@@ -2235,11 +2241,13 @@ fn plan_using(
         } else {
             Credential::Default
         };
+        let realtime_url = planned_realtime(provider, &selection.base_url, Some(compiled))?;
         return Ok(Planned {
             base_url: selection.base_url,
             wire: selection.wire,
             protocol: Some(selection.protocol),
             credential,
+            realtime_url,
         });
     }
     if let Some(preset) = &provider.preset {
@@ -2251,12 +2259,41 @@ fn plan_using(
             provider.id
         ))
     })?;
+    let realtime_url = planned_realtime(provider, &provider.base_url, None)?;
     Ok(Planned {
         base_url: provider.base_url.clone(),
         wire,
         protocol: selected.map(|(protocol, _)| protocol),
         credential: Credential::Default,
+        realtime_url,
     })
+}
+
+fn planned_realtime(
+    provider: &hofund_config::Provider,
+    base: &str,
+    compiled: Option<&registry::CompiledPreset>,
+) -> Result<String, DaemonError> {
+    let configured = option(provider, "realtime")?;
+    let declared = if configured.is_empty() {
+        compiled.map(|preset| preset.realtime).unwrap_or("")
+    } else {
+        configured
+    };
+    hofund_provider::realtime_target(base, declared).map_err(|error| {
+        DaemonError::new(format!(
+            "provider `{}` realtime endpoint: {error}",
+            provider.id
+        ))
+    })
+}
+
+fn realtime_authorization(api_key: &str) -> String {
+    if api_key.is_empty() {
+        String::new()
+    } else {
+        format!("Bearer {api_key}")
+    }
 }
 
 /// String options `plan` still reads while it builds a catalog URL.
