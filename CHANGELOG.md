@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0-rc.3] - 2026-11-20
+
+This is a third preview (prerelease) of v0.2.0. It carries the subscription,
+routing, and provider alignment fixes listed below. The `v0.2.0-rc.1` and
+`v0.2.0-rc.2` tags and GitHub Releases are left in place.
+
+Real-account smoke tests for subscriptions are still pending and remain
+Palmer's work: #304, #58, and #310. Request serving on this cut is verified
+with mocks and loopback tests only; do not treat it as live-verified.
+
+Held work is not in this cut: true 4.2–4.4 session recording, Library writes,
+and MCP execution (awaiting a second security review); R-47b; R-47 k
+credit-reset / `quota reset` / automatic consume; and the settings UI.
+Desktop bundles (macOS `.dmg`/`.app`, Linux `.deb`/AppImage, and a Windows
+NSIS installer) are produced by the existing tag workflow. As in
+`v0.2.0-rc.2`, the Windows MSI is omitted because WiX requires a
+numeric-only prerelease identifier. Signing and notarization run only when
+repository secrets are set; otherwise the artifacts are unsigned.
+
 ### Added
 
 - D-241: a remote gateway reads the preferred API on each `/v1/models` row, including a routing group, and asks that API when the client spoke a protocol the model does not serve. Chat the client itself sent stays Chat. `/v1/models` writes the same path under `preferred_api`. Those facts are stored on every key of the provider and seeded again from the saved model rows when the process starts, so a key that did not fetch the list and a restart that skips a fresh fetch still ask the preferred API and still return the catalog entry. Options `preferred_field`, `preferred_ask_header`, and `preferred_ask_value` read a remote that uses another field name or wants an extra list header. The ask header's value is sensitive, and a line break in its name or value is rejected. With those unset, only `preferred_api` is read and no extra header is sent. Codex is given the remote's own catalog from one `GET /v1/codex/models` with Codex's client version and the remote key. A failed catalog request keeps the entries already remembered. A handed catalog row is that remote object, with only the slug and one trailing ` via hofund` on the description changed. A remote id ending in `codex/<slug>` is this computer's whole cache row: the slug stays the gateway id and the description stays the cache text. A later request matches the exact listed id, or the single longest slash-bounded suffix, and stays on the client's protocol when two suffixes are the same length.
