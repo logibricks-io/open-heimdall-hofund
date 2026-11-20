@@ -581,6 +581,13 @@ impl HttpBackend for PooledHttp {
         crate::duplex::open_duplex(self, request).await
     }
 
+    async fn open_websocket(
+        &self,
+        request: hofund_plugin_api::WebSocketRequest,
+    ) -> Result<hofund_plugin_api::WebSocketSession, PluginError> {
+        crate::websocket::connect(request.kernel_uri(), request.kernel_headers()).await
+    }
+
     fn pooled_client(&self) -> Option<Arc<dyn Any + Send + Sync>> {
         client_handle(
             &self.profile,

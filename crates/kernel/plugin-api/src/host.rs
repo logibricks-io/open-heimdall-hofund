@@ -26,6 +26,7 @@ use crate::kernel::{
 #[cfg(feature = "kernel")]
 use crate::kernel::{NoBridgeCallback, NoLoopback};
 use crate::records::{Account, QuotaObservation, SignInCtx};
+use crate::websocket::{WebSocketRequest, WebSocketSession};
 use bytes::Bytes;
 use futures_util::future::BoxFuture;
 
@@ -63,6 +64,22 @@ impl HttpHandle {
     /// [`PluginErrorKind::Connect`](crate::PluginErrorKind::Connect) classify the failure for plugin fallback logic.
     pub async fn open_duplex(&self, request: DuplexRequest) -> Result<DuplexSession, PluginError> {
         self.inner.open_duplex(request).await
+    }
+
+    /// Opens one WebSocket on the host client.
+    ///
+    /// The plugin does not dial. A backend with no client returns
+    /// [`PluginErrorKind::Unsupported`](crate::PluginErrorKind::Unsupported).
+    /// A refused handshake keeps its HTTP status.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the dial or the handshake fails.
+    pub async fn open_websocket(
+        &self,
+        request: WebSocketRequest,
+    ) -> Result<WebSocketSession, PluginError> {
+        self.inner.open_websocket(request).await
     }
 
     /// The pooled client behind this handle, when the kernel built one.

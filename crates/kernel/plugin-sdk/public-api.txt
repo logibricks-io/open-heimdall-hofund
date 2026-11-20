@@ -408,4 +408,5 @@ wire::fn converse_call (target : & Target , model : & str , stream : bool , body
 wire::fn encode_outbound (outbound : ProtocolId , inbound : ProtocolId , request : Request ,) -> Result < Vec < u8 > , PluginError >
 wire::fn model_segment (model : & str) -> Result < String , PluginError >
 wire::fn path_segment (text : & str) -> String
+wire::fn prepare_outbound (target : & Target , request : Request , inbound : ProtocolId ,) -> Result < Vec < u8 > , PluginError >
 without_passthrough

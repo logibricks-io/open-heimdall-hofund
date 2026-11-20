@@ -26,6 +26,7 @@ mod pool;
 mod scripted;
 #[cfg(test)]
 mod test_tls;
+mod websocket;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsString;
@@ -918,6 +919,8 @@ pub struct RecordingHttp {
     calls: Mutex<Vec<RecordedRequest>>,
     scripted: Mutex<VecDeque<Scripted>>,
     progress: Notify,
+    /// Loopback origin a test dials instead of the request URI.
+    websocket_origin: Mutex<Option<String>>,
 }
 
 impl RecordingHttp {
@@ -955,6 +958,18 @@ impl RecordingHttp {
     /// The next `send` fails as [`PluginErrorKind::Timeout`](hofund_plugin_api::PluginErrorKind::Timeout).
     pub fn enqueue_timeout(&self, message: impl Into<String>) {
         self.push(Scripted::Timeout(message.into()));
+    }
+
+    /// Dials WebSocket handshakes at loopback `origin` instead of the request host.
+    ///
+    /// `origin` is an `http` or `https` URL on `127.0.0.1`, `localhost`, or
+    /// `[::1]`. Any other value is ignored, and a handshake stays unsupported.
+    /// The path and query of each request are kept.
+    pub fn serve_websockets_at(&self, origin: impl Into<String>) {
+        let origin = origin.into();
+        if crate::websocket::loopback_origin(&origin) {
+            *self.websocket_origin.lock().expect("websocket origin") = Some(origin);
+        }
     }
 
     fn push(&self, scripted: Scripted) {
@@ -1033,6 +1048,24 @@ impl HttpBackend for RecordingHttp {
             }
             None => Ok(HttpResponse::new(BodyStream::from_bytes(b"ok".to_vec()))),
         }
+    }
+
+    async fn open_websocket(
+        &self,
+        request: hofund_plugin_api::WebSocketRequest,
+    ) -> Result<hofund_plugin_api::WebSocketSession, hofund_plugin_api::PluginError> {
+        let origin = self
+            .websocket_origin
+            .lock()
+            .expect("websocket origin")
+            .clone();
+        let Some(origin) = origin else {
+            return Err(hofund_plugin_api::PluginError::unsupported(
+                "this HTTP backend has no websocket client",
+            ));
+        };
+        let uri = crate::websocket::loopback_uri(request.kernel_uri(), &origin)?;
+        crate::websocket::connect(&uri, request.kernel_headers()).await
     }
 }
 

@@ -13,6 +13,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 
 mod servers;
+mod websocket;
 
 pub use hofund_plugin_host::{
     PipedScript, PipedSpawn, RecordingHttp, RecordingObserve, RecordingProcess, RecordingScheduler,
@@ -21,6 +22,7 @@ pub use hofund_plugin_host::{
 pub use servers::{
     HeaderPark, Http1Response, Http1Server, Http2Response, Http2Server, header_park,
 };
+pub use websocket::{LoopbackSocket, SocketHit, SocketScript};
 
 /// Sends one HTTP/1.1 GET to a test sign-in listener and returns its reply.
 ///
