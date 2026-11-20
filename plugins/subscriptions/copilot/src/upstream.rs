@@ -11,6 +11,7 @@ use hofund_plugin_sdk::oauth::{TokenCache, same_secret, secret_text};
 use hofund_plugin_sdk::wire::{self, Target};
 
 use crate::auto::{self, AutoSession};
+use crate::image_cap;
 use crate::models::{self, Book, Listed};
 use crate::session::{self, Session};
 
@@ -104,6 +105,7 @@ impl CopilotUpstream {
         inbound: ProtocolId,
         auto: Option<&AutoSession>,
     ) -> Result<Completion, PluginError> {
+        let request = image_cap::within(&self.book, &self.account, request);
         let mut headers = session_request_headers(&request, session);
         if let Some(token) = auto.and_then(|picked| picked.token.as_ref()) {
             headers.push((
@@ -124,20 +126,17 @@ impl CopilotUpstream {
         .await
     }
 
-    async fn send_with_remint(
+    /// Sends once, and once more after a 401 with a newly minted session.
+    async fn send_once(
         &self,
         first: &Session,
-        prepared: Prepared,
+        protocol: ProtocolId,
+        request: Request,
         inbound: ProtocolId,
+        auto: Option<&AutoSession>,
     ) -> Result<Completion, PluginError> {
         match self
-            .send(
-                first,
-                prepared.protocol,
-                prepared.request.clone(),
-                inbound,
-                prepared.auto.as_ref(),
-            )
+            .send(first, protocol, request.clone(), inbound, auto)
             .await
         {
             Err(error) if error.status() == Some(401) => {
@@ -147,17 +146,56 @@ impl CopilotUpstream {
                     })
                     .await;
                 let renewed = session::session(&self.sessions, &self.host, &self.account).await?;
-                self.send(
-                    &renewed,
-                    prepared.protocol,
-                    prepared.request,
-                    inbound,
-                    prepared.auto.as_ref(),
-                )
-                .await
+                self.send(&renewed, protocol, request, inbound, auto).await
             }
             other => other,
         }
+    }
+
+    async fn send_with_remint(
+        &self,
+        first: &Session,
+        prepared: Prepared,
+        inbound: ProtocolId,
+    ) -> Result<Completion, PluginError> {
+        let Prepared {
+            request,
+            protocol,
+            auto,
+        } = prepared;
+        match self
+            .send_once(first, protocol, request.clone(), inbound, auto.as_ref())
+            .await
+        {
+            Err(error) => {
+                self.resend_under_image_cap(first, protocol, request, inbound, auto.as_ref(), error)
+                    .await
+            }
+            other => other,
+        }
+    }
+
+    /// Learns the cap from a 400 that says too many images and sends the
+    /// original turn once more. `send` fits that resend. A second such
+    /// refusal is returned.
+    async fn resend_under_image_cap(
+        &self,
+        first: &Session,
+        protocol: ProtocolId,
+        request: Request,
+        inbound: ProtocolId,
+        auto: Option<&AutoSession>,
+        error: PluginError,
+    ) -> Result<Completion, PluginError> {
+        let Some(cap) = image_cap::stated_cap(&error) else {
+            return Err(error);
+        };
+        let learned = image_cap::learn(&self.book, &self.account, &request.model, cap);
+        if !image_cap::omits_any(&request, learned) {
+            return Err(error);
+        }
+        self.send_once(first, protocol, request, inbound, auto)
+            .await
     }
 }
 

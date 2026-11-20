@@ -67,6 +67,8 @@ pub(crate) struct Book {
     accounts: Mutex<HashMap<AccountId, Listed>>,
     pub(crate) autos: Mutex<HashMap<AccountId, crate::auto::AutoSession>>,
     pub(crate) refused: Mutex<HashMap<AccountId, HashMap<String, std::time::SystemTime>>>,
+    /// Image caps learned from a "too many images" refusal, per model.
+    pub(crate) image_caps: Mutex<HashMap<AccountId, HashMap<String, usize>>>,
 }
 
 impl Book {
