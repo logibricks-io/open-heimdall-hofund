@@ -17,8 +17,9 @@ use std::time::{Duration, SystemTime};
 use hofund_config::{Accounts, Config};
 use hofund_control_proto::{Quota, QuotaKind};
 use hofund_plugin_api::{
-    AccountId, AccountStatus, HostContext, MemberId, PluginError, PluginErrorKind, PluginId,
-    PluginKind, QuotaObservation, QuotaWindow, RawTable, Subscription, UpstreamProvider,
+    AccountId, AccountStatus, AskBackend, AskSlot, HostContext, MemberId, PluginError,
+    PluginErrorKind, PluginId, PluginKind, QuotaObservation, QuotaWindow, RawTable, Subscription,
+    UpstreamProvider,
 };
 use hofund_plugin_host::HttpLimits;
 use hofund_router::Cooldowns;
@@ -75,6 +76,7 @@ pub(crate) struct SubscriptionState {
     timeouts: (Duration, Duration),
     at_once: u64,
     members: Mutex<Vec<SubscriptionMember>>,
+    ask: Arc<AskSlot>,
 }
 
 /// One account serving as a route member.
@@ -107,6 +109,7 @@ pub(crate) fn build(
     max_idle_per_host: Option<usize>,
     registry: &Arc<dyn DaemonRegistry>,
     previous: Option<&Subscriptions>,
+    ask: Option<Arc<dyn AskBackend>>,
 ) -> Result<Subscriptions, DaemonError> {
     let mut limits = HttpLimits::new(config.connect_timeout, config.read_timeout);
     if let Some(max_idle_per_host) = max_idle_per_host {
@@ -121,6 +124,9 @@ pub(crate) fn build(
             && state.root == root
             && state.timeouts == timeouts
         {
+            if let Some(ask) = &ask {
+                state.install_ask(Arc::clone(ask));
+            }
             built.insert(subscription.id.clone(), Arc::clone(state));
             continue;
         }
@@ -159,6 +165,10 @@ pub(crate) fn build(
             subscription.at_once,
             registry.subscription_max_accounts(&subscription.id),
         );
+        let slot = AskSlot::new();
+        if let Some(ask) = &ask {
+            slot.install(Arc::clone(ask));
+        }
         built.insert(
             subscription.id.clone(),
             Arc::new(SubscriptionState {
@@ -172,6 +182,7 @@ pub(crate) fn build(
                 timeouts,
                 at_once,
                 members: Mutex::new(Vec::new()),
+                ask: slot,
             }),
         );
     }
@@ -195,6 +206,11 @@ impl SubscriptionState {
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    /// Fills the nested-call slot the bridge reads.
+    pub(crate) fn install_ask(&self, backend: Arc<dyn AskBackend>) {
+        self.ask.install(backend);
     }
 
     /// The current members, in route order.
@@ -323,7 +339,8 @@ impl SubscriptionState {
             self.limits,
             membership::observe_backend_for(id.clone(), Arc::clone(cooldowns)),
         )
-        .map_err(show)?;
+        .map_err(show)?
+        .with_ask(Arc::clone(&self.ask) as Arc<dyn AskBackend>);
         let upstream = self.instance.upstream(account, &host).map_err(show)?;
         let adapter = adapt::ProviderAdapter::new(id.to_string(), Arc::clone(&upstream));
         Ok(SubscriptionMember {
@@ -810,7 +827,15 @@ mod tests {
 
     fn states(dir: &Path, config: &Config) -> Subscriptions {
         let registry: Arc<dyn DaemonRegistry> = Arc::new(RegistryAdapter);
-        build(config, &dir.join("hofund.toml"), Some(0), &registry, None).expect("subscriptions")
+        build(
+            config,
+            &dir.join("hofund.toml"),
+            Some(0),
+            &registry,
+            None,
+            None,
+        )
+        .expect("subscriptions")
     }
 
     fn cooldowns() -> Arc<Cooldowns> {
@@ -876,6 +901,7 @@ mod tests {
             Some(0),
             &registry,
             None,
+            None,
         )
         .err()
         .expect("http host rejected");
@@ -892,6 +918,7 @@ mod tests {
             &dir.path().join("hofund.toml"),
             Some(0),
             &registry,
+            None,
             None,
         )
         .err()

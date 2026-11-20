@@ -1885,8 +1885,9 @@ mod tests {
 
     use super::{
         AwsSigner, Events, Method, Path, Target, classify_count, consume_fields, converse_call,
-        endpoint_unsupported, failure_of, host_header, message_from, model_segment,
-        omit_max_tokens, path_segment, rewritten, route, sigv4, strip_billing_header, url_for,
+        encode_outbound, endpoint_unsupported, failure_of, host_header, message_from,
+        model_segment, omit_max_tokens, path_segment, rewritten, route, sigv4,
+        strip_billing_header, url_for,
     };
     use hofund_plugin_api::CountOutcome;
 
@@ -1971,6 +1972,35 @@ mod tests {
             body["tools"][0]["function"]["parameters"]["pattern"],
             r"^[^\u0000]*$"
         );
+    }
+
+    #[test]
+    fn d228_sdk_prepare_mends_the_body_create_and_count_would_post() {
+        let request = AnthropicMessages
+            .decode_request(br#"{"model":"demo","max_tokens":16,"messages":[{"role":"user","content":"go"},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}]}]}"#)
+            .expect("decode");
+        let created = encode_outbound(
+            ProtocolId::ANTHROPIC_MESSAGES,
+            ProtocolId::ANTHROPIC_MESSAGES,
+            request.clone(),
+        )
+        .expect("create");
+        let counted = omit_max_tokens(
+            encode_outbound(
+                ProtocolId::ANTHROPIC_MESSAGES,
+                ProtocolId::ANTHROPIC_MESSAGES,
+                request,
+            )
+            .expect("count"),
+        );
+        let created: serde_json::Value = serde_json::from_slice(&created).expect("json");
+        let counted: serde_json::Value = serde_json::from_slice(&counted).expect("json");
+        for body in [&created, &counted] {
+            assert_eq!(body["messages"][2]["content"][0]["tool_use_id"], "toolu_1");
+            assert_eq!(body["messages"][2]["content"][0]["is_error"], true);
+        }
+        assert_eq!(created["max_tokens"], 16);
+        assert!(counted.get("max_tokens").is_none(), "{counted}");
     }
 
     fn texts(request: &Request) -> Vec<String> {

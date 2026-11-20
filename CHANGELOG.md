@@ -16,6 +16,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - D-224: an inbound Chat or Responses `service_tier` of `fast` is sent upstream as `priority`. Ultrafast is offered for a ChatGPT-backend GPT Sol, Astra, or Terra model, for the public Responses models that host accepts, or for a member configured ultra. A public Chat hop does not offer Ultrafast, and there is no per-account plan list. Responses to `api.openai.com` send `ultrafast` only for the models that host accepts; Chat Completions to that host send `priority` instead. Usage prices the served tier: Fast and `priority` at 2x, Ultrafast at 6x, Flex at 0.5x, and `default` or `standard` at 1x. Only an empty or `auto` served tier falls back to the tier that was sent. The ChatGPT backend's placeholder `auto` and `default` are dropped before that choice. GPT-6.2 Astra and Sol Ultrafast is 3x through 2027-02-28 Pacific and 6x from 2027-03-01, using the call's day. A Responses stream keeps the served tier from `response.created` or `response.completed`. A member sent Ultrafast is labelled Ultrafast. A ChatGPT-backend hop drops any tier other than `priority` and `ultrafast` before the sent tier is recorded, so a dropped `flex` ask is the list price. `Fast` in any ASCII case is the same word as `fast`. A subscription hop reports the backend base its plugin calls through the adapter's attempt route, so those ChatGPT-backend rules apply when the provider row's base URL is empty. The production Codex base is `https://chatgpt.com/backend-api/codex`. An OpenAI-compat key reports the base it posts to. A ChatGPT API subscription reports the Responses base it posts to and the codec it speaks, so the public Responses host rule applies while the member label stays `subscription`. The plugin wire path keeps `service_tier` across a cross-protocol strip and adjusts the encoded body for the target base and codec before posting. A served `service_tier` survives a fold, a unary decode, and a cross-protocol stream, and the word on `response.completed` replaces an earlier word, so a reply of `default` is billed at the list price.
 
 ### Changed
+
+- D-227: A Claude Code request through the Claude subscription bridge that carries
+  an advisor server tool (`advisor_20260301`) for a model this gateway serves
+  keeps the client's instructions, offers an advisor tool beside the client's
+  tools, and answers a call by asking that model through normal routing as the
+  original gateway key. The client is told `server_tool_use` and
+  `advisor_tool_result`. One reply may ask three times; the next is
+  `max_uses_exceeded` and is not asked. A model this gateway does not serve is
+  left out and those instructions are voided. One advisor call waits at most
+  55 seconds. A dashed Claude id is sent as the provider spells the same
+  model. Relayed Messages replies record each `usage.iterations` advisor call
+  as its own usage row, kind `advisor`, priced at the advisor model. The
+  executor row is unchanged. Each reply, including a parked continuation,
+  starts that three-use count again and shows the advisor that reply's
+  conversation. A client tool already named `advisor` stays a client tool.
+  An advisor row stores the iteration's input as uncached input and keeps
+  cache reads on their own column. A model this gateway routes stays offered
+  when the caller's list would refuse it; that call then fails without asking
+  the provider. A dashed id that two providers both spell matches neither.
+  The nested ask records usage with the answering hop's protocol, so an input
+  total that already includes cache reads is not billed again. That row is
+  priced as the upstream model, not the route id, and it does not store
+  `advisor` as the client agent. The row keeps the provider key and the
+  sent and served service tiers, so a list price is multiplied the same way
+  as a direct call. An empty answer is recorded with the 502 `ask` returns.
+  A web search
+  on that run, when one is installed, uses the same original key. Refs D-227.
 - D-222: Antigravity can be used through the user's own local `agy` CLI (`plugins/subscriptions/agy-cli`). Saved accounts move into per-account homes, a written quota reset rests the requested model, and a verification refusal rests the account for 30 minutes. hofund does not download the CLI. A quota or verification sentence inside a success JSON field, or on standard error, rests the same way. A Code Assist body that names its reset keeps that duration on `reset_after`, a Google sign-in 429 with a model-pool sentence is a quota error, and an import probes each account through that account's proxy.
 - D-221: Antigravity sign-in, import, and add are refused for new accounts because Google suspends accounts it sees on Code Assist through Antigravity's own client. Saved accounts keep working and show a risk line. The message points at the agy CLI route. Gemini CLI is unchanged.
 - D-225: Generative Language and Vertex model paths escape each slash-separated segment and keep the slashes. An id with an empty, `.`, or `..` segment is escaped as one segment.
@@ -35,6 +62,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rest, not a restricted one. A token count, and a 200 body that is only an
   error object, rest the same way. Extra-usage and Usage Policy refusals are
   unchanged. Refs D-234.
+- D-228: A translated request with several tool results and a following user turn keeps every result in one user message, paired with its call. Consecutive Messages user messages that each carry a tool result stay separate, and the mend pairs calls across that run without dropping either message's other members.
+- D-228: An unanswered call in a consecutive user run gets its synthetic error result in the first user message, after that message's real results and before its other blocks. A later plain-text user message is not rewritten to hold that synthetic. A system or developer message held before the run is released after the last result, before a trailing text-only user message. A message that receives those blocks and arrived without `content` keeps its other members.
+- D-228: Filling tool-turn thinking keeps existing thinking and tool-use blocks, including on an earlier assistant when a later turn is the one rewritten. A Messages client's consecutive user or assistant turns stay separate, so each keeps its own cache mark. A folded developer reminder joins only an adjacent tool-result user and keeps both messages' other members. Text parts of that developer message are joined with a newline. Non-text parts of that developer message are not copied onto the reminder.
+- D-228: A Chat, Responses, or Generative request encoded for Messages folds a system or developer message that follows a reply into a user `<system-reminder>`, and never writes `developer` inside `messages`. A Messages client's own inline `system` turn stays in `messages`. A system message is encoded without `content` only when it arrived without that field. A developer message rewritten to system because its text is empty still carries `content` when the field was present, including an empty array or only non-text parts. A user or assistant message is still encoded with `content`. Duplicate call ids in one assistant message are reserved before a suffix is minted, so a real `{id}__2` is not taken by an earlier copy.
 - D-228: A Messages body whose `tool_use` and `tool_result` blocks do not pair is
   mended before it is sent to a Messages upstream. An unanswered call gets a
   synthetic error result, a result with no call becomes the text it said, a

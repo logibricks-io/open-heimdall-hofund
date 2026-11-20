@@ -922,6 +922,7 @@ fn decode_usage(mut object: Object) -> Result<Usage, CodecError> {
         cache_write_5m_tokens: None,
         cache_write_1h_tokens: None,
         reasoning_tokens: take_u64(&mut object, "thoughtsTokenCount")?,
+        advisor_calls: Vec::new(),
         extensions: Extensions::from_map(object),
     })
 }

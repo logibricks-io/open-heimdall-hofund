@@ -223,7 +223,7 @@ pub fn check(path: &Path) -> Result<(), DaemonError> {
         None,
         &registry,
     )?;
-    let _ = subscriptions::build(&config, path, None, &registry, None)?;
+    let _ = subscriptions::build(&config, path, None, &registry, None, None)?;
     Ok(())
 }
 
@@ -614,6 +614,8 @@ async fn start_inner(
             Arc::clone(&in_flight),
         );
     }
+    // Downgrade shares the allocation, so this follows every `Arc::get_mut` builder.
+    runtime.set_ask(gateway.ask_backend());
     let env = match options.hofund_addr {
         Some(value) => Some(value),
         None => hofund_config::addr_env(),

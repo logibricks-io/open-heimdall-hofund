@@ -52,6 +52,11 @@ pub trait RawTap: Send {
         SupplementalUsage::default()
     }
 
+    /// Advisor calls seen so far. A later non-empty list replaces the earlier one.
+    fn advisor_calls(&self) -> Vec<hofund_ir::AdvisorCall> {
+        Vec::new()
+    }
+
     /// Served `service_tier` copied from a start or delta event, when one arrived.
     fn served_tier(&self) -> String {
         String::new()
@@ -221,6 +226,7 @@ pub(crate) struct DecoderTap {
     input: Option<i64>,
     output: Option<i64>,
     supplemental: SupplementalUsage,
+    advisor_calls: Vec<hofund_ir::AdvisorCall>,
     served_tier: String,
 }
 
@@ -249,6 +255,7 @@ impl DecoderTap {
             input: None,
             output: None,
             supplemental: SupplementalUsage::default(),
+            advisor_calls: Vec::new(),
             served_tier: String::new(),
         }
     }
@@ -297,6 +304,9 @@ impl DecoderTap {
                 if let Some(value) = usage.reasoning_tokens {
                     self.supplemental.reasoning = i64::try_from(value).ok();
                 }
+                if !usage.advisor_calls.is_empty() {
+                    self.advisor_calls.clone_from(&usage.advisor_calls);
+                }
             }
         }
     }
@@ -339,6 +349,10 @@ impl RawTap for DecoderTap {
 
     fn supplemental_usage(&self) -> SupplementalUsage {
         self.supplemental
+    }
+
+    fn advisor_calls(&self) -> Vec<hofund_ir::AdvisorCall> {
+        self.advisor_calls.clone()
     }
 
     fn served_tier(&self) -> String {

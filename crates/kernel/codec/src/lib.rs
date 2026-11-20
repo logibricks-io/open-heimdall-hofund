@@ -8,6 +8,7 @@
 //! are documented in `docs/codecs.md`. Protocol names belong in this crate;
 //! vendor capability gaps belong in `quirks`.
 
+mod advisor;
 mod anthropic;
 pub mod citation_tidy;
 mod conversation;
@@ -30,6 +31,7 @@ pub mod service_tier;
 mod session;
 mod sse;
 
+pub use advisor::{AdvisorWire, ServedModel, advisor_wire, prepare_advisor_for_hop};
 pub use anthropic::AnthropicMessages;
 pub use conversation::{SESSION_HEADERS, SUBAGENT_HEADER, Turn, conversation_key, turn_in};
 pub use converse::Converse;
