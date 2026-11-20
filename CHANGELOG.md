@@ -13,7 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `api.anthropic.com`, that the vendor has turned off rests for two hours and
   the routing group asks the next member, including that provider's other
   accounts. The same words from a relay fail over with an ordinary failure
-  rest, not a restricted one. Extra-usage and Usage Policy refusals are
+  rest, not a restricted one. A token count, and a 200 body that is only an
+  error object, rest the same way. Extra-usage and Usage Policy refusals are
   unchanged. Refs D-234.
 - D-231: ChatGPT model-list asks, the `version` header, the User-Agent, and
   device sign-in name the newest plain `x.y.z` among a `0.169.1` floor, npm's

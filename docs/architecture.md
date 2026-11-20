@@ -470,9 +470,10 @@ deadlines and rungs to `rests.json` beside the configuration through a
 same-directory temporary file and rename, only when the snapshot changes. It
 restores configured members at startup, keeps ended rungs for 35 days, ignores
 corrupt files without failing startup, and lets in-process state win. Rate,
-quota, generic, observation, flat-credit, and subscription rests remain
+quota, generic, restricted, observation, flat-credit, and subscription rests remain
 in-memory. The daemon records call and stream outcomes, but counts never record
-success and cool only on 429 or transport-class failures.
+success and cool only on 429, a transport-class failure, or a plugin mark that
+the account is restricted or that the failure is ordinary.
 
 A failure that says no connection was made (a connect error, or a 502,
 transport, or I/O error naming a refused dial or failed lookup) does not rest

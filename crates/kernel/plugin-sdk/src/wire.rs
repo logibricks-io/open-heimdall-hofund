@@ -1385,7 +1385,7 @@ async fn decoded(
     }
     let bytes = collect(body).await?;
     if let Some(error) = carried_error(&bytes, allocation_quota_rate) {
-        return Err(error);
+        return Err(account_off_stream(messages_base.as_deref(), error));
     }
     let mut response = codec
         .decode_response(&bytes)
@@ -1404,7 +1404,7 @@ async fn raw(
     if !streaming {
         let bytes = collect(body).await?;
         if let Some(error) = carried_error(&bytes, allocation_quota_rate) {
-            return Err(error);
+            return Err(account_off_stream(messages_base.as_deref(), error));
         }
         return Ok(Completion::Raw(BodyStream::from_bytes(bytes)));
     }

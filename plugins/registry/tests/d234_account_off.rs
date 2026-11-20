@@ -205,3 +205,26 @@ async fn d234_in_band_error_event_before_content_follows_the_host() {
     assert!(error.is_ordinary_failure());
     assert!(!error.is_account_restricted());
 }
+
+#[tokio::test]
+async fn d234_unary_200_error_body_follows_the_host() {
+    for (base, restricted) in [
+        ("https://api.anthropic.com", true),
+        ("https://relay.example.com", false),
+    ] {
+        let (_root, host) = scripted();
+        host.http()
+            .enqueue_response(200, &[("content-type", "application/json")], ORG.as_bytes());
+        let provider = messages(base, &host);
+        let Err(error) = provider
+            .execute(request(false), ProtocolId::ANTHROPIC_MESSAGES)
+            .await
+        else {
+            panic!("{base} should fail");
+        };
+        assert_eq!(error.is_account_restricted(), restricted, "{base}");
+        assert_eq!(error.is_ordinary_failure(), !restricted, "{base}");
+        assert_eq!(error.status(), Some(400), "{base}");
+        assert!(host.http().calls()[0].uri().starts_with(base), "{base}");
+    }
+}
