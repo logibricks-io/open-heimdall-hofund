@@ -1,4 +1,7 @@
 //! Writing Claude Code's sign-in files from a stored account.
+//!
+//! A setup-token account has nothing to put in the sign-in store. Switching
+//! to one writes `CLAUDE_CODE_OAUTH_TOKEN` into `settings.json` instead.
 
 use std::path::Path;
 
@@ -20,12 +23,6 @@ pub(crate) async fn write(
     run_lock::wait(account, host).await?;
     creds::private_dir(home)?;
     let _refresh = lock::refresh_locks(home).await?;
-    let live = keychain::read_sign_in(host, home, ReadContext::AgentHome, false).await;
-    let live_refresh = live
-        .as_ref()
-        .and_then(|(credentials, _)| creds::refresh_token(&credentials.text));
-    sync_live_sign_in(home, host, live.as_ref().map(|(c, _)| c)).await?;
-
     let Some(secret) = host.accounts().secret(account).await? else {
         return Err(PluginError::auth(
             "no Claude Code sign-in is stored for this account",
@@ -33,8 +30,20 @@ pub(crate) async fn write(
     };
     let blob = SecretObject::parse(&secret)?;
     if crate::setup_token::is_setup_token(&blob) {
-        return Err(PluginError::config(crate::setup_token::AGENT_SWITCH));
+        let Some(token) = crate::setup_token::token_from_blob(&blob) else {
+            return Err(PluginError::auth(
+                "the stored setup-token account has no token",
+            ));
+        };
+        // The env value does not need a named live profile. The credentials
+        // file is left as it is.
+        return crate::token_env::set_token(host, home, &token);
     }
+    let live = keychain::read_sign_in(host, home, ReadContext::AgentHome, false).await;
+    let live_refresh = live
+        .as_ref()
+        .and_then(|(credentials, _)| creds::refresh_token(&credentials.text));
+    sync_live_sign_in(home, host, live.as_ref().map(|(c, _)| c)).await?;
     if blob.flag(creds::LAPSED) {
         return Err(PluginError::auth(creds::LAPSED_REASON));
     }
@@ -43,6 +52,9 @@ pub(crate) async fn write(
             "the stored Claude Code sign-in has no credentials",
         ));
     };
+    // Take our setup-token out before the stored sign-in moves. An unreadable
+    // settings file leaves that sign-in where it is.
+    crate::token_env::clear_ours(host, home)?;
     let profile = Profile::parse(blob.text(creds::PROFILE).unwrap_or_default());
     let write_loc = live
         .map(|(_, loc)| loc)

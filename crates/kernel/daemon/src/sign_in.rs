@@ -165,7 +165,7 @@ pub struct QuotaLine {
 /// One built subscription with the host its commands use.
 pub(crate) struct Opened {
     pub(crate) id: String,
-    name: String,
+    pub(crate) name: String,
     pub(crate) instance: Arc<dyn Subscription>,
     pub(crate) host: HostContext,
     pub(crate) config_dir: PathBuf,
@@ -243,6 +243,17 @@ pub(crate) fn find<'a>(opened: &'a [Opened], id: &str) -> Result<&'a Opened, Dae
 pub async fn accounts_import(opened: &[Opened], text: &str) -> Result<Vec<String>, DaemonError> {
     use hofund_plugin_api::PluginErrorKind;
 
+    if hofund_plugin_sdk::oauth::is_claude_setup_token_paste(text) {
+        let Some(entry) = opened.iter().find(|entry| entry.id == "claude") else {
+            return Err(DaemonError::new(
+                "that is a Claude setup-token; configure the Claude subscription to import it",
+            ));
+        };
+        return match entry.instance.import_accounts(text, &entry.host).await {
+            Ok(ids) => Ok(ids.into_iter().map(|id| id.to_string()).collect()),
+            Err(error) => Err(show(error)),
+        };
+    }
     let has_gemini = opened.iter().any(|entry| entry.id == "gemini");
     let has_antigravity = opened.iter().any(|entry| entry.id == "antigravity");
     let google_pair = has_gemini && has_antigravity;
