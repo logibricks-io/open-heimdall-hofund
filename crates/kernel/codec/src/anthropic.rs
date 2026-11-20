@@ -676,18 +676,22 @@ fn reminder_user(text: &str) -> Message {
     message
 }
 
-/// Joins consecutive user or assistant turns on a translated request, and a
-/// user turn with an adjacent tool-result turn, so a reminder does not split
-/// a call from its result. A Messages client does not use this pass.
+/// Joins consecutive user or assistant turns on a translated request.
+///
+/// Consecutive tool-result turns are joined with each other first, and that
+/// whole run is then joined with an adjacent user turn, so a following user
+/// or folded reminder does not leave an earlier result in its own message.
+/// A Messages client does not use this pass.
 fn merge_turns(messages: Vec<Message>) -> Vec<Message> {
     let mut out: Vec<Message> = Vec::new();
     for message in messages {
         if let Some(last) = out.last_mut() {
             let assistant = last.role == Role::Assistant && message.role == Role::Assistant;
             let users = last.role == Role::User && message.role == Role::User;
+            let tools = last.role == Role::Tool && message.role == Role::Tool;
             let user_tool = (last.role == Role::User && message.role == Role::Tool)
                 || (last.role == Role::Tool && message.role == Role::User);
-            if assistant || users || user_tool {
+            if assistant || users || tools || user_tool {
                 if user_tool {
                     last.role = Role::User;
                 }

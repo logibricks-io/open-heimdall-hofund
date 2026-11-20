@@ -142,21 +142,26 @@ developer message before any assistant, tool, or thinking turn joins that
 channel as its own block. The reference joins those texts into one system
 string with a blank line between them. One that follows a reply becomes a
 user message whose text is `<system-reminder>\n...\n</system-reminder>`.
-Consecutive user turns are joined, and a user turn is joined with an
-adjacent tool-result turn, so the reminder does not sit between a call and
-its result. Encode never writes `role: "developer"` inside `messages`. A
+Consecutive user turns are joined. Consecutive tool-result turns are joined
+with each other, and that run is joined with an adjacent user turn, so every
+answered call stays a tool result in one user message. Encode never writes `role: "developer"` inside `messages`. A
 Messages client's own later `system` message stays in `messages` with that
 role. Consecutive user or assistant messages from that client stay separate,
 so each keeps its own members. A later `developer` message becomes the
 reminder, or a `system` message when it has no text. Its other members stay,
 and its text parts are joined with a newline. That reminder joins only an
-adjacent tool-result user, and that user's members stay too. A message that
-arrived with no `content` field is encoded without one.
+adjacent tool-result user, and that user's members stay too. Consecutive user
+messages that each carry a tool result stay separate. The mend reads that
+whole run, so a later result still pairs and each message keeps its members.
+A system message that arrived with no `content` field, including a developer
+message rewritten to system because it has no text, is encoded without one.
+A user or assistant message is still encoded with `content`.
 
 After encode, `pair_messages_tool_blocks` mends the tool exchange on the
-bytes. A call the next message does not answer gets a synthetic error result
-whose text is `[The result of this tool call is unavailable: the turn was
-interrupted.]` and whose `is_error` is true, first in the following user
+bytes. A call the following run of user messages does not answer gets a
+synthetic error result whose text is
+`[The result of this tool call is unavailable: the turn was interrupted.]`
+and whose `is_error` is true, first in the following user
 message or in a user message of its own. A result that names no call of the
 message before becomes the text it said. A second answer to one call is
 dropped. A result that follows other content of its message moves first.

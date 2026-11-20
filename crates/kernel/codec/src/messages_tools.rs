@@ -1,6 +1,7 @@
 //! Mend a Messages request whose tool exchange would be refused.
 //!
-//! A call the next message does not answer gets a synthetic error result.
+//! A call the following run of user messages does not answer gets a synthetic
+//! error result.
 //! A result that names no call of the message before becomes the text it
 //! said. A second answer to one call is dropped, and a result that follows
 //! other content of its message moves first. Words an assistant message
@@ -65,7 +66,9 @@ fn paired_messages(msgs: &[u8]) -> Option<Vec<u8>> {
     let mut pending: Vec<Call> = Vec::new();
     let mut answered = HashSet::new();
     let mut held: Vec<Vec<u8>> = Vec::new();
-    for element in elements {
+    let mut index = 0;
+    while index < elements.len() {
+        let element = elements[index];
         if element.first() != Some(&b'{') {
             return None;
         }
@@ -73,6 +76,7 @@ fn paired_messages(msgs: &[u8]) -> Option<Vec<u8>> {
         if (role == "system" || role == "developer") && !pending.is_empty() {
             held.push(element.to_vec());
             changed = true;
+            index += 1;
             continue;
         }
         if role == "assistant" {
@@ -90,9 +94,48 @@ fn paired_messages(msgs: &[u8]) -> Option<Vec<u8>> {
                     out.push(message);
                 }
             }
+            index += 1;
             continue;
         }
-        match mend_user(element, content, &mut pending, &mut answered) {
+        if role == "user" && !pending.is_empty() {
+            let mut run = vec![element];
+            index += 1;
+            while index < elements.len() {
+                let next = elements[index];
+                if next.first() != Some(&b'{') {
+                    return None;
+                }
+                let (next_role, _) = message_view(next)?;
+                if next_role != "user" {
+                    break;
+                }
+                run.push(next);
+                index += 1;
+            }
+            let last = run.len() - 1;
+            for (offset, user) in run.into_iter().enumerate() {
+                let (_, user_content) = message_view(user)?;
+                match mend_user(
+                    user,
+                    user_content,
+                    &mut pending,
+                    &mut answered,
+                    offset == last,
+                ) {
+                    UserMend::Invalid => return None,
+                    UserMend::Same => out.push(user.to_vec()),
+                    UserMend::Changed(message) => {
+                        changed = true;
+                        out.push(message);
+                    }
+                }
+            }
+            out.append(&mut held);
+            pending.clear();
+            answered.clear();
+            continue;
+        }
+        match mend_user(element, content, &mut pending, &mut answered, true) {
             UserMend::Invalid => return None,
             UserMend::Same => out.push(element.to_vec()),
             UserMend::Changed(message) => {
@@ -103,6 +146,7 @@ fn paired_messages(msgs: &[u8]) -> Option<Vec<u8>> {
         out.append(&mut held);
         pending.clear();
         answered.clear();
+        index += 1;
     }
     if flush_unanswered(&mut out, &pending, &answered) {
         changed = true;
@@ -265,6 +309,7 @@ fn mend_user(
     content: Option<&[u8]>,
     pending: &mut [Call],
     answered: &mut HashSet<String>,
+    finish: bool,
 ) -> UserMend {
     let mut kept = Vec::new();
     let mut rest = Vec::new();
@@ -281,7 +326,14 @@ fn mend_user(
         Some(content) if content.first() == Some(&b'"') => rest.push(content.to_vec()),
         _ => {}
     }
-    let missing = missing_results(pending, answered);
+    // A later user message in this run may still answer an open call.
+    // Synthetics wait until the run ends, so an earlier message is not rewritten
+    // for a result that has not been seen yet.
+    let missing = if finish {
+        missing_results(pending, answered)
+    } else {
+        Vec::new()
+    };
     if !missing.is_empty() {
         touched = true;
     }
@@ -1158,6 +1210,118 @@ mod tests {
     }
 
     #[test]
+    fn d236_translated_chat_keeps_two_tool_results_with_a_following_user() {
+        let body = r#"{"model":"m","messages":[{"role":"user","content":"list"},{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"Bash","arguments":"{}"}},{"id":"call_2","type":"function","function":{"name":"Read","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_1","content":"a.go"},{"role":"tool","tool_call_id":"call_2","content":"b.go"},{"role":"user","content":"thanks"}]}"#;
+        let mut request = OpenAiChat.decode_request(body.as_bytes()).expect("decode");
+        request.strip_extensions();
+        let encoded = AnthropicMessages.encode_request(&request).expect("encode");
+        assert_two_results(&encoded, "thanks");
+    }
+
+    #[test]
+    fn d236_translated_responses_keeps_two_tool_results_with_a_following_user() {
+        let body = r#"{"model":"m","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"list"}]},{"type":"function_call","call_id":"call_1","name":"Bash","arguments":"{}"},{"type":"function_call","call_id":"call_2","name":"Read","arguments":"{}"},{"type":"function_call_output","call_id":"call_1","output":"a.go"},{"type":"function_call_output","call_id":"call_2","output":"b.go"},{"type":"message","role":"user","content":[{"type":"input_text","text":"thanks"}]}]}"#;
+        let mut request = OpenAiResponses
+            .decode_request(body.as_bytes())
+            .expect("decode");
+        request.strip_extensions();
+        let encoded = AnthropicMessages.encode_request(&request).expect("encode");
+        assert_two_results(&encoded, "thanks");
+    }
+
+    #[test]
+    fn d236_split_user_results_stay_in_their_messages_and_keep_marks() {
+        let first = r#"{"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"one"}],"cache_control":{"type":"ephemeral"}}"#;
+        let second = r#"{"role":"user","content":[{"type":"tool_result","tool_use_id":"b","content":"two"}],"cache_control":{"type":"ephemeral","ttl":"1h"}}"#;
+        let body = format!(
+            r#"{{"model":"m","messages":[{{"role":"assistant","content":[{{"type":"tool_use","id":"a","name":"n","input":{{}}}},{{"type":"tool_use","id":"b","name":"n","input":{{}}}}]}}, {first}, {second}]}}"#
+        );
+        let out = pair_messages_tool_blocks(body.as_bytes());
+        let value = json(&out);
+        let messages = value["messages"].as_array().expect("messages");
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[1]["content"][0]["type"], "tool_result");
+        assert_eq!(messages[1]["content"][0]["tool_use_id"], "a");
+        assert_eq!(messages[1]["content"][0]["content"], "one");
+        assert_eq!(messages[1]["cache_control"]["type"], "ephemeral");
+        assert!(messages[1]["cache_control"].get("ttl").is_none());
+        assert_eq!(messages[2]["content"][0]["type"], "tool_result");
+        assert_eq!(messages[2]["content"][0]["tool_use_id"], "b");
+        assert_eq!(messages[2]["content"][0]["content"], "two");
+        assert_eq!(messages[2]["cache_control"]["ttl"], "1h");
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains(first), "{text}");
+        assert!(text.contains(second), "{text}");
+        assert!(!text.contains(INTERRUPTED));
+    }
+
+    #[test]
+    fn d236_hand_built_exchanges_pair_every_call_and_keep_members() {
+        let chat = r#"{"model":"m","messages":[{"role":"system","content":"rules"},{"role":"user","content":"list"},{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"Bash","arguments":"{}"}},{"id":"call_2","type":"function","function":{"name":"Read","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_1","content":"a.go","cache_control":{"type":"ephemeral"}},{"role":"developer","content":[{"type":"text","text":"steer"},{"type":"text","text":"more"}]},{"role":"tool","tool_call_id":"call_2","content":"b.go"},{"role":"user","content":"thanks","name":"ada"}]}"#;
+        let chat_request = OpenAiChat.decode_request(chat.as_bytes()).expect("decode");
+        let chat_encoded = AnthropicMessages
+            .encode_request(&chat_request)
+            .expect("encode");
+        assert_answer_run(&chat_encoded, &["call_1", "call_2"], &["a.go", "b.go"]);
+        let chat_value = json(&chat_encoded);
+        assert_eq!(chat_value["system"], "rules");
+        let chat_answer = answer_message(&chat_value, 0);
+        assert_eq!(chat_answer["name"], "ada");
+        assert_eq!(chat_answer["cache_control"]["type"], "ephemeral");
+        assert!(
+            chat_answer["content"]
+                .as_array()
+                .expect("content")
+                .iter()
+                .any(|block| block["text"] == "<system-reminder>\nsteermore\n</system-reminder>")
+        );
+
+        let responses = r#"{"model":"m","input":[{"type":"message","role":"system","content":[{"type":"input_text","text":"rules"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"list"}]},{"type":"function_call","call_id":"call_1","name":"Bash","arguments":"{}"},{"type":"function_call","call_id":"call_2","name":"Read","arguments":"{}"},{"type":"function_call_output","call_id":"call_1","output":"a.go","name":"left"},{"type":"message","role":"developer","content":[{"type":"input_text","text":"steer"}]},{"type":"function_call_output","call_id":"call_2","output":"b.go"},{"type":"message","role":"user","content":[{"type":"input_text","text":"thanks"}],"name":"ada"}]}"#;
+        let responses_request = OpenAiResponses
+            .decode_request(responses.as_bytes())
+            .expect("decode");
+        let responses_encoded = AnthropicMessages
+            .encode_request(&responses_request)
+            .expect("encode");
+        assert_answer_run(&responses_encoded, &["call_1", "call_2"], &["a.go", "b.go"]);
+        let responses_value = json(&responses_encoded);
+        let responses_answer = answer_message(&responses_value, 0);
+        assert_eq!(responses_answer["name"], "ada");
+        let left = responses_answer["content"]
+            .as_array()
+            .expect("content")
+            .iter()
+            .find(|block| block["tool_use_id"] == "call_1")
+            .expect("call_1");
+        assert_eq!(left["name"], "left");
+        assert_eq!(left["type"], "tool_result");
+
+        let messages = r#"{"model":"m","max_tokens":8,"system":"rules","messages":[{"role":"user","content":"list","cache_control":{"type":"ephemeral"}},{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"Bash","input":{}},{"type":"tool_use","id":"call_2","name":"Read","input":{}}],"cache_control":{"type":"ephemeral","ttl":"5m"}},{"role":"developer","content":[{"type":"text","text":"steer"},{"type":"text","text":"more"}],"output_config":{"effort":"max"}},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"a.go"}],"cache_control":{"type":"ephemeral","ttl":"1h"}},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_2","content":"b.go"}],"cache_control":{"type":"ephemeral","ttl":"5m"}}]}"#;
+        let messages_request = AnthropicMessages
+            .decode_request(messages.as_bytes())
+            .expect("decode");
+        let messages_encoded = AnthropicMessages
+            .encode_request(&messages_request)
+            .expect("encode");
+        assert_answer_run(&messages_encoded, &["call_1", "call_2"], &["a.go", "b.go"]);
+        let messages_value = json(&messages_encoded);
+        assert_eq!(messages_value["system"], "rules");
+        let messages_list = messages_value["messages"].as_array().expect("messages");
+        assert_eq!(messages_list[0]["cache_control"]["type"], "ephemeral");
+        assert!(messages_list[0]["cache_control"].get("ttl").is_none());
+        assert_eq!(messages_list[1]["cache_control"]["ttl"], "5m");
+        assert_eq!(messages_list.len(), 4);
+        assert_eq!(messages_list[2]["cache_control"]["ttl"], "1h");
+        assert_eq!(messages_list[2]["output_config"]["effort"], "max");
+        assert_eq!(messages_list[3]["cache_control"]["ttl"], "5m");
+        assert!(messages_list[3].get("output_config").is_none());
+        assert_eq!(
+            messages_list[2]["content"][1]["text"],
+            "<system-reminder>\nsteer\nmore\n</system-reminder>"
+        );
+    }
+
+    #[test]
     fn d236_duplicate_id_does_not_steal_a_later_real_suffix() {
         let body = br#"{"model":"m","messages":[{"role":"assistant","content":[{"type":"tool_use","id":"x","name":"n","input":{}},{"type":"tool_use","id":"x","name":"n","input":{}},{"type":"tool_use","id":"x__2","name":"n","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"x","content":"one"},{"type":"tool_result","tool_use_id":"x__2","content":"real"}]}]}"#;
         let out = pair_messages_tool_blocks(body);
@@ -1280,5 +1444,92 @@ mod tests {
                 .windows(INTERRUPTED.len())
                 .any(|window| window == INTERRUPTED.as_bytes())
         );
+    }
+
+    fn assert_two_results(encoded: &[u8], tail: &str) {
+        assert_answer_run(encoded, &["call_1", "call_2"], &["a.go", "b.go"]);
+        let value = json(encoded);
+        let messages = value["messages"].as_array().expect("messages");
+        assert_eq!(messages.len(), 3, "{value}");
+        let answer = &messages[2];
+        assert!(
+            answer["content"]
+                .as_array()
+                .expect("content")
+                .iter()
+                .any(|block| block["text"] == tail),
+            "{answer}"
+        );
+    }
+
+    fn assert_answer_run(encoded: &[u8], calls: &[&str], outputs: &[&str]) {
+        let value = json(encoded);
+        let messages = value["messages"].as_array().expect("messages");
+        assert!(
+            messages.iter().all(|message| {
+                let role = message["role"].as_str().unwrap_or("");
+                role != "system" && role != "developer"
+            }),
+            "{value}"
+        );
+        let assistant = messages
+            .iter()
+            .position(|message| {
+                message["content"]
+                    .as_array()
+                    .is_some_and(|blocks| blocks.iter().any(|block| block["type"] == "tool_use"))
+            })
+            .expect("assistant");
+        let mut found = Vec::new();
+        for message in messages.iter().skip(assistant + 1) {
+            if message["role"] != "user" {
+                break;
+            }
+            let Some(blocks) = message["content"].as_array() else {
+                continue;
+            };
+            for block in blocks {
+                if block["type"] != "tool_result" {
+                    continue;
+                }
+                found.push((
+                    block["tool_use_id"].as_str().unwrap_or("").to_owned(),
+                    block["content"].as_str().unwrap_or("").to_owned(),
+                ));
+            }
+        }
+        assert_eq!(found.len(), calls.len(), "{found:?} {value}");
+        for (call, output) in calls.iter().zip(outputs.iter()) {
+            assert!(
+                found
+                    .iter()
+                    .any(|(id, content)| id == call && content == output),
+                "{call} {found:?}"
+            );
+        }
+        let ids: Vec<_> = found.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(
+            ids.len(),
+            ids.iter().collect::<std::collections::BTreeSet<_>>().len()
+        );
+        assert!(!String::from_utf8_lossy(encoded).contains(INTERRUPTED));
+    }
+
+    fn answer_message(value: &Value, assistant_ordinal: usize) -> &Value {
+        let messages = value["messages"].as_array().expect("messages");
+        let mut seen = 0;
+        for (index, message) in messages.iter().enumerate() {
+            let calls = message["content"]
+                .as_array()
+                .is_some_and(|blocks| blocks.iter().any(|block| block["type"] == "tool_use"));
+            if !calls {
+                continue;
+            }
+            if seen == assistant_ordinal {
+                return &messages[index + 1];
+            }
+            seen += 1;
+        }
+        panic!("missing answer {value}");
     }
 }
