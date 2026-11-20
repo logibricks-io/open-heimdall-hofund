@@ -6,7 +6,17 @@ use hofund_plugin_sdk::oauth::{
     SecretObject, account_id_from, parse_google_import, parse_token_set, same_secret, token_error,
 };
 
-use crate::{Endpoints, client, project, sign_in, tokens};
+use crate::{ENROLLMENT_REFUSAL, Endpoints, client, project, sign_in, tokens};
+
+/// Refuses an export this plugin would store. An export it cannot read
+/// returns the existing config error.
+pub(crate) fn reject_new_enrollment(text: &str) -> Result<(), PluginError> {
+    let entries = parse_google_import("antigravity", "Antigravity", text)?;
+    if entries.iter().any(|entry| entry.error().is_none()) {
+        return Err(PluginError::config(ENROLLMENT_REFUSAL));
+    }
+    Ok(())
+}
 
 pub(crate) async fn store(
     host: &HostContext,

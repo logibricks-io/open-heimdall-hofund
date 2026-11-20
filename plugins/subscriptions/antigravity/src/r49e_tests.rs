@@ -42,7 +42,7 @@ fn host_at(dir: &tempfile::TempDir, now: SystemTime) -> TestHost {
 }
 
 fn subscription(host: &TestHost) -> Arc<dyn Subscription> {
-    let factory = factory_with_endpoints(endpoints());
+    let factory = factory_with_endpoints(endpoints()).with_new_accounts_for_test();
     let mut raw = RawTable::new();
     raw.insert(client::ID_KEY, RawValue::String(TEST_CLIENT_ID.to_owned()));
     raw.insert(

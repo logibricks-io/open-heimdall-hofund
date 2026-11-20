@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- D-221: Antigravity sign-in, import, and add are refused for new accounts because Google suspends accounts it sees on Code Assist through Antigravity's own client. Saved accounts keep working and show a risk line. The message points at the agy CLI route. Gemini CLI is unchanged.
+- D-225: Generative Language and Vertex model paths escape each slash-separated segment and keep the slashes. An id with an empty, `.`, or `..` segment is escaped as one segment.
+
 ### Fixed
 
 - D-228: A Messages body whose `tool_use` and `tool_result` blocks do not pair is
@@ -20,6 +25,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   after the results, and keeps two calls that share an id as two ids, each
   answered. Passthrough, `count_tokens`, and translated Messages builds use
   this one pass. A body that is already in shape is not serialized again.
+- D-232: GPT-6.2 and later send Codex instructions, the client's instructions,
+  and a translated system prompt as leading `developer` input items, with no
+  top-level `instructions`. Older models stay unchanged. This applies to the
+  Codex subscription, the ChatGPT API subscription, and translated Chat and
+  Anthropic Responses encodes. When Codex's instructions are unknown or blank,
+  the client's text still moves to the front of `input` on those models.
+- D-223: A Codex Responses Lite turn (an `additional_tools` input item, or
+  `reasoning.context` of `all_turns`, and no client instructions) is sent
+  without added instructions and without `reasoning.summary`. A Lite turn on
+  GPT-6.2 keeps those Lite rules. A socket replay removes `x-codex-turn-state`
+  from `client_metadata` once it is a header, and that socket keeps the last
+  reply's state for the same turn id. A per-account store for pooled turns is
+  not implemented.
 - D-231: ChatGPT model-list asks, the `version` header, the User-Agent, and
   device sign-in name the newest plain `x.y.z` among a `0.169.1` floor, npm's
   latest `@openai/codex` release (read at most every six hours on the host

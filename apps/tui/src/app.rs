@@ -1164,7 +1164,7 @@ pub enum AppAction {
 mod tests {
     use super::{App, next_page};
     use crate::intent::ControlIntent;
-    use crate::session::{Finished, ModelView, ProviderSnapshot, SessionOutcome};
+    use crate::session::{AccountsOutcome, Finished, ModelView, ProviderSnapshot, SessionOutcome};
     use crate::state::PageId;
 
     fn key(code: KeyCode) -> crossterm::event::KeyEvent {
@@ -1211,6 +1211,30 @@ mod tests {
         let mut applied = false;
         app.apply_read_result(stale, |_| applied = true);
         assert!(!applied);
+    }
+
+    #[test]
+    fn d221_sign_in_and_import_errors_are_shown() {
+        let mut app = App::for_test(PageId::Accounts);
+        let generation = app.generation();
+        let refusal = "Antigravity is withdrawn for new accounts";
+        app.apply_accounts(AccountsOutcome::Start {
+            generation,
+            subscription: "antigravity".to_owned(),
+            result: Err(refusal.to_owned()),
+        });
+        assert_eq!(
+            app.flash.as_ref().map(|flash| flash.text.as_str()),
+            Some(refusal)
+        );
+        app.apply_accounts(AccountsOutcome::Mutation {
+            generation,
+            result: Err(refusal.to_owned()),
+        });
+        assert_eq!(
+            app.flash.as_ref().map(|flash| flash.text.as_str()),
+            Some(refusal)
+        );
     }
 
     #[test]

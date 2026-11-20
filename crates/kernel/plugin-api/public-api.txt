@@ -7,6 +7,12 @@ Account::fn from_stored (plugin : PluginId , id : AccountId , label : impl Into 
 Account::fn from_stored_scoped (plugin : PluginKey , id : AccountId , label : impl Into < String > ,) -> Result < Self , PluginError >
 Account::fn id (& self) -> & AccountId
 Account::fn label (& self) -> & str
+AccountEnrollment
+AccountEnrollment #[non_exhaustive] derives(Clone, Copy, Debug, Default, PartialEq, Eq)
+AccountEnrollment::Open
+AccountEnrollment::Withdrawn
+AccountEnrollment::const fn refusal (self) -> Option < & 'static str >
+AccountEnrollment::const fn risk (self) -> Option < & 'static str >
 AccountId
 AccountId::as_str
 AccountId::from_static
@@ -1259,6 +1265,7 @@ Subscription::async fn shutdown (& self , deadline : Duration) -> Result < () , 
 Subscription::async fn start_sign_in (& self , ctx : & SignInCtx , host : & HostContext ,) -> Result < SignInChallenge , PluginError >
 Subscription::async fn warmup_probe (& self , account : & AccountId , host : & HostContext , model : & str ,) -> Result < () , PluginError >
 Subscription::async fn write_agent_sign_in (& self , account : & AccountId , home : & std :: path :: Path , host : & HostContext ,) -> Result < () , PluginError >
+Subscription::fn account_enrollment (& self) -> AccountEnrollment
 Subscription::fn flow (& self) -> & SignInFlow
 Subscription::fn id (& self) -> & PluginId
 Subscription::fn upstream (& self , account : & AccountId , host : & HostContext ,) -> Result < Arc < dyn UpstreamProvider > , PluginError >

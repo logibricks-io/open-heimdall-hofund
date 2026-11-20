@@ -38,7 +38,7 @@ pub use messages_tools::pair_messages_tool_blocks;
 pub use openai_chat::OpenAiChat;
 pub use openai_responses::{
     OpenAiResponses, PLUGIN_HOST_PREFIX, STREAM_CLIENT_PREFIXES, STREAM_TURN_METADATA_HEADER,
-    STREAM_WINDOW_HEADER, UNMAPPED_TOOLS, compacts_in_stream_client,
+    STREAM_WINDOW_HEADER, UNMAPPED_TOOLS, compacts_in_stream_client, instructions_after_input,
 };
 pub use passthrough::{EndWatch, RawTap, StreamEnd};
 pub use refusal::refusal_error;

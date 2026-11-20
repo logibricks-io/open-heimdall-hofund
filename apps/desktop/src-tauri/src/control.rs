@@ -11,7 +11,7 @@ use hofund_agent::{GatewayTarget, Session, catalog};
 use hofund_daemon::{
     QuotaAlertEvent, Running, StartOptions, agent_descriptions, configured_listen,
     control_event_bus, ensure_config_file, local_gateway, route_models, start_with_options,
-    usage_report,
+    subscription_list, usage_report,
 };
 use serde::Serialize;
 
@@ -43,6 +43,8 @@ pub(crate) struct Snapshot {
     pub today: String,
     /// Retained quota card lines while running, otherwise empty.
     pub quotas: Vec<String>,
+    /// Risk lines for saved accounts whose new enrollment is withdrawn.
+    pub risks: Vec<String>,
     /// The latest action error, or empty.
     pub message: String,
     /// Every catalog adapter, in catalog order.
@@ -99,6 +101,17 @@ pub(crate) fn menu_entries(snapshot: &Snapshot) -> Vec<MenuEntry> {
             entries.push(MenuEntry {
                 id: format!("quota:{index}"),
                 label: quota.clone(),
+                enabled: false,
+                checked: None,
+            });
+        }
+    }
+    if !snapshot.risks.is_empty() {
+        entries.push(separator("separator-risks"));
+        for (index, risk) in snapshot.risks.iter().enumerate() {
+            entries.push(MenuEntry {
+                id: format!("risk:{index}"),
+                label: risk.clone(),
                 enabled: false,
                 checked: None,
             });
@@ -309,6 +322,27 @@ impl Control {
         self.store(result)
     }
 
+    /// Risk lines for saved accounts. `subscription_list` starts a runtime of
+    /// its own, so a caller that is already driving the app runtime reads the
+    /// list on a fresh thread.
+    fn saved_account_risks(path: &std::path::Path) -> Vec<String> {
+        let path = path.to_path_buf();
+        let load = move || -> Vec<String> {
+            subscription_list(&path)
+                .map(|listings| {
+                    listings
+                        .into_iter()
+                        .filter_map(|listing| listing.notice)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        if tokio::runtime::Handle::try_current().is_err() {
+            return load();
+        }
+        std::thread::scope(|scope| scope.spawn(load).join().unwrap_or_else(|_| Vec::new()))
+    }
+
     /// Creates the config file when it is missing, then opens it.
     pub(crate) fn open_config(&mut self) -> Result<(), String> {
         let result = open_config_file(&self.config_path);
@@ -373,6 +407,7 @@ impl Control {
             } else {
                 Vec::new()
             },
+            risks: Self::saved_account_risks(&self.config_path),
             message: self.message.clone(),
             agents,
         }
@@ -500,6 +535,7 @@ mod tests {
             route: "Route: demo → provider/member".to_owned(),
             today: "Today: 1 request, 12.3k tokens".to_owned(),
             quotas: vec!["Work: 42% · 18%".to_owned(), "Plan: 12 credits".to_owned()],
+            risks: Vec::new(),
             message: String::new(),
             agents: Vec::new(),
         };
@@ -553,6 +589,32 @@ mod tests {
             !matches!(entry.id.as_str(), "route" | "today" | "separator-quotas")
                 && !entry.id.starts_with("quota:")
         }));
+    }
+
+    #[test]
+    fn d221_the_menu_shows_a_saved_account_risk_line() {
+        let snapshot = Snapshot {
+            running: false,
+            listen: "127.0.0.1:3425".to_owned(),
+            route: String::new(),
+            today: String::new(),
+            quotas: Vec::new(),
+            risks: vec!["saved-account risk line".to_owned()],
+            message: String::new(),
+            agents: Vec::new(),
+        };
+        let entries = menu_entries(&snapshot);
+        let risk = entries
+            .iter()
+            .find(|entry| entry.id == "risk:0")
+            .expect("risk");
+        assert_eq!(risk.label, "saved-account risk line");
+        assert!(!risk.enabled);
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.id == "separator-risks" && entry.label.is_empty())
+        );
     }
 
     #[test]

@@ -254,6 +254,7 @@ async fn serve_socket(app: Arc<Inner>, origin: Parts, mut socket: WebSocket) {
         app,
         origin,
         held: VecDeque::new(),
+        kept: None,
         stats: SocketStats::default(),
     }
     .run(socket, lifecycle)
@@ -375,7 +376,14 @@ struct SocketSession {
     app: Arc<Inner>,
     origin: Parts,
     held: VecDeque<HeldTurn>,
+    /// Last reply's turn-state header, kept for that turn id only.
+    kept: Option<KeptTurn>,
     stats: SocketStats,
+}
+
+struct KeptTurn {
+    turn_id: String,
+    state: String,
 }
 
 impl SocketSession {
@@ -517,6 +525,18 @@ impl SocketSession {
         if let Prepared::Replay { body, .. } = &prepared {
             self.stats.bytes_sent += body.len() as u64;
         }
+        let mut prepared = prepared;
+        let turn_id = match &mut prepared {
+            Prepared::Replay {
+                turn_id,
+                remembered,
+                ..
+            } => {
+                *remembered = recalled_state(&self.kept, turn_id);
+                turn_id.clone()
+            }
+            Prepared::Warmup { .. } => String::new(),
+        };
         let run = Arc::new(TurnRun::new());
         let turn_writer = writer.for_turn(&run);
         let cancelled = run.subscribe();
@@ -532,7 +552,14 @@ impl SocketSession {
             tokio::select! {
                 outcome = &mut task => {
                     return match outcome {
-                        Ok(mapped) => DriveResult::Finished(mapped),
+                        Ok(mapped) => {
+                            note_reply_state(
+                                &mut self.kept,
+                                &turn_id,
+                                mapped.reply_state.as_deref(),
+                            );
+                            DriveResult::Finished(mapped)
+                        }
                         Err(_) => DriveResult::Disconnected,
                     };
                 }
@@ -610,7 +637,18 @@ impl SocketSession {
             message: error.to_string(),
             param: None,
         })?;
-        Ok(Prepared::Replay { body, input })
+        let turn_id = value
+            .get("client_metadata")
+            .and_then(|metadata| metadata.get("turn_id"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        Ok(Prepared::Replay {
+            body,
+            input,
+            turn_id,
+            remembered: None,
+        })
     }
 }
 
@@ -662,8 +700,13 @@ async fn run_prepared(
     let work = async move {
         match prepared {
             Prepared::Warmup { input, model } => warmup(&writer, &run, input, model).await,
-            Prepared::Replay { body, input } => {
-                let request = replay_request(&origin, &body);
+            Prepared::Replay {
+                body,
+                input,
+                remembered,
+                ..
+            } => {
+                let request = replay_request(&origin, &body, remembered.as_deref());
                 let response = match request_router(&app).oneshot(request).await {
                     Ok(response) => response,
                     Err(never) => match never {},
@@ -675,11 +718,7 @@ async fn run_prepared(
     tokio::pin!(work);
     tokio::select! {
         biased;
-        _ = cancelled.wait_for(|cancelled| *cancelled) => MappedTurn {
-            held: None,
-            cut: false,
-            connected: true,
-        },
+        _ = cancelled.wait_for(|cancelled| *cancelled) => idle(true),
         mapped = &mut work => mapped,
     }
 }
@@ -710,11 +749,7 @@ async fn warmup(
     )
     .await
     {
-        return MappedTurn {
-            held: None,
-            cut: false,
-            connected: false,
-        };
+        return idle(false);
     }
     response.insert("status".to_owned(), Value::String("completed".to_owned()));
     response.insert(
@@ -730,6 +765,7 @@ async fn warmup(
         held: connected.then_some(HeldTurn { id, items: input }),
         cut: false,
         connected,
+        reply_state: None,
     }
 }
 
@@ -750,6 +786,8 @@ enum Prepared {
     Replay {
         body: Vec<u8>,
         input: Vec<Value>,
+        turn_id: String,
+        remembered: Option<String>,
     },
 }
 
@@ -775,7 +813,7 @@ fn input_items(input: Option<&Value>) -> Result<Vec<Value>, LocalError> {
     }
 }
 
-fn replay_request(origin: &Parts, body: &[u8]) -> Request<Body> {
+fn replay_request(origin: &Parts, body: &[u8], remembered: Option<&str>) -> Request<Body> {
     let mut parts = origin.clone();
     parts.method = Method::POST;
     let nominated: Vec<String> = origin
@@ -829,18 +867,25 @@ fn replay_request(origin: &Parts, body: &[u8]) -> Request<Body> {
         header::ACCEPT,
         HeaderValue::from_static("text/event-stream"),
     );
-    if let Ok(length) = HeaderValue::try_from(body.len().to_string()) {
-        headers.insert(header::CONTENT_LENGTH, length);
-    }
-    if let Ok(value) = serde_json::from_slice::<Value>(body) {
-        if let Some(turn_state) = value
-            .get("client_metadata")
-            .and_then(|metadata| metadata.get(wire::TURN_STATE))
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            && let Ok(turn_state) = HeaderValue::try_from(turn_state)
+    let mut body_bytes = body.to_vec();
+    let mut client_state = None;
+    if let Ok(mut value) = serde_json::from_slice::<Value>(&body_bytes) {
+        let mut stripped = false;
+        if let Some(metadata) = value
+            .get_mut("client_metadata")
+            .and_then(Value::as_object_mut)
+            && let Some(state) = metadata
+                .get(wire::TURN_STATE)
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
         {
-            headers.insert(wire::TURN_STATE, turn_state);
+            metadata.remove(wire::TURN_STATE);
+            client_state = Some(state);
+            stripped = true;
+        }
+        if stripped && let Ok(encoded) = serde_json::to_vec(&value) {
+            body_bytes = encoded;
         }
         if value
             .get("client_metadata")
@@ -851,14 +896,71 @@ fn replay_request(origin: &Parts, body: &[u8]) -> Request<Body> {
             headers.insert(wire::LITE_HEADER, HeaderValue::from_static("true"));
         }
     }
+    let state = client_state.or_else(|| {
+        remembered
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    });
+    if let Some(state) = state
+        && let Ok(state) = HeaderValue::try_from(state)
+    {
+        headers.insert(wire::TURN_STATE, state);
+    }
+    if let Ok(length) = HeaderValue::try_from(body_bytes.len().to_string()) {
+        headers.insert(header::CONTENT_LENGTH, length);
+    }
     parts.headers = headers;
-    Request::from_parts(parts, Body::from(body.to_vec()))
+    Request::from_parts(parts, Body::from(body_bytes))
+}
+
+/// The last reply's turn-state header for `turn_id`, when this socket kept one.
+fn recalled_state(kept: &Option<KeptTurn>, turn_id: &str) -> Option<String> {
+    let kept = kept.as_ref()?;
+    (kept.turn_id == turn_id && !turn_id.is_empty()).then(|| kept.state.clone())
+}
+
+/// Keeps `reply_state` for `turn_id`. An empty reply header leaves the previous
+/// value in place. An empty turn id is not stored.
+fn note_reply_state(kept: &mut Option<KeptTurn>, turn_id: &str, reply_state: Option<&str>) {
+    let Some(state) = reply_state.filter(|state| !state.is_empty()) else {
+        return;
+    };
+    if turn_id.is_empty() {
+        return;
+    }
+    *kept = Some(KeptTurn {
+        turn_id: turn_id.to_owned(),
+        state: state.to_owned(),
+    });
+}
+
+fn header_text(headers: &HeaderMap, name: &'static str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn idle(connected: bool) -> MappedTurn {
+    MappedTurn {
+        held: None,
+        cut: false,
+        connected,
+        reply_state: None,
+    }
+}
+
+fn with_state(mut mapped: MappedTurn, headers: &HeaderMap) -> MappedTurn {
+    mapped.reply_state = header_text(headers, wire::TURN_STATE);
+    mapped
 }
 
 struct MappedTurn {
     held: Option<HeldTurn>,
     cut: bool,
     connected: bool,
+    reply_state: Option<String>,
 }
 
 struct TurnEvents {
@@ -896,11 +998,7 @@ async fn map_response(
             .is_some_and(|value| value.to_ascii_lowercase().contains("event-stream"));
     if !status.is_success() {
         let frame = http_error_reply(response).await;
-        return MappedTurn {
-            held: None,
-            cut: false,
-            connected: send_json(writer, &frame).await,
-        };
+        return with_state(idle(send_json(writer, &frame).await), &headers);
     }
     if stream {
         return map_stream(writer, response.into_body(), &headers, input, run).await;
@@ -912,11 +1010,7 @@ async fn map_response(
             &headers,
             "the reply was neither a stream nor a response",
         );
-        return MappedTurn {
-            held: None,
-            cut: false,
-            connected: send_json(writer, &frame).await,
-        };
+        return with_state(idle(send_json(writer, &frame).await), &headers);
     };
     if response.get("object").and_then(Value::as_str) != Some("response")
         || response
@@ -929,18 +1023,10 @@ async fn map_response(
             &headers,
             "the reply was neither a stream nor a response",
         );
-        return MappedTurn {
-            held: None,
-            cut: false,
-            connected: send_json(writer, &frame).await,
-        };
+        return with_state(idle(send_json(writer, &frame).await), &headers);
     }
     if !send_header_frames(writer, &headers).await {
-        return MappedTurn {
-            held: None,
-            cut: false,
-            connected: false,
-        };
+        return with_state(idle(false), &headers);
     }
     let mut events = TurnEvents::new(run);
     let mut connected = send_event(
@@ -984,7 +1070,7 @@ async fn map_response(
         )
         .await;
     }
-    finish_mapping(events, input, connected)
+    with_state(finish_mapping(events, input, connected), &headers)
 }
 
 async fn map_stream(
@@ -995,11 +1081,7 @@ async fn map_stream(
     run: &Arc<TurnRun>,
 ) -> MappedTurn {
     if !send_header_frames(writer, headers).await {
-        return MappedTurn {
-            held: None,
-            cut: false,
-            connected: false,
-        };
+        return with_state(idle(false), headers);
     }
     let mut stream = body.into_data_stream();
     let mut parser = SseParser::default();
@@ -1024,7 +1106,7 @@ async fn map_stream(
         connected = send_event_bytes(writer, headers, &mut events, &data).await;
     }
     let cut = connected && !events.ended;
-    let mut mapped = finish_mapping(events, input, connected);
+    let mut mapped = with_state(finish_mapping(events, input, connected), headers);
     mapped.cut = cut;
     mapped
 }
@@ -1043,6 +1125,7 @@ fn finish_mapping(events: TurnEvents, mut input: Vec<Value>, connected: bool) ->
         held,
         cut: false,
         connected,
+        reply_state: None,
     }
 }
 

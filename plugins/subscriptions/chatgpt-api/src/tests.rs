@@ -259,6 +259,47 @@ fn shape_drops_hosted_tools_and_sets_prompt_cache_key() {
 }
 
 #[test]
+fn d232_chatgpt_api_puts_instructions_first_on_gpt_6_2() {
+    let user = json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]});
+    for model in [
+        "gpt-6.2-astra",
+        "gpt-6.2",
+        "gpt-6.10",
+        "gpt-7",
+        "openai/gpt-6.2-sol",
+    ] {
+        let mut body = json!({
+            "model": model,
+            "instructions": "Be brief.",
+            "input": "hello",
+        });
+        let map = body.as_object_mut().expect("object");
+        shape::body(map);
+        assert!(body.get("instructions").is_none(), "{model}: {body}");
+        let input = body["input"].as_array().expect("input");
+        assert_eq!(input.len(), 2, "{model}");
+        assert_eq!(input[0]["role"], json!("developer"));
+        assert_eq!(input[0]["type"], json!("message"));
+        assert_eq!(input[0]["content"][0]["text"], json!("Be brief."));
+        assert_eq!(input[1], user);
+        let key = body["prompt_cache_key"].as_str().expect("cache key");
+        assert!(!key.is_empty(), "{model}");
+    }
+    for model in ["gpt-6-astra", "gpt-6.1", "gpt-5.5", "o3", "claude-opus"] {
+        let mut body = json!({
+            "model": model,
+            "instructions": "Be brief.",
+            "input": "hello",
+        });
+        let map = body.as_object_mut().expect("object");
+        shape::body(map);
+        assert_eq!(body["instructions"], json!("Be brief."), "{model}");
+        assert_eq!(body["input"].as_array().map(Vec::len), Some(1), "{model}");
+        assert_eq!(body["input"][0]["role"], json!("user"), "{model}");
+    }
+}
+
+#[test]
 fn explain_maps_subscription_sharing_codes() {
     let body = br#"{"error":{"code":"subscription_sharing_usage_limit_exceeded"}}"#;
     let text = errors::explain(429, body).expect("hint");
