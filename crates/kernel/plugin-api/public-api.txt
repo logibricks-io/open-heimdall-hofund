@@ -520,6 +520,7 @@ HostReadBudget derives(Clone, Copy, Debug, PartialEq, Eq)
 HttpHandle
 HttpHandle #[non_exhaustive] derives(Clone)
 HttpHandle::async fn open_duplex (& self , request : DuplexRequest) -> Result < DuplexSession , PluginError >
+HttpHandle::async fn open_websocket (& self , request : WebSocketRequest ,) -> Result < WebSocketSession , PluginError >
 HttpHandle::async fn send (& self , request : http :: Request < Body > ,) -> Result < http :: Response < BodyStream > , PluginError >
 HttpHandle::fn fresh_client (& self) -> Option < Result < Arc < dyn Any + Send + Sync > , PluginError > >
 HttpHandle::fn pooled_client (& self) -> Option < Arc < dyn Any + Send + Sync > >
@@ -1399,6 +1400,26 @@ WarmupRecord::const fn at (& self) -> SystemTime
 WarmupRecord::const fn outcome (& self) -> WarmupOutcome
 WarmupRecord::fn detail (& self) -> & str
 WarmupRecord::fn new (at : SystemTime , outcome : WarmupOutcome , detail : impl Into < String >) -> Self
+WebSocketMessage
+WebSocketMessage #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+WebSocketMessage::Binary
+WebSocketMessage::Text
+WebSocketRequest
+WebSocketRequest #[non_exhaustive] derives(Clone)
+WebSocketRequest::fn get (uri : impl Into < String >) -> Self
+WebSocketRequest::fn header (mut self , name : impl Into < String > , value : impl Into < String >) -> Self
+WebSocketRequest::fn kernel_age (& self) -> Option < Duration >
+WebSocketRequest::fn kernel_headers (& self) -> Vec < (& str , & str , bool) >
+WebSocketRequest::fn kernel_idle (& self) -> Option < Duration >
+WebSocketRequest::fn kernel_uri (& self) -> & str
+WebSocketRequest::fn lifetime (mut self , idle : Duration , age : Duration) -> Self
+WebSocketRequest::fn sensitive_header (mut self , name : impl Into < String > , value : impl Into < String >) -> Self
+WebSocketSession
+WebSocketSession #[non_exhaustive]
+WebSocketSession::async fn close (& mut self) -> Result < () , PluginError >
+WebSocketSession::async fn recv (& mut self) -> Result < Option < WebSocketMessage > , PluginError >
+WebSocketSession::async fn send_text (& mut self , text : String) -> Result < () , PluginError >
+WebSocketSession::fn kernel_new (io : Box < dyn WebSocketIo >) -> Self
 WriteCtx
 WriteCtx #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 WriteCtx::fn home (& self) -> & Path
@@ -1445,6 +1466,7 @@ kernel::GatewayBackend::async fn call (& self , request : http :: Request < Body
 kernel::GatewayBackend::async fn forward (& self , call : Forward) -> Result < RawAnswer , PluginError >
 kernel::HttpBackend
 kernel::HttpBackend::async fn open_duplex (& self , request : DuplexRequest) -> Result < DuplexSession , PluginError >
+kernel::HttpBackend::async fn open_websocket (& self , request : WebSocketRequest ,) -> Result < WebSocketSession , PluginError >
 kernel::HttpBackend::async fn send (& self , request : HttpRequest < Body > ,) -> Result < HttpResponse < BodyStream > , PluginError >
 kernel::HttpBackend::fn fresh_client (& self) -> Option < Result < Arc < dyn Any + Send + Sync > , PluginError > >
 kernel::HttpBackend::fn pooled_client (& self) -> Option < Arc < dyn Any + Send + Sync > >
@@ -1484,6 +1506,10 @@ kernel::SchedulerBackend::fn run_once (& self , name : & str , work : BoxFuture 
 kernel::SchedulerBackend::fn shutdown (& self)
 kernel::SecretsBackend
 kernel::SecretsBackend::async fn get (& self , plugin : & PluginKey , id : & str) -> Result < Option < SecretString > , PluginError >
+kernel::WebSocketIo
+kernel::WebSocketIo::async fn close (& mut self) -> Result < () , PluginError >
+kernel::WebSocketIo::async fn recv (& mut self) -> Result < Option < WebSocketMessage > , PluginError >
+kernel::WebSocketIo::async fn send_text (& mut self , text : String) -> Result < () , PluginError >
 kernel::fn expose_secret (secret : & SecretString) -> & str
 mod kernel
 mod responses_ws

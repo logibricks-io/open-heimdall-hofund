@@ -147,7 +147,16 @@ async fn auto_v2(
         .map(|endpoints| crate::models::strings(endpoints.into()))
         .unwrap_or_default();
     let apis = crate::models::apis(&endpoints);
-    book.see(account, model, apis.clone());
+    let socket = if endpoints.is_empty() {
+        None
+    } else {
+        Some(
+            endpoints
+                .iter()
+                .any(|endpoint| crate::models::lists_responses_socket(endpoint)),
+        )
+    };
+    book.see(account, model, apis.clone(), socket);
     let expires_at = object.get("expires_at").and_then(Value::as_u64);
     let expiry = expires_at
         .filter(|secs| *secs > 0)

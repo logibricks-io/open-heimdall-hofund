@@ -209,7 +209,11 @@ it never writes into agent homes through that path.
 transport and `ir` to fold a stream into one response.
 `plugin-host` depends on `plugin-api`. Its tests also depend on
 `plugin-sdk` so the retry contract runs against the pooled client. The pooled
-HTTP client lives in `plugin-host`. `plugin-registry` depends on `plugin-api`,
+HTTP client and the outbound WebSocket client live in `plugin-host`. The dial
+uses the same proxy decision as that client for the HTTP origin, including
+environment proxies, and the same TLS profile. A proxy refuses the socket
+instead of connecting directly. `plugin-registry` depends on
+`plugin-api`,
 `plugin-sdk`, the plugin crates it composes, and `provider` and `quirks`
 for the built-in factories. Those factories still call the `provider`
 adapters. `provider` depends on `plugin-sdk` for SigV4 and token parsing.
@@ -377,7 +381,7 @@ The `control-client` and gateway `control-proto` edges landed in L3; the
 | `ir` | Canonical request, response, and stream-event types. No I/O. |
 | `plugin-api` | Plugin traits, `PluginError`, newtypes, and `HostContext` handles. |
 | `plugin-sdk` | Helpers a plugin may use. `Call` sends on the host HTTP handle. SigV4, OAuth token parsing, form bodies, JSON page cursors, and Codex `/responses` zstd compression live here. Re-exports `tracing` and `async_trait`. |
-| `plugin-host` | The `HostContext` constructor, the pooled HTTP client, and `PlaintextFileAccountStore` (mode `0600`, plaintext until pull request H). |
+| `plugin-host` | The `HostContext` constructor, the pooled HTTP client, the outbound WebSocket client, and `PlaintextFileAccountStore` (mode `0600`, plaintext until pull request H). |
 | `plugin-registry` | Compile-time composition. One feature per plugin. Build fails on duplicate plugin ids, duplicate preset ids, and route-prefix conflicts. `factory` serves the built-in Chat, Responses, Messages, and Generative adapters. |
 | `plugin-plan-quota` | Vendor plan-window readers for key providers (allowances only when asked). The kit dependency is tests only. |
 | `plugin-relay` | Sample upstream plugin. The kit dependency is tests only. |
