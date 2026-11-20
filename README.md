@@ -186,9 +186,14 @@ The measurement strategies work as follows:
   ties by cache-read price, and leaves unpriced members last. It is accepted
   only for a multi-upstream route or a subscription account group.
 - `fit` is accepted on the same kinds of route. It does not change a route
-  that is not a group. A member whose known window is no larger than the
-  request estimate is asked only after every member that may hold it, as
-  under every other routing.
+  that is not a group. Config also accepts `small-first` and
+  `small-context-first` as names for it. A member whose known window is no
+  larger than the request estimate is left out of the ask list. It is asked
+  only when every member that may hold the request is out of quota or credit,
+  nothing earlier failed for another reason, and that try was not a refusal,
+  a passing retry, or an overflow. An unknown window stays in the ask list.
+  When every member is too small, the order is unchanged and those members
+  are asked.
 
 Set a mapped upstream's `weight` to an integer of at least 1. A missing weight
 or an explicit 1 is the default and is not retained as a separate setting.

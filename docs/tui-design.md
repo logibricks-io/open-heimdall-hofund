@@ -304,7 +304,7 @@ Remote hofund is `preset` of the remote-gateway plugin plus `base_url` and `api_
 
 ### G-4 Groups
 
-Routes are `[[routes]]` groups, not a second store. `routing` is one of `smart`, `order`, `rotate`, `usage`, `pace`, `weight`, `free`, `fast`, `cheap`, `drain`, `fit`. `fit` is small context first and is a group's only. `stays` is `auto`, `session`, `turn`, `off`, `strict`.
+Routes are `[[routes]]` groups, not a second store. `routing` is one of `smart`, `order`, `rotate`, `usage`, `pace`, `weight`, `free`, `fast`, `cheap`, `drain`, `fit`. `fit` is small context first and is a group's only. Config also accepts `small-first` and `small-context-first` as names for `fit`. `stays` is `auto`, `session`, `turn`, `off`, `strict`.
 
 | Route | Body | Response |
 |---|---|---|

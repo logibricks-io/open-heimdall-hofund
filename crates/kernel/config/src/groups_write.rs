@@ -3,7 +3,7 @@
 use toml_edit::{Array, DocumentMut, Formatted, InlineTable, Item, Table, Value, value};
 
 use crate::{
-    ConfigError, ROUTING_NAMES, Stays, load, parse_rule_line, provider_id_valid,
+    ConfigError, ROUTING_NAMES, Stays, canonical_routing, load, parse_rule_line, provider_id_valid,
     rule_rename_group_ref, rule_without_line,
 };
 
@@ -156,6 +156,7 @@ pub fn edit_group_patch(
         .map_err(|error| ConfigError::Syntax(error.to_string()))?;
     let table = find_group_route(&mut document, group_id)?;
     if let Some(name) = routing {
+        let name = canonical_routing(name);
         if !ROUTING_NAMES.contains(&name) {
             return Err(ConfigError::Invalid(format!(
                 "unknown routing `{name}`; expected one of {}",

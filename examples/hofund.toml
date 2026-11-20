@@ -137,7 +137,8 @@ api_key = "replace-me-too"
 # Routing defaults to smart. order, rotate, usage, pace, weight, free, fast,
 # cheap, drain, and fit are also implemented. cheap and fit are valid only on
 # a multi-upstream, subscription, or nested group. fit is small context first:
-# Smart's order, then the smallest known context window. Weights are integers
+# Smart's order, then the smallest known context window. small-first and
+# small-context-first are names for fit. Weights are integers
 # of at least 1; omitted
 # and 1 are the default. Provider free = true marks every model free; cached
 # catalog free flags and all-zero prices are used otherwise and re-read on

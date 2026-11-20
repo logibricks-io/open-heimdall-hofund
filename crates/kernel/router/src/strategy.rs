@@ -974,8 +974,10 @@ fn cheapest(_: &str, seats: &[Seat], _: &StrategyState) -> Vec<usize> {
 /// be used first stays ahead of the others while it still has room, and a
 /// member all but used up stays behind them. Within a band a smaller known
 /// window comes first and an unknown window last. Equal windows keep
-/// Smart's order. Seats the request cannot fit stay in this permutation;
-/// dispatch moves a known window the estimate already exceeds to the end.
+/// Smart's order. Seats the request cannot fit stay in this permutation.
+/// On a `fit` route, dispatch leaves a known window the estimate already
+/// exceeds off the ask list until every member that may hold it is out of
+/// quota or credit.
 fn small_first(pool: &str, seats: &[Seat], state: &StrategyState) -> Vec<usize> {
     let mut order = smart(pool, seats, state);
     order.sort_by(|left, right| {

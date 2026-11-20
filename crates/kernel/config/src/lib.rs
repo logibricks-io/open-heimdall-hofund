@@ -1421,8 +1421,9 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
                 )));
             }
         }
-        validated_routing_name("subscription", &subscription.id, &subscription.routing)?;
-        if subscription.routing == "fit" {
+        let routing = canonical_routing(&subscription.routing).to_owned();
+        validated_routing_name("subscription", &subscription.id, &routing)?;
+        if routing == "fit" {
             return Err(ConfigError::Invalid(format!(
                 "subscription `{}` uses fit routing; fit is a group's",
                 subscription.id
@@ -1433,7 +1434,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             id: subscription.id,
             accounts,
             account_weights,
-            routing: subscription.routing,
+            routing,
             at_once,
             stays: subscription.stays,
             options: prune_table(options),
@@ -1747,6 +1748,14 @@ pub(crate) const ROUTING_NAMES: [&str; 11] = [
     "smart", "order", "rotate", "usage", "pace", "weight", "free", "fast", "cheap", "drain", "fit",
 ];
 
+/// `small-first` and `small-context-first` are names for `fit`.
+pub(crate) fn canonical_routing(routing: &str) -> &str {
+    match routing {
+        "small-first" | "small-context-first" => "fit",
+        other => other,
+    }
+}
+
 fn validated_routing_name(kind: &str, id: &str, routing: &str) -> Result<(), ConfigError> {
     if !ROUTING_NAMES.contains(&routing) {
         return Err(ConfigError::Invalid(format!(
@@ -1758,18 +1767,19 @@ fn validated_routing_name(kind: &str, id: &str, routing: &str) -> Result<(), Con
 }
 
 fn validated_routing(route: &RawRoute) -> Result<String, ConfigError> {
-    validated_routing_name("route", &route.model, &route.routing)?;
+    let routing = canonical_routing(&route.routing);
+    validated_routing_name("route", &route.model, routing)?;
     let group = route.upstreams.len() > 1
         || route.upstreams.iter().any(|upstream| {
             matches!(upstream, RawUpstream::Mapped(mapped) if mapped.subscription.is_some() || mapped.group.is_some())
         });
-    if matches!(route.routing.as_str(), "cheap" | "fit") && !group {
+    if matches!(routing, "cheap" | "fit") && !group {
         return Err(ConfigError::Invalid(format!(
-            "route `{}` uses {} routing outside a group",
-            route.model, route.routing
+            "route `{}` uses {routing} routing outside a group",
+            route.model
         )));
     }
-    Ok(route.routing.clone())
+    Ok(routing.to_owned())
 }
 
 fn upstream_of(
@@ -3086,6 +3096,32 @@ mod tests {
             load("[[subscriptions]]\nid = \"codex\"\naccounts = \"*\"\nrouting = \"fit\"\n")
                 .expect_err("fit on a subscription");
         assert!(error.to_string().contains("fit is a group's"), "{error}");
+    }
+
+    #[test]
+    fn d239_fit_accepts_small_first_aliases() {
+        for name in ["small-first", "small-context-first"] {
+            let config = load(&format!(
+                "[[providers]]\nid = \"one\"\npreset = \"openai\"\n[[providers]]\nid = \"two\"\npreset = \"openai\"\n[[routes]]\nmodel = \"demo\"\nrouting = \"{name}\"\nupstreams = [\"one\", \"two\"]\n"
+            ))
+            .expect("alias on a group");
+            assert_eq!(config.routes[0].routing, "fit");
+            let error = load(&format!(
+                "[[providers]]\nid = \"one\"\npreset = \"openai\"\n[[routes]]\nmodel = \"demo\"\nrouting = \"{name}\"\nupstreams = [\"one\"]\n"
+            ))
+            .expect_err("alias outside a group");
+            assert!(
+                error
+                    .to_string()
+                    .contains("uses fit routing outside a group"),
+                "{error}"
+            );
+            let error = load(&format!(
+                "[[subscriptions]]\nid = \"codex\"\naccounts = \"*\"\nrouting = \"{name}\"\n"
+            ))
+            .expect_err("alias on a subscription");
+            assert!(error.to_string().contains("fit is a group's"), "{error}");
+        }
     }
 
     #[test]

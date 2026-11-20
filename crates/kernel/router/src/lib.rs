@@ -895,10 +895,17 @@ impl Router {
                 self.overflow
                     .demote_hops(&conversation.key, input_tokens, resolved.hops);
         }
-        // A member whose known window cannot hold the estimate is not asked
-        // until every member that might hold it has been tried. If none can,
-        // the order is left as it was.
-        resolved.hops = defer_over_window(resolved.hops, input_tokens);
+        // `fit` leaves out a member whose known window cannot hold the
+        // estimate. Other strategies keep their order: a known-too-small
+        // member is still asked, and later ones are skipped only after an
+        // overflow (`needs_room`).
+        let over_window = if resolved.routing == "fit" {
+            let (fitting, over_window) = split_over_window(resolved.hops, input_tokens);
+            resolved.hops = fitting;
+            over_window
+        } else {
+            Vec::new()
+        };
         resolved.spent = self.spent(&resolved);
         if let Some(trace) = trace.as_mut() {
             trace.set_routing(&resolved.routing);
@@ -952,6 +959,8 @@ impl Router {
             strategies: Arc::clone(&self.strategies),
             served: self.served_models(),
             drain_moves: ordered.drain_moves,
+            over_window,
+            saw_other: false,
             clear_placeholder_served: false,
             walk_started: wait_hook
                 .as_ref()
@@ -1761,6 +1770,12 @@ struct DispatchState {
     last_model: Option<String>,
     outgrown: Vec<(String, String)>,
     needs_room: Option<u64>,
+    /// `fit` members whose known window cannot hold the estimate. Asked only
+    /// as a last resort, after every member that may hold it is out of quota
+    /// or credit.
+    over_window: Vec<Hop>,
+    /// A fitting member already failed for a reason other than quota or credit.
+    saw_other: bool,
     missing_detail: String,
     wait_hook: Option<Arc<dyn WaitHook>>,
     /// Where an answer's stick is recorded, when the request has a conversation.
@@ -1790,13 +1805,13 @@ struct Answered {
     clear_placeholder_served: bool,
 }
 
-/// Moves members whose known context window is no larger than `tokens` to
-/// the end, keeping order inside each part. An unknown window stays with
-/// the members that may hold the request. When every member is too small,
-/// the original order is returned.
-fn defer_over_window(hops: Vec<Hop>, tokens: u64) -> Vec<Hop> {
+/// Splits `hops` into members that may hold `tokens` and members whose known
+/// window is no larger than that estimate. An unknown window stays with the
+/// members that may hold the request. When every member is too small, or none
+/// is, the strategy order is returned unchanged and the second list is empty.
+fn split_over_window(hops: Vec<Hop>, tokens: u64) -> (Vec<Hop>, Vec<Hop>) {
     if hops.len() < 2 {
-        return hops;
+        return (hops, Vec::new());
     }
     let mut fitting = Vec::with_capacity(hops.len());
     let mut small = Vec::new();
@@ -1810,8 +1825,22 @@ fn defer_over_window(hops: Vec<Hop>, tokens: u64) -> Vec<Hop> {
             fitting.push(hop);
         }
     }
-    fitting.extend(small);
-    fitting
+    if fitting.is_empty() || small.is_empty() {
+        fitting.extend(small);
+        return (fitting, Vec::new());
+    }
+    (fitting, small)
+}
+
+/// Quota or credit, and not a refusal, a passing retry, or an overflow.
+fn allowance_failure(error: &PluginError) -> bool {
+    if decision::outgrown(error)
+        || decision::content_refused(error)
+        || patience::busy(error, 0, PoolMemberPatience::Off, Instant::now()).is_some()
+    {
+        return false;
+    }
+    patience::spent(error)
 }
 
 fn region_key(provider: &str, model: &str) -> String {
@@ -1996,6 +2025,10 @@ impl DispatchState {
                     hook.wait(patience::REGION_RETRY_PAUSE).await;
                 }
                 asking = std::mem::take(&mut self.region_reask);
+                continue;
+            }
+            if let Some(next) = self.take_over_window() {
+                asking = next;
                 continue;
             }
             break;
@@ -2249,6 +2282,9 @@ impl DispatchState {
                     if decision::outgrown(&error) {
                         // As long on every account of this model; another
                         // member not known to be too small may hold it.
+                        // An overflow is not the allowance failure that asks
+                        // a member left out for its window.
+                        self.saw_other = true;
                         if error.status() != Some(413) {
                             self.needs_room = Some(self.input_tokens);
                         }
@@ -2323,6 +2359,9 @@ impl DispatchState {
                     } else {
                         PoolMemberPatience::Inherited
                     };
+                    if !allowance_failure(&error) {
+                        self.saw_other = true;
+                    }
                     if let Some(failure) =
                         patience::busy(&error, index, member_patience, self.now())
                     {
@@ -2368,6 +2407,24 @@ impl DispatchState {
             .with_tier(hofund_control_proto::sent_tier_label(&self.tier_sent)),
         );
         trace.sync_open();
+    }
+
+    /// Puts the left-out members on the ask list when the last member that
+    /// may hold the request failed for quota or credit, and nothing earlier
+    /// failed for another reason. A refusal, a passing retry, or an overflow
+    /// does not qualify.
+    fn take_over_window(&mut self) -> Option<Vec<usize>> {
+        if self.over_window.is_empty() || self.saw_other {
+            return None;
+        }
+        let error = &self.last.as_ref()?.1;
+        if !allowance_failure(error) {
+            return None;
+        }
+        let extra = std::mem::take(&mut self.over_window);
+        let start = self.resolved.hops.len();
+        self.resolved.hops.extend(extra);
+        Some((start..self.resolved.hops.len()).collect())
     }
 
     fn note_skip(&mut self, order: u32, reason: SkipReason) {
