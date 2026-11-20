@@ -1,6 +1,7 @@
 //! Mend a Messages request whose tool exchange would be refused.
 //!
-//! A call the next message does not answer gets a synthetic error result.
+//! A call the following run of user messages does not answer gets a synthetic
+//! error result.
 //! A result that names no call of the message before becomes the text it
 //! said. A second answer to one call is dropped, and a result that follows
 //! other content of its message moves first. Words an assistant message
@@ -65,7 +66,9 @@ fn paired_messages(msgs: &[u8]) -> Option<Vec<u8>> {
     let mut pending: Vec<Call> = Vec::new();
     let mut answered = HashSet::new();
     let mut held: Vec<Vec<u8>> = Vec::new();
-    for element in elements {
+    let mut index = 0;
+    while index < elements.len() {
+        let element = elements[index];
         if element.first() != Some(&b'{') {
             return None;
         }
@@ -73,6 +76,7 @@ fn paired_messages(msgs: &[u8]) -> Option<Vec<u8>> {
         if (role == "system" || role == "developer") && !pending.is_empty() {
             held.push(element.to_vec());
             changed = true;
+            index += 1;
             continue;
         }
         if role == "assistant" {
@@ -90,9 +94,51 @@ fn paired_messages(msgs: &[u8]) -> Option<Vec<u8>> {
                     out.push(message);
                 }
             }
+            index += 1;
             continue;
         }
-        match mend_user(element, content, &mut pending, &mut answered) {
+        if role == "user" && !pending.is_empty() {
+            let mut run = vec![element];
+            index += 1;
+            while index < elements.len() {
+                let next = elements[index];
+                if next.first() != Some(&b'{') {
+                    return None;
+                }
+                let (next_role, _) = message_view(next)?;
+                if next_role != "user" {
+                    break;
+                }
+                run.push(next);
+                index += 1;
+            }
+            let mut drafts = Vec::with_capacity(run.len());
+            for user in run {
+                let (_, user_content) = message_view(user)?;
+                drafts.push(draft_user(user, user_content, &pending, &mut answered)?);
+            }
+            // Every message in the run has been matched. Synthetics are only
+            // the calls none of them answered, and they go in the first user
+            // message so the message after the assistant still pairs.
+            let missing = missing_results(&pending, &answered);
+            let mut emitted = Vec::with_capacity(drafts.len());
+            for (offset, draft) in drafts.iter().enumerate() {
+                let extra: &[Vec<u8>] = if offset == 0 { &missing } else { &[] };
+                match emit_user(draft, extra) {
+                    UserMend::Invalid => return None,
+                    UserMend::Same => emitted.push(draft.element.to_vec()),
+                    UserMend::Changed(message) => {
+                        changed = true;
+                        emitted.push(message);
+                    }
+                }
+            }
+            release_held(&mut out, emitted, &mut held);
+            pending.clear();
+            answered.clear();
+            continue;
+        }
+        match mend_user(element, content, &pending, &mut answered, true) {
             UserMend::Invalid => return None,
             UserMend::Same => out.push(element.to_vec()),
             UserMend::Changed(message) => {
@@ -103,6 +149,7 @@ fn paired_messages(msgs: &[u8]) -> Option<Vec<u8>> {
         out.append(&mut held);
         pending.clear();
         answered.clear();
+        index += 1;
     }
     if flush_unanswered(&mut out, &pending, &answered) {
         changed = true;
@@ -149,10 +196,17 @@ fn mend_assistant(
     let mut owned = Vec::with_capacity(blocks.len());
     let mut changed = false;
     let mut taken = HashSet::new();
+    for block in &blocks {
+        let (kind, id, _) = block_ids(block);
+        if kind == "tool_use" && !id.is_empty() {
+            taken.insert(id);
+        }
+    }
+    let mut seen = HashSet::new();
     for block in blocks {
         let (kind, id, _) = block_ids(block);
         if kind == "tool_use" {
-            let (final_id, rewritten) = unique_call(block, &id, &mut taken);
+            let (final_id, rewritten) = unique_call(block, &id, &mut taken, &mut seen);
             if rewritten.is_some() {
                 changed = true;
             }
@@ -174,8 +228,13 @@ fn mend_assistant(
     AssistantMend::Same
 }
 
-fn unique_call(block: &[u8], id: &str, taken: &mut HashSet<String>) -> (String, Option<Vec<u8>>) {
-    if id.is_empty() || taken.insert(id.to_owned()) {
+fn unique_call(
+    block: &[u8],
+    id: &str,
+    taken: &mut HashSet<String>,
+    seen: &mut HashSet<String>,
+) -> (String, Option<Vec<u8>>) {
+    if id.is_empty() || seen.insert(id.to_owned()) {
         return (id.to_owned(), None);
     }
     let final_id = distinct_id(id, taken);
@@ -183,6 +242,11 @@ fn unique_call(block: &[u8], id: &str, taken: &mut HashSet<String>) -> (String, 
     (final_id, Some(rewritten))
 }
 
+/// Mints `{original}__2`, then `__3`, and so on.
+///
+/// Every id in the message is already in `taken`, so a real `{id}__2` is not
+/// given to an earlier duplicate. `checked_add` is what makes the `__dup`
+/// fallback reachable: `saturating_add` never wraps.
 fn distinct_id(original: &str, taken: &mut HashSet<String>) -> String {
     let mut n = 2u32;
     loop {
@@ -190,11 +254,22 @@ fn distinct_id(original: &str, taken: &mut HashSet<String>) -> String {
         if taken.insert(candidate.clone()) {
             return candidate;
         }
-        n = n.saturating_add(1);
-        if n == 0 {
-            let candidate = format!("{original}__dup");
-            taken.insert(candidate.clone());
-            return candidate;
+        match n.checked_add(1) {
+            Some(next) => n = next,
+            None => {
+                let candidate = format!("{original}__dup");
+                if taken.insert(candidate.clone()) {
+                    return candidate;
+                }
+                let mut extra = 2u32;
+                loop {
+                    let candidate = format!("{original}__dup{extra}");
+                    if taken.insert(candidate.clone()) {
+                        return candidate;
+                    }
+                    extra = extra.checked_add(1).unwrap_or(2);
+                }
+            }
         }
     }
 }
@@ -232,20 +307,26 @@ fn calls_last(blocks: &[Vec<u8>]) -> Option<Vec<Vec<u8>>> {
     Some(head)
 }
 
-fn mend_user(
-    element: &[u8],
-    content: Option<&[u8]>,
-    pending: &mut [Call],
+struct UserDraft<'a> {
+    element: &'a [u8],
+    content: Option<&'a [u8]>,
+    kept: Vec<Vec<u8>>,
+    rest: Vec<Vec<u8>>,
+    touched: bool,
+}
+
+fn draft_user<'a>(
+    element: &'a [u8],
+    content: Option<&'a [u8]>,
+    pending: &[Call],
     answered: &mut HashSet<String>,
-) -> UserMend {
+) -> Option<UserDraft<'a>> {
     let mut kept = Vec::new();
     let mut rest = Vec::new();
     let mut touched = false;
     match content {
         Some(content) if content.first() == Some(&b'[') => {
-            let Some(blocks) = elements(content) else {
-                return UserMend::Invalid;
-            };
+            let blocks = elements(content)?;
             for block in blocks {
                 place_block(block, pending, answered, &mut kept, &mut rest, &mut touched);
             }
@@ -253,24 +334,87 @@ fn mend_user(
         Some(content) if content.first() == Some(&b'"') => rest.push(content.to_vec()),
         _ => {}
     }
-    let missing = missing_results(pending, answered);
-    if !missing.is_empty() {
-        touched = true;
-    }
-    if !touched {
+    Some(UserDraft {
+        element,
+        content,
+        kept,
+        rest,
+        touched,
+    })
+}
+
+fn mend_user(
+    element: &[u8],
+    content: Option<&[u8]>,
+    pending: &[Call],
+    answered: &mut HashSet<String>,
+    finish: bool,
+) -> UserMend {
+    let Some(draft) = draft_user(element, content, pending, answered) else {
+        return UserMend::Invalid;
+    };
+    let missing = if finish {
+        missing_results(pending, answered)
+    } else {
+        Vec::new()
+    };
+    emit_user(&draft, &missing)
+}
+
+fn emit_user(draft: &UserDraft<'_>, missing: &[Vec<u8>]) -> UserMend {
+    if !draft.touched && missing.is_empty() {
         return UserMend::Same;
     }
+    let mut rest = draft.rest.clone();
     if rest.len() == 1 && rest[0].first() == Some(&b'"') {
         rest = text_blocks_from_json_string(Some(&rest[0]));
     }
-    let mut blocks = kept;
-    blocks.extend(missing);
+    let mut blocks = draft.kept.clone();
+    blocks.extend(missing.iter().cloned());
     blocks.extend(rest);
-    if content.is_none() {
-        UserMend::Changed(results_message(&blocks))
+    let content = raw_list(&blocks);
+    // A message that arrived without `content` still keeps its other members.
+    let message = if draft.content.is_none() {
+        with_member(draft.element, "content", &content)
     } else {
-        UserMend::Changed(with_top_value(element, "content", &raw_list(&blocks)))
+        with_top_value(draft.element, "content", &content)
+    };
+    UserMend::Changed(message)
+}
+
+fn release_held(out: &mut Vec<Vec<u8>>, run: Vec<Vec<u8>>, held: &mut Vec<Vec<u8>>) {
+    if held.is_empty() {
+        out.extend(run);
+        return;
     }
+    // The steer stood between the call and its results. It follows the last
+    // result, so a later text-only user in this run does not come first.
+    let Some(last) = run
+        .iter()
+        .rposition(|message| message_has_tool_result(message))
+    else {
+        out.extend(run);
+        out.append(held);
+        return;
+    };
+    out.extend(run[..last + 1].iter().cloned());
+    out.append(held);
+    out.extend(run.into_iter().skip(last + 1));
+}
+
+fn message_has_tool_result(message: &[u8]) -> bool {
+    let Some((_, Some(content))) = message_view(message) else {
+        return false;
+    };
+    if content.first() != Some(&b'[') {
+        return false;
+    }
+    let Some(blocks) = elements(content) else {
+        return false;
+    };
+    blocks
+        .iter()
+        .any(|block| block_ids(block).0 == "tool_result")
 }
 
 fn place_block(
@@ -442,6 +586,32 @@ fn to_json(value: &Value) -> Vec<u8> {
 
 fn with_string_member(object: &[u8], key: &str, value: &str) -> Vec<u8> {
     with_top_value(object, key, &to_json(&Value::String(value.to_owned())))
+}
+
+fn with_member(object: &[u8], key: &str, value: &[u8]) -> Vec<u8> {
+    let start = skip_ws(object, 0);
+    let raw = trim(&object[start..]);
+    let Some(members) = members_of(raw) else {
+        return object.to_vec();
+    };
+    if members.iter().any(|member| member.key == key) {
+        return with_top_value(object, key, value);
+    }
+    if raw.last() != Some(&b'}') {
+        return object.to_vec();
+    }
+    let close_at = start + raw.len() - 1;
+    let mut out = Vec::with_capacity(object.len() + key.len() + value.len() + 4);
+    out.extend_from_slice(&object[..close_at]);
+    if !members.is_empty() {
+        out.push(b',');
+    }
+    out.push(b'"');
+    out.extend_from_slice(key.as_bytes());
+    out.extend_from_slice(b"\":");
+    out.extend_from_slice(value);
+    out.extend_from_slice(&object[close_at..]);
+    out
 }
 
 fn with_top_value(object: &[u8], key: &str, value: &[u8]) -> Vec<u8> {
@@ -715,7 +885,7 @@ fn skip_number(data: &[u8], mut index: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::{INTERRUPTED, pair_messages_tool_blocks};
-    use crate::{AnthropicMessages, Codec};
+    use crate::{AnthropicMessages, Codec, OpenAiChat, OpenAiResponses};
     use serde_json::Value;
 
     const HEAD: &str = concat!(
@@ -1031,7 +1201,526 @@ mod tests {
             .expect("decode");
         let value = json(&AnthropicMessages.encode_request(&request).expect("encode"));
         assert_eq!(value["system"], "rules");
+        let messages = value["messages"].as_array().expect("messages");
+        assert!(messages.iter().all(|message| {
+            let role = message["role"].as_str().unwrap_or("");
+            role != "system" && role != "developer"
+        }));
+        assert_eq!(messages[2]["content"][0]["type"], "tool_result");
+        assert_eq!(messages[2]["content"][0]["tool_use_id"], "t");
+        assert_eq!(messages[2]["content"][0]["content"], "ok");
+        assert_eq!(
+            messages[2]["content"][1]["text"],
+            "<system-reminder>\nbetween\n</system-reminder>"
+        );
+    }
+
+    #[test]
+    fn d236_messages_form_keeps_consecutive_same_role_cache_marks() {
+        let body = r#"{"model":"m","max_tokens":8,"messages":[{"role":"user","content":"one","cache_control":{"type":"ephemeral"}},{"role":"user","content":"two","cache_control":{"type":"ephemeral","ttl":"1h"}},{"role":"assistant","content":"a","cache_control":{"type":"ephemeral"}},{"role":"assistant","content":"b","cache_control":{"type":"ephemeral","ttl":"5m"}}]}"#;
+        let request = AnthropicMessages
+            .decode_request(body.as_bytes())
+            .expect("decode");
+        let value = json(&AnthropicMessages.encode_request(&request).expect("encode"));
+        let messages = value["messages"].as_array().expect("messages");
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0]["content"][0]["text"], "one");
+        assert_eq!(messages[0]["cache_control"]["type"], "ephemeral");
+        assert!(messages[0]["cache_control"].get("ttl").is_none());
+        assert_eq!(messages[1]["content"][0]["text"], "two");
+        assert_eq!(messages[1]["cache_control"]["ttl"], "1h");
+        assert_eq!(messages[2]["content"][0]["text"], "a");
+        assert_eq!(messages[2]["cache_control"]["type"], "ephemeral");
+        assert!(messages[2]["cache_control"].get("ttl").is_none());
+        assert_eq!(messages[3]["content"][0]["text"], "b");
+        assert_eq!(messages[3]["cache_control"]["ttl"], "5m");
+    }
+
+    #[test]
+    fn d236_messages_form_developer_keeps_members_and_separates_text() {
+        let body = r#"{"model":"m","max_tokens":8,"messages":[{"role":"user","content":"hi"},{"role":"developer","content":[{"type":"text","text":"steer"},{"type":"text","text":"more"}],"output_config":{"effort":"max"}},{"role":"user","content":"bye"}]}"#;
+        let request = AnthropicMessages
+            .decode_request(body.as_bytes())
+            .expect("decode");
+        let value = json(&AnthropicMessages.encode_request(&request).expect("encode"));
+        let messages = value["messages"].as_array().expect("messages");
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["content"][0]["text"], "hi");
+        assert_eq!(messages[2]["content"][0]["text"], "bye");
+        let reminder = &messages[1];
+        assert_eq!(reminder["role"], "user");
+        assert_eq!(
+            reminder["content"][0]["text"],
+            "<system-reminder>\nsteer\nmore\n</system-reminder>"
+        );
+        assert_eq!(reminder["output_config"]["effort"], "max");
+    }
+
+    #[test]
+    fn d236_a_folded_developer_keeps_members_on_the_tool_result() {
+        let body = r#"{"model":"m","max_tokens":8,"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"n","input":{}}]},{"role":"developer","content":[{"type":"text","text":"steer"},{"type":"text","text":"more"}],"output_config":{"effort":"max"}},{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"ok"}],"cache_control":{"type":"ephemeral","ttl":"1h"}}]}"#;
+        let request = AnthropicMessages
+            .decode_request(body.as_bytes())
+            .expect("decode");
+        let value = json(&AnthropicMessages.encode_request(&request).expect("encode"));
+        let messages = value["messages"].as_array().expect("messages");
+        assert!(messages.iter().all(|message| {
+            let role = message["role"].as_str().unwrap_or("");
+            role != "system" && role != "developer"
+        }));
+        let result = &messages[2];
+        assert_eq!(result["content"][0]["type"], "tool_result");
+        assert_eq!(result["content"][0]["tool_use_id"], "t");
+        assert_eq!(
+            result["content"][1]["text"],
+            "<system-reminder>\nsteer\nmore\n</system-reminder>"
+        );
+        assert_eq!(result["output_config"]["effort"], "max");
+        assert_eq!(result["cache_control"]["ttl"], "1h");
+    }
+
+    #[test]
+    fn d236_translated_chat_folds_a_mid_system_and_developer_into_reminders() {
+        let body = r#"{"model":"m","messages":[{"role":"user","content":"list"},{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"Bash","arguments":"{}"}}]},{"role":"system","content":"note"},{"role":"tool","tool_call_id":"call_1","content":"a.go"},{"role":"developer","content":"steer"}]}"#;
+        let mut request = OpenAiChat.decode_request(body.as_bytes()).expect("decode");
+        request.strip_extensions();
+        let encoded = AnthropicMessages.encode_request(&request).expect("encode");
+        assert_folded_exchange(&encoded, "call_1", &["note", "steer"]);
+    }
+
+    #[test]
+    fn d236_translated_responses_fold_a_mid_developer_into_a_reminder() {
+        let body = r#"{"model":"m","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"list"}]},{"type":"function_call","call_id":"call_1","name":"Bash","arguments":"{}"},{"type":"message","role":"developer","content":[{"type":"input_text","text":"steer"}]},{"type":"function_call_output","call_id":"call_1","output":"a.go"},{"type":"message","role":"system","content":[{"type":"input_text","text":"note"}]}]}"#;
+        let mut request = OpenAiResponses
+            .decode_request(body.as_bytes())
+            .expect("decode");
+        request.strip_extensions();
+        let encoded = AnthropicMessages.encode_request(&request).expect("encode");
+        assert_folded_exchange(&encoded, "call_1", &["steer", "note"]);
+    }
+
+    #[test]
+    fn d236_translated_chat_keeps_two_tool_results_with_a_following_user() {
+        let body = r#"{"model":"m","messages":[{"role":"user","content":"list"},{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"Bash","arguments":"{}"}},{"id":"call_2","type":"function","function":{"name":"Read","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_1","content":"a.go"},{"role":"tool","tool_call_id":"call_2","content":"b.go"},{"role":"user","content":"thanks"}]}"#;
+        let mut request = OpenAiChat.decode_request(body.as_bytes()).expect("decode");
+        request.strip_extensions();
+        let encoded = AnthropicMessages.encode_request(&request).expect("encode");
+        assert_two_results(&encoded, "thanks");
+    }
+
+    #[test]
+    fn d236_translated_responses_keeps_two_tool_results_with_a_following_user() {
+        let body = r#"{"model":"m","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"list"}]},{"type":"function_call","call_id":"call_1","name":"Bash","arguments":"{}"},{"type":"function_call","call_id":"call_2","name":"Read","arguments":"{}"},{"type":"function_call_output","call_id":"call_1","output":"a.go"},{"type":"function_call_output","call_id":"call_2","output":"b.go"},{"type":"message","role":"user","content":[{"type":"input_text","text":"thanks"}]}]}"#;
+        let mut request = OpenAiResponses
+            .decode_request(body.as_bytes())
+            .expect("decode");
+        request.strip_extensions();
+        let encoded = AnthropicMessages.encode_request(&request).expect("encode");
+        assert_two_results(&encoded, "thanks");
+    }
+
+    #[test]
+    fn d236_split_user_results_stay_in_their_messages_and_keep_marks() {
+        let first = r#"{"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"one"}],"cache_control":{"type":"ephemeral"}}"#;
+        let second = r#"{"role":"user","content":[{"type":"tool_result","tool_use_id":"b","content":"two"}],"cache_control":{"type":"ephemeral","ttl":"1h"}}"#;
+        let body = format!(
+            r#"{{"model":"m","messages":[{{"role":"assistant","content":[{{"type":"tool_use","id":"a","name":"n","input":{{}}}},{{"type":"tool_use","id":"b","name":"n","input":{{}}}}]}}, {first}, {second}]}}"#
+        );
+        let out = pair_messages_tool_blocks(body.as_bytes());
+        let value = json(&out);
+        let messages = value["messages"].as_array().expect("messages");
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[1]["content"][0]["type"], "tool_result");
+        assert_eq!(messages[1]["content"][0]["tool_use_id"], "a");
+        assert_eq!(messages[1]["content"][0]["content"], "one");
+        assert_eq!(messages[1]["cache_control"]["type"], "ephemeral");
+        assert!(messages[1]["cache_control"].get("ttl").is_none());
+        assert_eq!(messages[2]["content"][0]["type"], "tool_result");
+        assert_eq!(messages[2]["content"][0]["tool_use_id"], "b");
+        assert_eq!(messages[2]["content"][0]["content"], "two");
+        assert_eq!(messages[2]["cache_control"]["ttl"], "1h");
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains(first), "{text}");
+        assert!(text.contains(second), "{text}");
+        assert!(!text.contains(INTERRUPTED));
+    }
+
+    #[test]
+    fn d236_unanswered_call_is_synthetic_in_the_first_user_message() {
+        let first = r#"{"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"one"},{"type":"text","text":"note"}],"cache_control":{"type":"ephemeral"}}"#;
+        let second = r#"{"role":"user","content":"thanks","name":"ada"}"#;
+        let body = format!(
+            r#"{{"model":"m","messages":[{{"role":"assistant","content":[{{"type":"tool_use","id":"a","name":"n","input":{{}}}},{{"type":"tool_use","id":"b","name":"n","input":{{}}}}]}}, {first}, {second}]}}"#
+        );
+        let out = pair_messages_tool_blocks(body.as_bytes());
+        let value = json(&out);
+        let messages = value["messages"].as_array().expect("messages");
+        assert_eq!(messages.len(), 3);
+        let repaired = messages[1]["content"].as_array().expect("content");
+        assert_eq!(repaired.len(), 3);
+        assert_eq!(repaired[0]["type"], "tool_result");
+        assert_eq!(repaired[0]["tool_use_id"], "a");
+        assert_eq!(repaired[0]["content"], "one");
+        assert!(repaired[0].get("is_error").is_none());
+        assert_eq!(repaired[1]["type"], "tool_result");
+        assert_eq!(repaired[1]["tool_use_id"], "b");
+        assert_eq!(repaired[1]["is_error"], true);
+        assert_eq!(repaired[1]["content"], INTERRUPTED);
+        assert_eq!(repaired[2]["type"], "text");
+        assert_eq!(repaired[2]["text"], "note");
+        assert_eq!(messages[1]["cache_control"]["type"], "ephemeral");
+        assert!(messages[1]["cache_control"].get("ttl").is_none());
+        assert_eq!(messages[2]["content"], "thanks");
+        assert_eq!(messages[2]["name"], "ada");
+        assert!(messages[2].get("tool_use_id").is_none());
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains(second), "{text}");
+        assert_eq!(text.matches(INTERRUPTED).count(), 1);
+        assert!(!text[text.find(second).expect("second")..].contains(INTERRUPTED));
+    }
+
+    #[test]
+    fn d236_held_system_is_released_after_the_last_result() {
+        let steer = r#"{"role":"system","content":"steer","name":"held"}"#;
+        let result = r#"{"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"one"}],"cache_control":{"type":"ephemeral"}}"#;
+        let thanks = r#"{"role":"user","content":"thanks","name":"ada"}"#;
+        let body = format!(
+            r#"{{"model":"m","messages":[{{"role":"assistant","content":[{{"type":"tool_use","id":"a","name":"n","input":{{}}}},{{"type":"tool_use","id":"b","name":"n","input":{{}}}}]}}, {steer}, {result}, {thanks}]}}"#
+        );
+        let out = pair_messages_tool_blocks(body.as_bytes());
+        let value = json(&out);
+        let messages = value["messages"].as_array().expect("messages");
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0]["role"], "assistant");
+        let repaired = messages[1]["content"].as_array().expect("content");
+        assert_eq!(repaired[0]["type"], "tool_result");
+        assert_eq!(repaired[0]["tool_use_id"], "a");
+        assert_eq!(repaired[0]["content"], "one");
+        assert_eq!(repaired[1]["type"], "tool_result");
+        assert_eq!(repaired[1]["tool_use_id"], "b");
+        assert_eq!(repaired[1]["content"], INTERRUPTED);
+        assert_eq!(messages[1]["cache_control"]["type"], "ephemeral");
+        assert_eq!(messages[2]["role"], "system");
+        assert_eq!(messages[2]["content"], "steer");
+        assert_eq!(messages[2]["name"], "held");
+        assert_eq!(messages[3]["role"], "user");
+        assert_eq!(messages[3]["content"], "thanks");
+        assert_eq!(messages[3]["name"], "ada");
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains(steer), "{text}");
+        assert!(text.contains(thanks), "{text}");
+        assert!(
+            !json(&messages_of(&out)[3])
+                .to_string()
+                .contains(INTERRUPTED)
+        );
+    }
+
+    #[test]
+    fn d236_a_receiving_message_without_content_keeps_its_members() {
+        let user = r#"{"role":"user","cache_control":{"type":"ephemeral"},"output_config":{"effort":"max"}}"#;
+        let body = format!(
+            r#"{{"model":"m","messages":[{{"role":"assistant","content":[{{"type":"tool_use","id":"a","name":"n","input":{{}}}}]}}, {user}]}}"#
+        );
+        let out = pair_messages_tool_blocks(body.as_bytes());
+        let value = json(&out);
+        let messages = value["messages"].as_array().expect("messages");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[1]["cache_control"]["type"], "ephemeral");
+        assert_eq!(messages[1]["output_config"]["effort"], "max");
+        let content = messages[1]["content"].as_array().expect("content");
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "tool_result");
+        assert_eq!(content[0]["tool_use_id"], "a");
+        assert_eq!(content[0]["is_error"], true);
+        assert_eq!(content[0]["content"], INTERRUPTED);
+        let text = String::from_utf8_lossy(&out);
+        assert!(
+            text.contains(r#""cache_control":{"type":"ephemeral"}"#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#""output_config":{"effort":"max"}"#),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn d236_hand_built_exchanges_pair_every_call_and_keep_members() {
+        let chat = r#"{"model":"m","messages":[{"role":"system","content":"rules"},{"role":"user","content":"list"},{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"Bash","arguments":"{}"}},{"id":"call_2","type":"function","function":{"name":"Read","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_1","content":"a.go","cache_control":{"type":"ephemeral"}},{"role":"developer","content":[{"type":"text","text":"steer"},{"type":"text","text":"more"}]},{"role":"tool","tool_call_id":"call_2","content":"b.go"},{"role":"user","content":"thanks","name":"ada"}]}"#;
+        let chat_request = OpenAiChat.decode_request(chat.as_bytes()).expect("decode");
+        let chat_encoded = AnthropicMessages
+            .encode_request(&chat_request)
+            .expect("encode");
+        assert_answer_run(&chat_encoded, &["call_1", "call_2"], &["a.go", "b.go"]);
+        let chat_value = json(&chat_encoded);
+        assert_eq!(chat_value["system"], "rules");
+        let chat_answer = answer_message(&chat_value, 0);
+        assert_eq!(chat_answer["name"], "ada");
+        assert_eq!(chat_answer["cache_control"]["type"], "ephemeral");
+        assert!(
+            chat_answer["content"]
+                .as_array()
+                .expect("content")
+                .iter()
+                .any(|block| block["text"] == "<system-reminder>\nsteermore\n</system-reminder>")
+        );
+
+        let responses = r#"{"model":"m","input":[{"type":"message","role":"system","content":[{"type":"input_text","text":"rules"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"list"}]},{"type":"function_call","call_id":"call_1","name":"Bash","arguments":"{}"},{"type":"function_call","call_id":"call_2","name":"Read","arguments":"{}"},{"type":"function_call_output","call_id":"call_1","output":"a.go","name":"left"},{"type":"message","role":"developer","content":[{"type":"input_text","text":"steer"}]},{"type":"function_call_output","call_id":"call_2","output":"b.go"},{"type":"message","role":"user","content":[{"type":"input_text","text":"thanks"}],"name":"ada"}]}"#;
+        let responses_request = OpenAiResponses
+            .decode_request(responses.as_bytes())
+            .expect("decode");
+        let responses_encoded = AnthropicMessages
+            .encode_request(&responses_request)
+            .expect("encode");
+        assert_answer_run(&responses_encoded, &["call_1", "call_2"], &["a.go", "b.go"]);
+        let responses_value = json(&responses_encoded);
+        let responses_answer = answer_message(&responses_value, 0);
+        assert_eq!(responses_answer["name"], "ada");
+        let left = responses_answer["content"]
+            .as_array()
+            .expect("content")
+            .iter()
+            .find(|block| block["tool_use_id"] == "call_1")
+            .expect("call_1");
+        assert_eq!(left["name"], "left");
+        assert_eq!(left["type"], "tool_result");
+
+        let messages = r#"{"model":"m","max_tokens":8,"system":"rules","messages":[{"role":"user","content":"list","cache_control":{"type":"ephemeral"}},{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"Bash","input":{}},{"type":"tool_use","id":"call_2","name":"Read","input":{}}],"cache_control":{"type":"ephemeral","ttl":"5m"}},{"role":"developer","content":[{"type":"text","text":"steer"},{"type":"text","text":"more"}],"output_config":{"effort":"max"}},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"a.go"}],"cache_control":{"type":"ephemeral","ttl":"1h"}},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_2","content":"b.go"}],"cache_control":{"type":"ephemeral","ttl":"5m"}}]}"#;
+        let messages_request = AnthropicMessages
+            .decode_request(messages.as_bytes())
+            .expect("decode");
+        let messages_encoded = AnthropicMessages
+            .encode_request(&messages_request)
+            .expect("encode");
+        assert_answer_run(&messages_encoded, &["call_1", "call_2"], &["a.go", "b.go"]);
+        let messages_value = json(&messages_encoded);
+        assert_eq!(messages_value["system"], "rules");
+        let messages_list = messages_value["messages"].as_array().expect("messages");
+        assert_eq!(messages_list[0]["cache_control"]["type"], "ephemeral");
+        assert!(messages_list[0]["cache_control"].get("ttl").is_none());
+        assert_eq!(messages_list[1]["cache_control"]["ttl"], "5m");
+        assert_eq!(messages_list.len(), 4);
+        assert_eq!(messages_list[2]["cache_control"]["ttl"], "1h");
+        assert_eq!(messages_list[2]["output_config"]["effort"], "max");
+        assert_eq!(messages_list[3]["cache_control"]["ttl"], "5m");
+        assert!(messages_list[3].get("output_config").is_none());
+        assert_eq!(
+            messages_list[2]["content"][1]["text"],
+            "<system-reminder>\nsteer\nmore\n</system-reminder>"
+        );
+    }
+
+    #[test]
+    fn d236_duplicate_id_does_not_steal_a_later_real_suffix() {
+        let body = br#"{"model":"m","messages":[{"role":"assistant","content":[{"type":"tool_use","id":"x","name":"n","input":{}},{"type":"tool_use","id":"x","name":"n","input":{}},{"type":"tool_use","id":"x__2","name":"n","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"x","content":"one"},{"type":"tool_result","tool_use_id":"x__2","content":"real"}]}]}"#;
+        let out = pair_messages_tool_blocks(body);
+        let value = json(&out);
+        let calls: Vec<_> = value["messages"][0]["content"]
+            .as_array()
+            .expect("calls")
+            .iter()
+            .map(|block| block["id"].as_str().unwrap_or("").to_owned())
+            .collect();
+        assert_eq!(calls[0], "x");
+        assert_eq!(calls[2], "x__2");
+        assert_ne!(calls[1], "x");
+        assert_ne!(calls[1], "x__2");
+        let results = value["messages"][1]["content"].as_array().expect("results");
+        assert_eq!(results[0]["tool_use_id"], "x");
+        assert_eq!(results[0]["content"], "one");
+        let real = results
+            .iter()
+            .find(|block| block["content"] == "real")
+            .expect("real result");
+        assert_eq!(real["tool_use_id"], "x__2");
+        assert_eq!(real["type"], "tool_result");
+    }
+
+    #[test]
+    fn d228_orphan_result_with_a_block_array_keeps_its_image() {
+        let image =
+            r#"{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aaa"}}"#;
+        let body = format!(
+            r#"{{"model":"m","messages":[{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"gone","content":[{{"type":"text","text":"said"}},{image}]}}]}}]}}"#
+        );
+        let out = pair_messages_tool_blocks(body.as_bytes());
+        let message = json(&messages_of(&out)[0]);
+        let content = message["content"].as_array().expect("content");
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "said");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["data"], "aaa");
+        assert!(
+            !out.windows(b"tool_result".len())
+                .any(|window| window == b"tool_result")
+        );
+        assert!(
+            out.windows(image.len())
+                .any(|window| window == image.as_bytes())
+        );
+    }
+
+    #[test]
+    fn d228_a_changed_message_keeps_its_other_members_and_the_tail() {
+        let assistant = r#"{"role":"assistant","content":[{"type":"tool_use","id":"a","name":"n","input":{}},{"type":"text","text":"after"}],"stop_reason":"tool_use"}"#;
+        let user = r#"{"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"ok"}],"cache_control":{"type":"ephemeral"}}"#;
+        let tail = r#","metadata":{"user_id":"abc"}"#;
+        let body = format!(r#"{{"model":"m","messages":[{assistant},{user}]{tail}}}"#);
+        let out = pair_messages_tool_blocks(body.as_bytes());
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains(r#""stop_reason":"tool_use""#));
+        assert!(text.contains(user));
+        assert!(out.ends_with(format!("{tail}}}").as_bytes()));
+        let kinds: Vec<_> = json(&messages_of(&out)[0])["content"]
+            .as_array()
+            .expect("content")
+            .iter()
+            .map(|block| block["type"].as_str().unwrap_or("").to_owned())
+            .collect();
+        assert_eq!(kinds.join(","), "text,tool_use");
+    }
+
+    #[test]
+    fn d236_a_messages_system_turn_without_content_omits_content() {
+        let body = r#"{"model":"m","max_tokens":8,"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"n","input":{}}]},{"role":"system","output_config":{"effort":"max"}},{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"ok"}]}]}"#;
+        let request = AnthropicMessages
+            .decode_request(body.as_bytes())
+            .expect("decode");
+        let value = json(&AnthropicMessages.encode_request(&request).expect("encode"));
         assert_eq!(value["messages"][2]["content"][0]["type"], "tool_result");
-        assert_eq!(value["messages"][3]["role"], "developer");
+        let system = &value["messages"][3];
+        assert_eq!(system["role"], "system");
+        assert!(system.get("content").is_none(), "{system}");
+        assert_eq!(system["output_config"]["effort"], "max");
+    }
+
+    fn assert_folded_exchange(encoded: &[u8], call_id: &str, notes: &[&str]) {
+        let value = json(encoded);
+        let messages = value["messages"].as_array().expect("messages");
+        assert!(
+            messages.iter().all(|message| {
+                let role = message["role"].as_str().unwrap_or("");
+                role != "system" && role != "developer"
+            }),
+            "{value}"
+        );
+        let roles: Vec<_> = messages
+            .iter()
+            .map(|message| message["role"].as_str().unwrap_or("").to_owned())
+            .collect();
+        assert_eq!(roles, ["user", "assistant", "user"]);
+        assert_eq!(messages[1]["content"][0]["type"], "tool_use");
+        assert_eq!(messages[1]["content"][0]["id"], call_id);
+        let result = &messages[2]["content"];
+        let paired = result
+            .as_array()
+            .expect("content")
+            .iter()
+            .find(|block| block["type"] == "tool_result")
+            .expect("result");
+        assert_eq!(paired["tool_use_id"], call_id);
+        assert_eq!(paired["content"], "a.go");
+        let text = result.to_string();
+        for note in notes {
+            assert!(
+                text.contains(&format!("<system-reminder>\\n{note}\\n</system-reminder>")),
+                "{text}"
+            );
+        }
+        assert!(
+            !encoded
+                .windows(INTERRUPTED.len())
+                .any(|window| window == INTERRUPTED.as_bytes())
+        );
+    }
+
+    fn assert_two_results(encoded: &[u8], tail: &str) {
+        assert_answer_run(encoded, &["call_1", "call_2"], &["a.go", "b.go"]);
+        let value = json(encoded);
+        let messages = value["messages"].as_array().expect("messages");
+        assert_eq!(messages.len(), 3, "{value}");
+        let answer = &messages[2];
+        assert!(
+            answer["content"]
+                .as_array()
+                .expect("content")
+                .iter()
+                .any(|block| block["text"] == tail),
+            "{answer}"
+        );
+    }
+
+    fn assert_answer_run(encoded: &[u8], calls: &[&str], outputs: &[&str]) {
+        let value = json(encoded);
+        let messages = value["messages"].as_array().expect("messages");
+        assert!(
+            messages.iter().all(|message| {
+                let role = message["role"].as_str().unwrap_or("");
+                role != "system" && role != "developer"
+            }),
+            "{value}"
+        );
+        let assistant = messages
+            .iter()
+            .position(|message| {
+                message["content"]
+                    .as_array()
+                    .is_some_and(|blocks| blocks.iter().any(|block| block["type"] == "tool_use"))
+            })
+            .expect("assistant");
+        let mut found = Vec::new();
+        for message in messages.iter().skip(assistant + 1) {
+            if message["role"] != "user" {
+                break;
+            }
+            let Some(blocks) = message["content"].as_array() else {
+                continue;
+            };
+            for block in blocks {
+                if block["type"] != "tool_result" {
+                    continue;
+                }
+                found.push((
+                    block["tool_use_id"].as_str().unwrap_or("").to_owned(),
+                    block["content"].as_str().unwrap_or("").to_owned(),
+                ));
+            }
+        }
+        assert_eq!(found.len(), calls.len(), "{found:?} {value}");
+        for (call, output) in calls.iter().zip(outputs.iter()) {
+            assert!(
+                found
+                    .iter()
+                    .any(|(id, content)| id == call && content == output),
+                "{call} {found:?}"
+            );
+        }
+        let ids: Vec<_> = found.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(
+            ids.len(),
+            ids.iter().collect::<std::collections::BTreeSet<_>>().len()
+        );
+        assert!(!String::from_utf8_lossy(encoded).contains(INTERRUPTED));
+    }
+
+    fn answer_message(value: &Value, assistant_ordinal: usize) -> &Value {
+        let messages = value["messages"].as_array().expect("messages");
+        let mut seen = 0;
+        for (index, message) in messages.iter().enumerate() {
+            let calls = message["content"]
+                .as_array()
+                .is_some_and(|blocks| blocks.iter().any(|block| block["type"] == "tool_use"));
+            if !calls {
+                continue;
+            }
+            if seen == assistant_ordinal {
+                return &messages[index + 1];
+            }
+            seen += 1;
+        }
+        panic!("missing answer {value}");
     }
 }

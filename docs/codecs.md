@@ -149,29 +149,60 @@ The IR keeps every message, including system and developer messages, in order.
 
 Anthropic Messages has one system channel. Decode turns a top-level `system`
 string or block array into a leading `Role::System` message, and accepts a
-`developer` role in `messages`. Encode hoists the leading run of
-`Role::System` and `Role::Developer` messages into that channel, in encounter
-order, and removes that run from `messages`. A system or developer message
-after the conversation has started stays in `messages` with its role. One
-plain text message with an empty bag is a string. Anything else is an array
-of blocks, and message-level fields on that channel are folded onto the first
-block. Developer and system in the leading run become the same channel.
-Several leading messages become one message.
+`developer` role in `messages`. Decode marks the request as Messages form.
+Encode hoists the leading run of `Role::System` and `Role::Developer`
+messages into that channel, in encounter order, and removes that run from
+`messages`. One plain text message with an empty bag is a string. Anything
+else is an array of blocks, and message-level fields on that channel are
+folded onto the first block. Developer and system in the leading run become
+the same channel. Several leading messages become one message.
+
+A request that was not decoded from Messages is translated. A system or
+developer message before any assistant, tool, or thinking turn joins that
+channel as its own block. The reference joins those texts into one system
+string with a blank line between them. One that follows a reply becomes a
+user message whose text is `<system-reminder>\n...\n</system-reminder>`.
+Consecutive user turns are joined. Consecutive tool-result turns are joined
+with each other, and that run is joined with an adjacent user turn, so every
+answered call stays a tool result in one user message. Encode never writes `role: "developer"` inside `messages`. A
+Messages client's own later `system` message stays in `messages` with that
+role. Consecutive user or assistant messages from that client stay separate,
+so each keeps its own members. A later `developer` message becomes the
+reminder, or a `system` message when it has no text. Its other members stay,
+and its text parts are joined with a newline. That reminder joins only an
+adjacent tool-result user, and that user's members stay too. Consecutive user
+messages that each carry a tool result stay separate. The mend reads that
+whole run, so a later result still pairs and each message keeps its members.
+A system message is encoded without `content` only when that object arrived
+without the field. A developer message rewritten to `system` because its text
+is empty still carries `content` when the field was present, including an
+empty array or only non-text parts. A user or assistant message is still
+encoded with `content`.
 
 After encode, `pair_messages_tool_blocks` mends the tool exchange on the
-bytes. A call the next message does not answer gets a synthetic error result
-whose text is `[The result of this tool call is unavailable: the turn was
-interrupted.]` and whose `is_error` is true, first in the following user
-message or in a user message of its own. A result that names no call of the
-message before becomes the text it said. A second answer to one call is
-dropped. A result that follows other content of its message moves first.
-Blocks an assistant message wrote after its first `tool_use` move before that
-call; thinking stays where it was, and empty text is dropped. A system or
-developer message between a call and its results is placed after the results,
-and the real result stays a result. Two `tool_use` blocks in one message that
-share an id become two ids, and each result is kept with its call. A body
-that is already in shape is not written again. Create, token counting, and a
-translated build share this pass.
+bytes. It scans the whole run of consecutive user messages after an assistant.
+Each real result stays in its own message. A call that no message in the run
+answers gets a synthetic error result whose text is
+`[The result of this tool call is unavailable: the turn was interrupted.]`
+and whose `is_error` is true. That synthetic is written into the first user
+message of the run, after that message's real results and before its other
+blocks. A later plain-text user message is not rewritten to hold it. When no
+user message follows, the synthetic is a user message of its own. A result
+that names no call of the message before becomes the text it said. A second
+answer to one call is dropped. A result that follows other content of its
+message moves first. Blocks an assistant message wrote after its first
+`tool_use` move before that call; thinking stays where it was, and empty text
+is dropped. A system or developer message between a call and its results is
+released after the last result in that run, before a trailing user message
+that is only text, and the real result stays a result. A message that
+receives those blocks and arrived without `content` keeps its other members.
+Two `tool_use` blocks in one message that share an id become two ids, and
+each result is kept with its call. Ids in
+that message are reserved before a duplicate is renamed to `{id}__2`,
+`{id}__3`, and so on. The mend reads the encoded body. When that body is
+already in shape it is not written again; the client's original bytes are
+not what this pass compares. Create, token counting, and a translated build
+share this pass.
 
 An advisor server tool (`type` beginning `advisor_`, such as
 `advisor_20260301`) decodes without `input_schema`. Its `type` and `model`
