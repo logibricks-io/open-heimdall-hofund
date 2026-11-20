@@ -98,9 +98,12 @@ fn parse_swap_account(entry: &Value) -> Result<ImportedLogin, PluginError> {
 /// Returns [`PluginError`] when the file is recognized and cannot be stored.
 /// A file that is not recognized is [`PluginErrorKind::Unsupported`](hofund_plugin_api::PluginErrorKind).
 pub async fn store(host: &HostContext, text: &str) -> Result<Vec<AccountId>, PluginError> {
-    let trimmed = text.trim();
+    let trimmed = text.trim().trim_start_matches('\u{feff}');
     if trimmed.is_empty() {
         return Err(PluginError::config("nothing to import"));
+    }
+    if !trimmed.starts_with(['{', '[']) {
+        return store_pasted_lines(host, trimmed).await;
     }
     let Ok(value) = hofund_plugin_sdk::json::from_str::<Value>(trimmed) else {
         return Err(PluginError::unsupported(
@@ -119,14 +122,10 @@ pub async fn store(host: &HostContext, text: &str) -> Result<Vec<AccountId>, Plu
             "not an account export this subscription reads",
         ));
     }
-    let mut ids = Vec::new();
-    for row in rows {
-        ids.push(store_login(host, row).await?);
-    }
-    Ok(ids)
+    commit_rows(host, rows).await
 }
 
-fn collect_import_rows(value: &Value) -> Result<Vec<LoginRow>, PluginError> {
+fn collect_import_rows(value: &Value) -> Result<Vec<Imported>, PluginError> {
     let mut out = Vec::new();
     if let Some(items) = value.as_array() {
         for item in items {
@@ -138,22 +137,23 @@ fn collect_import_rows(value: &Value) -> Result<Vec<LoginRow>, PluginError> {
     Ok(out)
 }
 
-fn walk_import_lenient(value: &Value, out: &mut Vec<LoginRow>) {
+fn walk_import_lenient(value: &Value, out: &mut Vec<Imported>) {
     let _ = walk_import_strict(value, out);
 }
 
-fn walk_import_strict(value: &Value, out: &mut Vec<LoginRow>) -> Result<(), PluginError> {
+fn walk_import_strict(value: &Value, out: &mut Vec<Imported>) -> Result<(), PluginError> {
     match value {
         Value::Array(items) => {
             for item in items {
                 walk_import_lenient(item, out);
             }
         }
+        Value::String(text) => push_setup_text(text, out)?,
         Value::Object(map) => {
             if map.get("credentials").and_then(Value::as_object).is_some()
                 && !json_str(map, &["platform"]).is_empty()
             {
-                out.push(parse_sub2api_row(map)?);
+                out.push(Imported::Login(parse_sub2api_row(map)?));
                 return Ok(());
             }
             if let Some(accounts) = map.get("accounts").and_then(Value::as_array)
@@ -165,12 +165,114 @@ fn walk_import_strict(value: &Value, out: &mut Vec<LoginRow>) -> Result<(), Plug
                 return Ok(());
             }
             if let Some(row) = parse_login_object(map)? {
-                out.push(row);
+                out.push(Imported::Login(row));
             }
         }
         _ => {}
     }
     Ok(())
+}
+
+enum Imported {
+    Login(LoginRow),
+    Setup(String),
+    Reject(String),
+    Other,
+}
+
+/// A pasted line, or a JSON string, that is a setup-token rather than a sign-in.
+fn push_setup_text(text: &str, out: &mut Vec<Imported>) -> Result<(), PluginError> {
+    match classify_token(text) {
+        Classified::Setup(token) => {
+            out.push(Imported::Setup(token));
+            Ok(())
+        }
+        Classified::Reject(message) => Err(PluginError::config(message)),
+        Classified::Other => Ok(()),
+    }
+}
+
+enum Classified {
+    Setup(String),
+    Reject(String),
+    Other,
+}
+
+fn classify_token(line: &str) -> Classified {
+    let trimmed = line.trim();
+    let without_export = trimmed.strip_prefix("export ").unwrap_or(trimmed).trim();
+    let token = without_export
+        .strip_prefix("CLAUDE_CODE_OAUTH_TOKEN=")
+        .unwrap_or(without_export);
+    let token = token.trim_matches(|character| character == '"' || character == '\'');
+    if token.starts_with("sk-ant-oat") || token.starts_with("sk-ant-api") {
+        return match crate::setup_token::normalize(token) {
+            Ok(token) => Classified::Setup(token),
+            Err(error) => Classified::Reject(error.message().to_owned()),
+        };
+    }
+    Classified::Other
+}
+
+async fn store_pasted_lines(host: &HostContext, text: &str) -> Result<Vec<AccountId>, PluginError> {
+    let mut rows = Vec::new();
+    let mut recognized = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        match classify_token(trimmed) {
+            Classified::Setup(token) => {
+                recognized = true;
+                rows.push(Imported::Setup(token));
+            }
+            Classified::Reject(message) => {
+                recognized = true;
+                rows.push(Imported::Reject(message));
+            }
+            Classified::Other => rows.push(Imported::Other),
+        }
+    }
+    if !recognized {
+        return Err(PluginError::unsupported(
+            "not an account export this subscription reads",
+        ));
+    }
+    commit_rows(host, rows).await
+}
+
+async fn commit_rows(
+    host: &HostContext,
+    rows: Vec<Imported>,
+) -> Result<Vec<AccountId>, PluginError> {
+    let mut ids = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut failure: Option<String> = None;
+    for row in rows {
+        match row {
+            Imported::Reject(message) => {
+                failure.get_or_insert(message);
+            }
+            Imported::Other => {
+                failure.get_or_insert(String::from(
+                    "the file doesn't say which Claude account this is; sign in to it from hofund instead",
+                ));
+            }
+            Imported::Login(row) => ids.push(store_login(host, row).await?),
+            Imported::Setup(token) => {
+                if !seen.insert(token.clone()) {
+                    failure.get_or_insert(String::from("in the files twice"));
+                    continue;
+                }
+                ids.push(crate::setup_token::store(host, &token).await?);
+            }
+        }
+    }
+    if let Some(message) = failure {
+        return Err(PluginError::config(message));
+    }
+    Ok(ids)
 }
 
 fn parse_sub2api_row(entry: &Map<String, Value>) -> Result<LoginRow, PluginError> {
@@ -535,7 +637,7 @@ async fn store_login(host: &HostContext, row: LoginRow) -> Result<AccountId, Plu
 #[cfg(test)]
 mod tests {
     use hofund_kit_subscription::{TestHost, block_on};
-    use hofund_plugin_api::{PluginId, PluginKind};
+    use hofund_plugin_api::{AccountId, PluginId, PluginKind};
     use hofund_plugin_sdk::oauth::{SecretObject, account_id_from};
 
     use super::*;
@@ -888,5 +990,130 @@ mod tests {
                 .and_then(|v| v.as_str()),
             Some("org-a")
         );
+    }
+
+    fn setup_secret(host: &TestHost, id: &AccountId) -> String {
+        let secret = block_on(host.context().accounts().secret(id))
+            .expect("read")
+            .expect("stored");
+        let blob = SecretObject::parse(&secret).expect("blob");
+        blob.text(crate::setup_token::SETUP_TOKEN)
+            .expect("setup token")
+            .to_owned()
+    }
+
+    #[test]
+    fn d226_import_pasted_setup_token_lines() {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let exported = "sk-ant-oat01-exported-token";
+        let prefixed = "sk-ant-oat01-prefixed-token";
+        let bare = "sk-ant-oat01-bare-token";
+        let paste = format!(
+            "# from claude setup-token\nexport CLAUDE_CODE_OAUTH_TOKEN=\"{exported}\"\nCLAUDE_CODE_OAUTH_TOKEN='{prefixed}'\n{bare}\n"
+        );
+        let ids = block_on(store(host.context(), &paste)).expect("import");
+        assert_eq!(ids.len(), 3);
+        assert_eq!(setup_secret(&host, &ids[0]), exported);
+        assert_eq!(setup_secret(&host, &ids[1]), prefixed);
+        assert_eq!(setup_secret(&host, &ids[2]), bare);
+        let listed = block_on(host.context().accounts().list()).expect("list");
+        assert_eq!(listed.len(), 3);
+    }
+
+    #[test]
+    fn d226_import_same_token_again_is_the_same_account() {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let token = "sk-ant-oat01-again";
+        let first = block_on(store(host.context(), token)).expect("first");
+        let second = block_on(store(host.context(), token)).expect("second");
+        assert_eq!(first, second);
+        assert_eq!(
+            block_on(host.context().accounts().list())
+                .expect("list")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn d226_import_duplicate_line_is_in_the_files_twice() {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let token = "sk-ant-oat01-twice-in-paste";
+        let paste = format!("export CLAUDE_CODE_OAUTH_TOKEN=\"{token}\"\n{token}\n");
+        let error = block_on(store(host.context(), &paste)).expect_err("twice");
+        let message = error.to_string();
+        assert!(message.contains("in the files twice"), "{message}");
+        assert!(!message.contains(token), "{message}");
+        let listed = block_on(host.context().accounts().list()).expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(setup_secret(&host, listed[0].id()), token);
+    }
+
+    #[test]
+    fn d226_import_api_key_line_is_refused() {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let key = "sk-ant-api03-not-a-setup-token";
+        let error = block_on(store(host.context(), key)).expect_err("api key");
+        let message = error.to_string();
+        assert!(message.contains("API key"), "{message}");
+        assert!(!message.contains(key), "{message}");
+        assert!(
+            block_on(host.context().accounts().list())
+                .expect("list")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn d226_import_json_string_setup_token() {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let token = "sk-ant-oat01-json-string";
+        let text = format!("\"{token}\"");
+        let ids = block_on(store(host.context(), &text)).expect("json string");
+        assert_eq!(ids.len(), 1);
+        assert_eq!(setup_secret(&host, &ids[0]), token);
+        let array = format!("[\"{token}\"]");
+        let again = block_on(store(host.context(), &array)).expect("json array");
+        assert_eq!(again, ids);
+    }
+
+    #[test]
+    fn d226_import_refresh_line_stays_unsupported() {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let error = block_on(store(host.context(), "sk-ant-ort01-bare")).expect_err("refresh");
+        assert_eq!(
+            error.kind(),
+            hofund_plugin_api::PluginErrorKind::Unsupported
+        );
+        assert!(
+            block_on(host.context().accounts().list())
+                .expect("list")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn d226_import_mixed_paste_keeps_the_setup_token_and_refuses_the_rest() {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let token = "sk-ant-oat01-mixed-paste";
+        let paste = format!("# note\n{token}\nsk-ant-ort01-bare\nsk-ant-api03-key\n");
+        let error = block_on(store(host.context(), &paste)).expect_err("mixed");
+        let message = error.to_string();
+        assert!(
+            message.contains("doesn't say which Claude account"),
+            "{message}"
+        );
+        assert!(!message.contains(token), "{message}");
+        assert!(!message.contains("sk-ant-api03-key"), "{message}");
+        let listed = block_on(host.context().accounts().list()).expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(setup_secret(&host, listed[0].id()), token);
     }
 }

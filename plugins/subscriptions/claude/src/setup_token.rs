@@ -10,9 +10,6 @@ use crate::creds;
 /// Secret field holding the setup token (never logged).
 pub(crate) const SETUP_TOKEN: &str = "setupToken";
 
-/// Why agent sign-in cannot switch to a setup-token account.
-pub(crate) const AGENT_SWITCH: &str = "this account was added by a setup-token: hofund serves requests with it, but Claude Code itself can't be signed in to it";
-
 /// Validates and normalizes a pasted setup token.
 pub(crate) fn normalize(token: &str) -> Result<String, PluginError> {
     let mut token = token.trim();

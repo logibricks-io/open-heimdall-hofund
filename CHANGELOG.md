@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- D-226: Using a Claude setup-token account writes `CLAUDE_CODE_OAUTH_TOKEN` into Claude Code's `settings.json` `env`, records only a hash of that value, and leaves a value it did not write in place. Switching to a signed-in account or removing the setup-token account takes the recorded value out. A pasted setup-token line in the Claude import is stored as a setup-token account. The settings file is mode `0600` and written atomically. The token is not logged.
 - D-233: Claude bridge plans set `CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS=0` and `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT=0` unless the process environment already sets that name, and a WSL plan lists both on `WSLENV`, so a client tool is waited on instead of being moved to the background or aborted at the idle limit. One-off runs are unchanged.
 
 ## [0.2.0-rc.2] - 2026-11-18

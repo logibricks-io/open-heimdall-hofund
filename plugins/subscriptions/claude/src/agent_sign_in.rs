@@ -1,4 +1,7 @@
 //! Writing Claude Code's sign-in files from a stored account.
+//!
+//! A setup-token account has nothing to put in the sign-in store. Switching
+//! to one writes `CLAUDE_CODE_OAUTH_TOKEN` into `settings.json` instead.
 
 use std::path::Path;
 
@@ -33,7 +36,12 @@ pub(crate) async fn write(
     };
     let blob = SecretObject::parse(&secret)?;
     if crate::setup_token::is_setup_token(&blob) {
-        return Err(PluginError::config(crate::setup_token::AGENT_SWITCH));
+        let Some(token) = crate::setup_token::token_from_blob(&blob) else {
+            return Err(PluginError::auth(
+                "the stored setup-token account has no token",
+            ));
+        };
+        return crate::token_env::set_token(host, home, &token);
     }
     if blob.flag(creds::LAPSED) {
         return Err(PluginError::auth(creds::LAPSED_REASON));
@@ -43,6 +51,9 @@ pub(crate) async fn write(
             "the stored Claude Code sign-in has no credentials",
         ));
     };
+    // Take our setup-token out before the stored sign-in moves. An unreadable
+    // settings file leaves that sign-in where it is.
+    crate::token_env::clear_ours(host, home)?;
     let profile = Profile::parse(blob.text(creds::PROFILE).unwrap_or_default());
     let write_loc = live
         .map(|(_, loc)| loc)
