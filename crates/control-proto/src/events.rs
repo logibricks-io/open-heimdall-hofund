@@ -329,6 +329,8 @@ pub enum CooldownReason {
     Panic,
     /// Vendor overload on the requested model.
     Overload,
+    /// The vendor restricted the account.
+    Restricted,
     /// A newer peer supplied an unknown reason.
     #[serde(other)]
     Unknown,
@@ -346,6 +348,7 @@ impl CooldownReason {
             Self::Observed => "observed",
             Self::Panic => "panic",
             Self::Overload => "overload",
+            Self::Restricted => "restricted",
             Self::Unknown => "unknown",
         }
     }
