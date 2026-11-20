@@ -146,40 +146,72 @@ pub(crate) fn usage_based_seat(dir: &Path) -> bool {
 }
 
 /// Joins a JSON `/usage` result with report rows when the text drew no window.
-#[must_use]
-pub(crate) fn attach_report(raw: &str) -> String {
+///
+/// A result with `is_error: true` is a failed read. The error quotes only a
+/// clipped `result` string, never the rest of the JSON.
+pub(crate) fn attach_report(raw: &str) -> Result<String, PluginError> {
     let trimmed = raw.trim();
     let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
-        return raw.to_owned();
+        return Ok(raw.to_owned());
     };
     match value {
-        Value::Object(object) => object
-            .get("result")
-            .and_then(Value::as_str)
-            .unwrap_or(raw)
-            .to_owned(),
+        Value::Object(object) => {
+            if object.get("is_error").and_then(Value::as_bool) == Some(true) {
+                let result = object.get("result").and_then(Value::as_str).unwrap_or("");
+                return Err(usage_command_failed(result));
+            }
+            Ok(object
+                .get("result")
+                .and_then(Value::as_str)
+                .unwrap_or(raw)
+                .to_owned())
+        }
         Value::Array(items) => {
             let Some((result, is_error)) = items.iter().rev().find_map(|item| {
                 let object = item.as_object()?;
                 if object.get("type").and_then(Value::as_str) != Some("result") {
                     return None;
                 }
-                let result = object.get("result").and_then(Value::as_str)?;
                 let is_error = object
                     .get("is_error")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
-                Some((result.to_owned(), is_error))
+                if is_error {
+                    let result = object.get("result").and_then(Value::as_str).unwrap_or("");
+                    return Some((result.to_owned(), true));
+                }
+                let result = object.get("result").and_then(Value::as_str)?;
+                Some((result.to_owned(), false))
             }) else {
-                return raw.to_owned();
+                return Ok(raw.to_owned());
             };
             if is_error {
-                return result;
+                return Err(usage_command_failed(&result));
             }
             let extra = report_lines(&items, &result);
-            format!("{result}{extra}")
+            Ok(format!("{result}{extra}"))
         }
-        _ => raw.to_owned(),
+        _ => Ok(raw.to_owned()),
+    }
+}
+
+/// Parses command output the way a quota read does: an error result stops
+/// before parsing and before the usage-based seat check.
+pub(crate) fn windows_from_output(
+    raw: &str,
+    now: SystemTime,
+    dir: &Path,
+) -> Result<Vec<QuotaWindow>, PluginError> {
+    let text = attach_report(raw)?;
+    parse_for_dir(&text, now, dir)
+}
+
+fn usage_command_failed(result: &str) -> PluginError {
+    let clipped = clip_line(result.trim());
+    if clipped.is_empty() {
+        PluginError::transport("Claude Code's /usage failed")
+    } else {
+        PluginError::transport(format!("Claude Code: {clipped}"))
     }
 }
 
@@ -399,7 +431,9 @@ fn row_line(row: &LimitRow) -> Option<String> {
                 .and_then(|scope| scope.model.as_ref())
                 .and_then(|model| model.display_name.as_deref())
                 .map(str::trim)
-                .filter(|name| !name.is_empty() && !name.contains(['(', ')']))?;
+                .filter(|name| {
+                    !name.is_empty() && !name.contains(['(', ')']) && !has_ascii_control(name)
+                })?;
             format!("Current week ({name})")
         }
         _ => return None,
@@ -449,9 +483,11 @@ fn extra_suffix(limits: &Value) -> String {
         .and_then(Value::as_f64)
         .filter(|used| used.is_finite())
         .unwrap_or(0.0);
-    let currency = extra
-        .get("currency")
-        .and_then(Value::as_str)
+    let named = extra.get("currency").and_then(Value::as_str);
+    if named.is_some_and(has_ascii_control) {
+        return String::new();
+    }
+    let currency = named
         .filter(|currency| !currency.is_empty())
         .unwrap_or("USD");
     format!(
@@ -478,6 +514,10 @@ fn overages_window(windows: &[QuotaWindow]) -> Result<QuotaWindow, PluginError> 
 /// Maps a scoped window label to the model id prefix Claude counts.
 pub(crate) fn scope_to_model(name: &str) -> String {
     name.to_ascii_lowercase().replace([' ', '.'], "-")
+}
+
+fn has_ascii_control(text: &str) -> bool {
+    text.bytes().any(|byte| byte < 0x20 || byte == 0x7f)
 }
 
 fn clip_line(s: &str) -> String {
@@ -621,7 +661,8 @@ Usage report: no meters on this plan
     #[test]
     fn d238_report_rows_fill_a_text_that_drew_no_window() {
         let now = utc_at("2026-11-19T13:00:00Z");
-        let text = attach_report(include_str!("fixtures/usage/enterprise_rows.json"));
+        let text =
+            attach_report(include_str!("fixtures/usage/enterprise_rows.json")).expect("report");
         assert!(text.contains("Current session: 37.5% used · resets 2026-11-19T15:00:00.000Z"));
         assert!(text.contains("Current week (all models): 8% used · resets 2026-11-26T13:00:00Z"));
         assert!(text.contains("Current week (Fable): 4% used"));
@@ -644,14 +685,16 @@ Usage report: no meters on this plan
 
     #[test]
     fn d238_text_that_drew_a_window_ignores_report_rows() {
-        let text = attach_report(include_str!("fixtures/usage/text_drew_window.json"));
+        let text =
+            attach_report(include_str!("fixtures/usage/text_drew_window.json")).expect("report");
         assert_eq!(text, "Current session: 13% used");
     }
 
     #[test]
     fn d238_empty_limits_with_credits_is_an_aside_beside_usage_credits() {
         let now = utc_at("2026-11-19T13:00:00Z");
-        let text = attach_report(include_str!("fixtures/usage/no_meters_credits.json"));
+        let text =
+            attach_report(include_str!("fixtures/usage/no_meters_credits.json")).expect("report");
         assert!(text.contains(NO_METERS_LINE));
         assert!(text.contains("Extra usage: 12.00 / 500.00 USD spent"));
         let windows = parse(&text, now).expect("aside");
@@ -672,7 +715,7 @@ Usage report: no meters on this plan
     #[test]
     fn d238_bad_row_keeps_the_extra_line_and_stays_unavailable() {
         let now = utc_at("2026-11-19T13:00:00Z");
-        let text = attach_report(include_str!("fixtures/usage/bad_row.json"));
+        let text = attach_report(include_str!("fixtures/usage/bad_row.json")).expect("report");
         assert!(text.contains("Extra usage: 1.00 / 500.00 USD spent"));
         assert!(!text.contains("Current session:"));
         let error = parse(&text, now).expect_err("unavailable");
@@ -689,7 +732,7 @@ Usage report: no meters on this plan
             include_str!("fixtures/usage/rate_limits_null.json"),
             include_str!("fixtures/usage/no_meters.json"),
         ] {
-            let text = attach_report(fixture);
+            let text = attach_report(fixture).expect("report");
             if fixture.contains("\"limits\":[]") {
                 let windows = parse(&text, now).expect("empty limits");
                 assert_eq!(windows[0].display(), NO_METERS_DISPLAY);
@@ -746,6 +789,132 @@ Usage report: no meters on this plan
         .expect("profile");
         let failed = parse_for_dir("/usage couldn't load the plan's usage", now, dir.path());
         assert_eq!(failed.expect_err("load").kind(), PluginErrorKind::Transport);
+    }
+
+    fn error_result(result: &str, array: bool) -> String {
+        let object = serde_json::json!({
+            "type": "result",
+            "is_error": true,
+            "result": result,
+            "session_id": "planted-session-marker",
+        });
+        if array {
+            serde_json::json!([
+                {
+                    "type": "assistant",
+                    "usage_report": {
+                        "rate_limits": {
+                            "limits": [{"kind": "session", "percent": 90}],
+                            "extra_usage": null
+                        }
+                    }
+                },
+                object
+            ])
+            .to_string()
+        } else {
+            object.to_string()
+        }
+    }
+
+    fn assert_failed_read(raw: &str, now: SystemTime, dir: &std::path::Path) {
+        let err = windows_from_output(raw, now, dir).expect_err("error result");
+        assert_eq!(err.kind(), PluginErrorKind::Transport);
+        let message = err.message();
+        assert!(!message.contains("planted-session-marker"));
+        assert!(message.len() < 200);
+    }
+
+    #[test]
+    fn d238_error_result_is_a_failed_read() {
+        let now = utc_at("2026-11-19T13:00:00Z");
+        let dir = tempfile::tempdir().expect("dir");
+        for array in [false, true] {
+            assert_failed_read(&error_result("", array), now, dir.path());
+            let err =
+                windows_from_output(&error_result("", array), now, dir.path()).expect_err("empty");
+            assert_eq!(err.message(), "Claude Code's /usage failed");
+        }
+    }
+
+    #[test]
+    fn d238_error_result_on_a_usage_based_seat_is_not_an_aside() {
+        let now = utc_at("2026-11-19T13:00:00Z");
+        let dir = tempfile::tempdir().expect("dir");
+        std::fs::write(
+            dir.path().join(crate::creds::PROFILE_FILE),
+            r#"{"oauthAccount":{"seatTier":"enterprise_usage_based"}}"#,
+        )
+        .expect("profile");
+        let result = "You are currently using your subscription to power your Claude Code usage";
+        for array in [false, true] {
+            assert_failed_read(&error_result(result, array), now, dir.path());
+        }
+    }
+
+    #[test]
+    fn d238_error_result_with_a_window_line_is_not_parsed() {
+        let now = utc_at("2026-11-19T13:00:00Z");
+        let dir = tempfile::tempdir().expect("dir");
+        let result = format!(
+            "Current session: 13% used{}planted-tail-marker",
+            "x".repeat(200)
+        );
+        for array in [false, true] {
+            let raw = error_result(&result, array);
+            assert_failed_read(&raw, now, dir.path());
+            let message = windows_from_output(&raw, now, dir.path())
+                .expect_err("window")
+                .message()
+                .to_owned();
+            assert!(message.contains("Current session: 13% used"));
+            assert!(message.contains('…'));
+            assert!(!message.contains("planted-tail-marker"));
+        }
+    }
+
+    #[test]
+    fn d238_control_characters_in_a_model_name_or_currency_are_skipped() {
+        let raw = serde_json::json!([
+            {
+                "type": "assistant",
+                "usage_report": {
+                    "rate_limits": {
+                        "limits": [
+                            {
+                                "kind": "weekly_scoped",
+                                "percent": 4,
+                                "scope": {"model": {"display_name": "Fable\nCurrent session: 99% used"}}
+                            },
+                            {
+                                "kind": "session",
+                                "percent": 3,
+                                "resets_at": "2026-11-19T15:00:00Z"
+                            }
+                        ],
+                        "extra_usage": {
+                            "is_enabled": true,
+                            "monthly_limit": 100,
+                            "used_credits": 1,
+                            "currency": "US\nD"
+                        }
+                    }
+                }
+            },
+            {
+                "type": "result",
+                "is_error": false,
+                "result": "You are currently using your subscription to power your Claude Code usage"
+            }
+        ])
+        .to_string();
+        let text = attach_report(&raw).expect("report");
+        assert!(text.contains("Current session: 3% used"));
+        assert!(!text.contains("Current session: 99"));
+        assert!(!text.contains("Extra usage:"));
+        let windows = parse(&text, utc_at("2026-11-19T13:00:00Z")).expect("session");
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].name(), "5 hours");
     }
 
     #[test]

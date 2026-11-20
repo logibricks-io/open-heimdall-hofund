@@ -525,16 +525,19 @@ impl Claude {
                 "not read yet: refresh this account's card to have Claude Code's /usage read it",
             ));
         }
+        let reading_path = account_dir(host, account)
+            .ok()
+            .map(|dir| dir.join(limits::READING_FILE));
+        let disk = reading_path.as_deref().and_then(limits::load_reading);
+        let (prev, prev_at) = self.limits.snapshot_prior(account, disk);
         self.limits.mark_usage_tried(account, now);
         match account::read_usage(host, self.command.as_ref(), account).await {
             Ok(windows) => {
-                let reading_path = account_dir(host, account)
-                    .ok()
-                    .map(|dir| dir.join(limits::READING_FILE));
-                let disk = reading_path.as_deref().and_then(limits::load_reading);
-                let stored = self.limits.record_usage(account, windows, now, disk);
+                let stored = self
+                    .limits
+                    .record_usage(account, windows, now, &prev, prev_at);
                 if let Some(path) = reading_path.as_deref() {
-                    let _ = limits::save_reading(path, &stored, now);
+                    limits::save_reading(path, &stored, now)?;
                 }
                 Ok(self.limits.kept_windows(account, now).unwrap_or_default())
             }

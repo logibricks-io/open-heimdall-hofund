@@ -216,7 +216,28 @@ pub(crate) fn strip_ansi(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_ansi;
+    use super::{USAGE_ARGS, strip_ansi};
+
+    #[test]
+    fn d238_usage_args_match_the_json_read() {
+        assert_eq!(
+            USAGE_ARGS,
+            [
+                "-p",
+                "/usage",
+                "--output-format",
+                "json",
+                "--tools",
+                "",
+                "--strict-mcp-config",
+                "--setting-sources",
+                "",
+                "--settings",
+                r#"{"disableDeepLinkRegistration":"disable"}"#,
+                "--no-session-persistence",
+            ]
+        );
+    }
 
     #[test]
     fn r5_29_strip_ansi_keeps_newlines() {
