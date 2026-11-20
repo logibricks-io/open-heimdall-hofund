@@ -1620,22 +1620,35 @@ fn replayed_search_declares_the_cached_tool() {
     assert_eq!(out["tools"], json!([cached.clone()]));
     assert_eq!(out["tool_choice"], json!("none"));
     let function = json!({"type": "function", "name": "f"});
+    let strict_function = json!({"type": "function", "name": "f", "strict": false});
     let (out, _) = shaped(
         json!({"input": searched.clone(), "tools": [function.clone()]}),
         None,
     );
-    assert_eq!(out["tools"], json!([function.clone(), cached.clone()]));
+    assert_eq!(
+        out["tools"],
+        json!([strict_function.clone(), cached.clone()])
+    );
     assert_eq!(out["tool_choice"], json!("auto"));
-    for declared in [
-        json!({"type": "web_search_preview"}),
-        json!({"type": "function", "name": "web.run"}),
-        json!({"type": "namespace", "name": "web", "tools": [{"type": "function", "name": "run"}]}),
+    for (declared, expected) in [
+        (
+            json!({"type": "web_search_preview"}),
+            json!({"type": "web_search_preview"}),
+        ),
+        (
+            json!({"type": "function", "name": "web.run"}),
+            json!({"type": "function", "name": "web.run", "strict": false}),
+        ),
+        (
+            json!({"type": "namespace", "name": "web", "tools": [{"type": "function", "name": "run"}]}),
+            json!({"type": "namespace", "name": "web", "tools": [{"type": "function", "name": "run", "strict": false}]}),
+        ),
     ] {
         let (out, _) = shaped(
-            json!({"input": searched.clone(), "tools": [declared.clone()]}),
+            json!({"input": searched.clone(), "tools": [declared]}),
             None,
         );
-        assert_eq!(out["tools"], json!([declared]));
+        assert_eq!(out["tools"], json!([expected]));
     }
     assert!(!shape::declares_search(&[
         json!({"type": "namespace", "name": "web", "tools": [{"type": "function", "name": "open"}]})
@@ -1654,7 +1667,7 @@ fn replayed_search_declares_the_cached_tool() {
     let mut items = searched.as_array().expect("items").clone();
     items.push(json!({"type": "additional_tools", "tools": [function.clone()]}));
     let (out, _) = shaped(json!({"input": items}), None);
-    assert_eq!(out["input"][2]["tools"], json!([function, cached]));
+    assert_eq!(out["input"][2]["tools"], json!([strict_function, cached]));
     assert_eq!(out["tool_choice"], json!("auto"));
     assert!(out.get("tools").is_none());
     let (out, _) = shaped(json!({"input": searched, "tools": "odd"}), None);

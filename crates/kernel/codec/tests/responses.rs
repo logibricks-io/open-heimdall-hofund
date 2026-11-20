@@ -442,6 +442,66 @@ fn codex_tool_types_pass_through_and_map() {
     assert!(!chat_text.contains("namespace"));
 }
 
+/// Chat and Messages translation keeps the client's `strict` and schema.
+///
+/// The Codex subscription shaper, not this encode, decides whether that flag
+/// stays and whether a `oneOf` is rewritten. A tool that omits `strict` is
+/// still omitted here.
+#[test]
+fn d242_translated_tools_keep_the_clients_strict() {
+    let schema =
+        r#"{"type":"object","properties":{"q":{"oneOf":[{"type":"string"},{"type":"number"}]}}}"#;
+    let chat = OpenAiChat
+        .decode_request(
+            format!(
+                r#"{{"model":"m","messages":[{{"role":"user","content":"go"}}],"tools":[
+                    {{"type":"function","function":{{"name":"loose","parameters":{schema}}}}},
+                    {{"type":"function","function":{{"name":"held","strict":true,"parameters":{schema}}}}}
+                ]}}"#
+            )
+            .as_bytes(),
+        )
+        .expect("chat");
+    let encoded = OpenAiResponses.encode_request(&chat).expect("responses");
+    let value: serde_json::Value = serde_json::from_slice(&encoded).expect("json");
+    let tools = value["tools"].as_array().expect("tools");
+    let by_name = |name: &str| {
+        tools
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap_or_else(|| panic!("no {name}"))
+    };
+    let loose = by_name("loose");
+    assert!(loose.get("strict").is_none(), "omitted strict was invented");
+    assert!(
+        loose["parameters"]["properties"]["q"]
+            .get("oneOf")
+            .is_some()
+    );
+    let held = by_name("held");
+    assert_eq!(held["strict"], json!(true));
+    assert!(held["parameters"]["properties"]["q"].get("oneOf").is_some());
+
+    let messages = AnthropicMessages
+        .decode_request(
+            format!(
+                r#"{{"model":"m","max_tokens":16,"messages":[{{"role":"user","content":"go"}}],"tools":[
+                    {{"name":"held","strict":true,"input_schema":{schema}}}
+                ]}}"#
+            )
+            .as_bytes(),
+        )
+        .expect("messages");
+    let encoded = OpenAiResponses
+        .encode_request(&messages)
+        .expect("responses");
+    let value: serde_json::Value = serde_json::from_slice(&encoded).expect("json");
+    let tool = &value["tools"][0];
+    assert_eq!(tool["name"], "held");
+    assert_eq!(tool["strict"], json!(true));
+    assert!(tool["parameters"]["properties"]["q"].get("oneOf").is_some());
+}
+
 #[test]
 fn tool_search_for_the_client_becomes_a_function() {
     let request = OpenAiResponses
