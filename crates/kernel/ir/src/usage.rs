@@ -35,9 +35,49 @@ pub struct Usage {
     /// Output tokens spent on reasoning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u64>,
+    /// Advisor calls a reply reported beside the executor's own counters.
+    ///
+    /// A later patch with a non-empty list replaces this one. An empty patch
+    /// leaves the previous list, because a stream's later usage often repeats
+    /// the whole list and a usage object with no advisor entry says nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub advisor_calls: Vec<AdvisorCall>,
     /// Counter fields this version does not model.
     #[serde(default, skip_serializing_if = "Extensions::is_empty")]
     pub extensions: Extensions,
+}
+
+/// One advisor call reported beside an executor reply.
+///
+/// The model string is the name the upstream used. Token counters are that
+/// call's own, not the executor's.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AdvisorCall {
+    /// Model name the upstream reported for this call.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    /// Tokens read from the prompt.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub input_tokens: u64,
+    /// Tokens written by the advisor model.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub output_tokens: u64,
+    /// Prompt tokens served from a cache.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cache_read_tokens: u64,
+    /// Prompt tokens written into a cache.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cache_write_tokens: u64,
+    /// Prompt cache writes billed at the five-minute TTL.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cache_write_5m_tokens: u64,
+    /// Prompt cache writes billed at the one-hour TTL.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cache_write_1h_tokens: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 impl Usage {
@@ -51,6 +91,9 @@ impl Usage {
         merge_counter(&mut self.cache_write_5m_tokens, patch.cache_write_5m_tokens);
         merge_counter(&mut self.cache_write_1h_tokens, patch.cache_write_1h_tokens);
         merge_counter(&mut self.reasoning_tokens, patch.reasoning_tokens);
+        if !patch.advisor_calls.is_empty() {
+            self.advisor_calls.clone_from(&patch.advisor_calls);
+        }
         self.extensions.absorb(&patch.extensions);
     }
 

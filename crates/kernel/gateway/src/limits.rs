@@ -491,6 +491,9 @@ pub(super) fn observe_usage(
     if let Some(value) = super::as_i64(usage.reasoning_tokens) {
         meta.details.reasoning_tokens = Some(value);
     }
+    if !usage.advisor_calls.is_empty() {
+        meta.advisor_calls.clone_from(&usage.advisor_calls);
+    }
     if let Some(input) = input {
         let cached = if input_includes_cache(protocol) {
             meta.details.cache_read_tokens.unwrap_or(0)

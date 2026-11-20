@@ -3,19 +3,43 @@
 use hofund_plugin_api::{AccountId, HostContext, PluginError, SecretString};
 use hofund_plugin_sdk::Call;
 use hofund_plugin_sdk::oauth::{
-    SecretObject, account_id_from, parse_google_import, parse_token_set, same_secret, token_error,
+    GoogleImport, SecretObject, account_id_from, parse_google_import, parse_token_set, same_secret,
+    token_error,
 };
 
 use crate::{ENROLLMENT_REFUSAL, Endpoints, client, project, sign_in, tokens};
 
-/// Refuses an export this plugin would store. An export it cannot read
-/// returns the existing config error.
-pub(crate) fn reject_new_enrollment(text: &str) -> Result<(), PluginError> {
+/// Refuses an export that would store an account id this host does not
+/// already have. An export it cannot read returns the existing config error
+/// from [`store`].
+pub(crate) async fn refuse_unknown_targets(
+    host: &HostContext,
+    text: &str,
+) -> Result<(), PluginError> {
     let entries = parse_google_import("antigravity", "Antigravity", text)?;
-    if entries.iter().any(|entry| entry.error().is_none()) {
-        return Err(PluginError::config(ENROLLMENT_REFUSAL));
+    for entry in entries.iter().filter(|entry| entry.error().is_none()) {
+        if !targets_stored_account(host, entry).await? {
+            return Err(PluginError::config(ENROLLMENT_REFUSAL));
+        }
     }
     Ok(())
+}
+
+async fn targets_stored_account(
+    host: &HostContext,
+    entry: &GoogleImport,
+) -> Result<bool, PluginError> {
+    if let Some(refresh) = entry.refresh_token()
+        && existing_account(host, refresh).await?.is_some()
+    {
+        return Ok(true);
+    }
+    let email = entry.email().trim();
+    if email.is_empty() {
+        return Ok(false);
+    }
+    let id = account_id_from(&["antigravity", &email.to_ascii_lowercase()]);
+    Ok(host.accounts().secret(&id).await?.is_some())
 }
 
 pub(crate) async fn store(
@@ -24,6 +48,7 @@ pub(crate) async fn store(
     oauth: &client::OauthClient,
     text: &str,
     configured_project: Option<&str>,
+    allow_new: bool,
 ) -> Result<Vec<AccountId>, PluginError> {
     let entries = parse_google_import("antigravity", "Antigravity", text)?;
     for (index, entry) in entries.iter().enumerate() {
@@ -56,10 +81,17 @@ pub(crate) async fn store(
             .map_err(|error| PluginError::decode(error.message()))?;
         let email = match sign_in::who(host, &endpoints.userinfo, set.access()).await {
             Ok(email) => email,
+            // The export email is caller-controlled. When new accounts are
+            // refused, a failed userinfo must not attach this refresh token
+            // to a stored account, and must not call Code Assist.
+            Err(error) if !allow_new => return Err(error),
             Err(_) if !entry.email().is_empty() => entry.email().to_owned(),
             Err(error) => return Err(error),
         };
         let id = account_id_from(&["antigravity", &email.to_ascii_lowercase()]);
+        if !allow_new && host.accounts().secret(&id).await?.is_none() {
+            return Err(PluginError::config(ENROLLMENT_REFUSAL));
+        }
         let mut blob = SecretObject::new()
             .with_number("v", 1)
             .with_secret("refresh_token", &refresh)
