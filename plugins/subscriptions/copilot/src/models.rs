@@ -26,6 +26,8 @@ pub(crate) struct Listed {
     waiting: HashSet<String>,
     /// Enabled manual picks, likeliest served first.
     picks: Vec<String>,
+    /// Models whose list names `ws:/responses`.
+    socket: HashSet<String>,
 }
 
 impl Listed {
@@ -59,6 +61,11 @@ impl Listed {
     pub(crate) fn waits(&self, model: &str) -> bool {
         self.waiting.contains(model)
     }
+
+    /// Whether `model` is served on the Responses WebSocket.
+    pub(crate) fn responses_socket(&self, model: &str) -> bool {
+        self.socket.contains(model)
+    }
 }
 
 /// What the plugin learned from each account's latest model list.
@@ -69,6 +76,8 @@ pub(crate) struct Book {
     pub(crate) refused: Mutex<HashMap<AccountId, HashMap<String, std::time::SystemTime>>>,
     /// Image caps learned from a "too many images" refusal, per model.
     pub(crate) image_caps: Mutex<HashMap<AccountId, HashMap<String, usize>>>,
+    /// Responses sockets kept for each account.
+    pub(crate) sockets: crate::socket::Pool,
 }
 
 impl Book {
@@ -89,12 +98,36 @@ impl Book {
     }
 
     /// Remembers endpoints an Auto pick named even when `/models` did not.
-    pub(crate) fn see(&self, account: &AccountId, model: &str, apis: Vec<ProtocolId>) {
+    ///
+    /// `socket` is `None` when the pick named no endpoints, so a flag the
+    /// model list already set stays. `Some` records whether this pick listed
+    /// `ws:/responses`.
+    pub(crate) fn see(
+        &self,
+        account: &AccountId,
+        model: &str,
+        apis: Vec<ProtocolId>,
+        socket: Option<bool>,
+    ) {
+        let mut listed = self.lock();
+        let listed = listed.entry(account.clone()).or_default();
+        listed.apis.insert(model.to_owned(), apis);
+        match socket {
+            Some(true) => {
+                listed.socket.insert(model.to_owned());
+            }
+            Some(false) => {
+                listed.socket.remove(model);
+            }
+            None => {}
+        }
+    }
+
+    /// Whether `account`'s list serves `model` on the Responses WebSocket.
+    pub(crate) fn responses_socket(&self, account: &AccountId, model: &str) -> bool {
         self.lock()
-            .entry(account.clone())
-            .or_default()
-            .apis
-            .insert(model.to_owned(), apis);
+            .get(account)
+            .is_some_and(|listed| listed.responses_socket(model))
     }
 
     /// Records that `account` accepted the terms of `model`.
@@ -215,7 +248,14 @@ pub(crate) fn parse(body: &[u8]) -> Result<(Vec<ModelSpec>, Vec<String>, Listed)
             dropped.push(id.to_owned());
             continue;
         }
-        let apis = apis(&strings(row.get("supported_endpoints")));
+        let endpoints = strings(row.get("supported_endpoints"));
+        if endpoints
+            .iter()
+            .any(|endpoint| lists_responses_socket(endpoint))
+        {
+            listed.socket.insert(id.to_owned());
+        }
+        let apis = apis(&endpoints);
         listed.apis.insert(id.to_owned(), apis.clone());
         if !offered(row, id) {
             dropped.push(id.to_owned());
@@ -305,6 +345,11 @@ pub(crate) fn internal(id: &str) -> bool {
         .iter()
         .any(|prefix| id.starts_with(prefix))
         || INTERNAL_SUFFIXES.iter().any(|suffix| id.ends_with(suffix))
+}
+
+/// Whether `endpoint` is the Responses WebSocket (`ws:/responses`).
+pub(crate) fn lists_responses_socket(endpoint: &str) -> bool {
+    endpoint.trim().trim_end_matches('/') == "ws:/responses"
 }
 
 /// The APIs named by `supported_endpoints`. A model the list gives none is

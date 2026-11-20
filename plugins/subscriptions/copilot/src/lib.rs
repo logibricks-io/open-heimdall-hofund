@@ -27,6 +27,7 @@ mod quota;
 mod session;
 mod sign_in;
 mod site;
+mod socket;
 mod upstream;
 
 use session::Session;
@@ -332,6 +333,8 @@ mod auto_tests;
 mod conformance;
 #[cfg(test)]
 mod d229_image_cap_tests;
+#[cfg(test)]
+mod d235_socket_tests;
 #[cfg(test)]
 mod entitlement_tests;
 #[cfg(test)]
