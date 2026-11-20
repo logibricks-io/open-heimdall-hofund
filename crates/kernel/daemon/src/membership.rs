@@ -93,6 +93,7 @@ struct HopSpec {
     free: bool,
     stays: hofund_router::affinity::Stays,
     cold_after: Duration,
+    service_tier: String,
     units: Vec<Unit>,
 }
 
@@ -402,6 +403,7 @@ fn build_specs(
                 free: hop.free,
                 stays: hop.stays,
                 cold_after: hop.cold_after,
+                service_tier: hop.service_tier,
                 units: hop.units,
             });
         }
@@ -439,6 +441,8 @@ pub(crate) struct PlannedHop {
     pub free: bool,
     pub stays: hofund_router::affinity::Stays,
     pub cold_after: Duration,
+    /// `priority` or `ultrafast` when the member is configured for one.
+    pub service_tier: String,
     pub units: Vec<Unit>,
 }
 
@@ -496,6 +500,7 @@ impl Table {
                         nearly_spent: false,
                         fallback: spec.units.iter().any(|unit| unit.fallback),
                         effort: String::new(),
+                        service_tier: spec.service_tier.clone(),
                         cold_after: spec.cold_after,
                         units: spec.units.clone(),
                     })
@@ -753,6 +758,7 @@ impl Member for LiveMember {
         MemberAttempt {
             provider_id: self.route_id.clone(),
             protocol: self.protocol.to_owned(),
+            wire_protocol: self.route.protocol.clone(),
             base_url: self.route.base_url.clone(),
             route: self.route.route.clone(),
             keeps_responses: self.route.keeps_responses,
@@ -1514,6 +1520,7 @@ mod tests {
                 free: false,
                 stays: hofund_router::affinity::Stays::Auto,
                 cold_after: hofund_router::affinity::CACHE_COLD,
+                service_tier: String::new(),
                 units: Vec::new(),
             }],
         );
@@ -1621,6 +1628,7 @@ mod tests {
                 free: false,
                 stays: hofund_router::affinity::Stays::Auto,
                 cold_after: hofund_router::affinity::CACHE_COLD,
+                service_tier: String::new(),
                 units: Vec::new(),
             }],
         );
@@ -1719,6 +1727,7 @@ mod tests {
                 free: false,
                 stays: hofund_router::affinity::Stays::Auto,
                 cold_after: hofund_router::affinity::CACHE_COLD,
+                service_tier: String::new(),
                 units: Vec::new(),
             }],
         );
@@ -1816,6 +1825,7 @@ mod tests {
                 free: false,
                 stays: hofund_router::affinity::Stays::Auto,
                 cold_after: hofund_router::affinity::CACHE_COLD,
+                service_tier: String::new(),
                 units: Vec::new(),
             }],
         );
@@ -1885,6 +1895,7 @@ mod tests {
                     free: false,
                     stays: hofund_router::affinity::Stays::Auto,
                     cold_after: hofund_router::affinity::CACHE_COLD,
+                    service_tier: String::new(),
                     units: Vec::new(),
                 },
                 PlannedHop {
@@ -1904,6 +1915,7 @@ mod tests {
                     free: false,
                     stays: hofund_router::affinity::Stays::Auto,
                     cold_after: hofund_router::affinity::CACHE_COLD,
+                    service_tier: String::new(),
                     units: Vec::new(),
                 },
             ],
@@ -1954,6 +1966,7 @@ mod tests {
                     free: false,
                     stays: hofund_router::affinity::Stays::Auto,
                     cold_after: hofund_router::affinity::CACHE_COLD,
+                    service_tier: String::new(),
                     units: Vec::new(),
                 })
                 .collect(),

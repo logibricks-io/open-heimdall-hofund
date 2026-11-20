@@ -56,6 +56,11 @@ pub trait RawTap: Send {
     fn advisor_calls(&self) -> Vec<hofund_ir::AdvisorCall> {
         Vec::new()
     }
+
+    /// Served `service_tier` copied from a start or delta event, when one arrived.
+    fn served_tier(&self) -> String {
+        String::new()
+    }
 }
 
 /// Cache and reasoning counters a tap accumulated while relaying bytes.
@@ -222,6 +227,7 @@ pub(crate) struct DecoderTap {
     output: Option<i64>,
     supplemental: SupplementalUsage,
     advisor_calls: Vec<hofund_ir::AdvisorCall>,
+    served_tier: String,
 }
 
 impl DecoderTap {
@@ -250,6 +256,7 @@ impl DecoderTap {
             output: None,
             supplemental: SupplementalUsage::default(),
             advisor_calls: Vec::new(),
+            served_tier: String::new(),
         }
     }
 
@@ -270,6 +277,18 @@ impl DecoderTap {
                 _ => None,
             };
             note_usage(usage, &mut self.input, &mut self.output);
+            let tier = match event {
+                StreamEvent::MessageStart(start) => {
+                    crate::service_tier::extension_tier(&start.extensions)
+                }
+                StreamEvent::MessageDelta(delta) => {
+                    crate::service_tier::extension_tier(&delta.extensions)
+                }
+                _ => String::new(),
+            };
+            if !tier.is_empty() {
+                self.served_tier = tier;
+            }
             if let Some(usage) = usage {
                 if let Some(value) = usage.cache_read_tokens {
                     self.supplemental.cache_read = i64::try_from(value).ok();
@@ -334,6 +353,10 @@ impl RawTap for DecoderTap {
 
     fn advisor_calls(&self) -> Vec<hofund_ir::AdvisorCall> {
         self.advisor_calls.clone()
+    }
+
+    fn served_tier(&self) -> String {
+        self.served_tier.clone()
     }
 }
 

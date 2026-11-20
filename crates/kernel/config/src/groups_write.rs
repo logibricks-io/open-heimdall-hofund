@@ -91,6 +91,21 @@ pub fn edit_group_create(
     Ok((document.to_string(), id))
 }
 
+/// One member written by a group patch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemberEdit {
+    /// Route reference.
+    pub reference: String,
+    /// Fixed effort, empty when the agent chooses.
+    pub effort: String,
+    /// Fast mode.
+    pub fast: bool,
+    /// Ultrafast mode.
+    pub ultra: bool,
+    /// Whether the member takes requests.
+    pub enabled: bool,
+}
+
 /// Applies a partial group patch.
 #[allow(clippy::too_many_arguments)]
 pub fn edit_group_patch(
@@ -102,7 +117,7 @@ pub fn edit_group_patch(
     context: Option<Option<i64>>,
     levels: Option<&[String]>,
     classifier: Option<Option<&str>>,
-    members: Option<&[(String, String, bool, bool)]>,
+    members: Option<&[MemberEdit]>,
     rules: Option<&[String]>,
     rename_to: Option<&str>,
 ) -> Result<(String, String), ConfigError> {
@@ -190,12 +205,12 @@ pub fn edit_group_patch(
                 "a group must keep at least one member".to_owned(),
             ));
         }
-        for (reference, _, _, _) in entries {
-            validate_member_ref(&before, reference)?;
+        for entry in entries {
+            validate_member_ref(&before, &entry.reference)?;
         }
         let new_refs: Vec<String> = entries
             .iter()
-            .map(|(reference, _, _, _)| reference.clone())
+            .map(|entry| entry.reference.clone())
             .collect();
         if rules.is_none() {
             let removed: Vec<String> = old_member_refs
@@ -231,8 +246,15 @@ pub fn edit_group_patch(
             }
         }
         let mut array = Array::new();
-        for (reference, effort, fast, enabled) in entries {
-            array.push(member_value(&before, reference, effort, *fast, *enabled));
+        for entry in entries {
+            array.push(member_value(
+                &before,
+                &entry.reference,
+                &entry.effort,
+                entry.fast,
+                entry.ultra,
+                entry.enabled,
+            ));
         }
         table.insert("upstreams", value(array));
     }
@@ -659,7 +681,7 @@ fn rewrite_upstream_group_ref(entry: &mut Value, old_ref: &str, new_ref: &str) {
 
 fn member_array(config: &crate::Config, reference: &str) -> Item {
     value(Array::from_iter([member_value(
-        config, reference, "", false, true,
+        config, reference, "", false, false, true,
     )]))
 }
 
@@ -668,11 +690,13 @@ fn member_value(
     reference: &str,
     effort: &str,
     fast: bool,
+    ultra: bool,
     enabled: bool,
 ) -> Value {
     let kind = classify_member_ref(config, reference).expect("validated member");
     if effort.is_empty()
         && !fast
+        && !ultra
         && enabled
         && let MemberRefKind::BareProvider(id) | MemberRefKind::BareSubscription(id) = kind
     {
@@ -704,6 +728,9 @@ fn member_value(
     if fast {
         table.insert("fast", Value::Boolean(Formatted::new(true)));
     }
+    if ultra {
+        table.insert("ultra", Value::Boolean(Formatted::new(true)));
+    }
     if !enabled {
         table.insert("on", Value::Boolean(Formatted::new(false)));
     }
@@ -712,7 +739,23 @@ fn member_value(
 
 #[cfg(test)]
 mod tests {
-    use super::{edit_group_copy, edit_group_create, edit_group_patch};
+    use super::{MemberEdit, edit_group_copy, edit_group_create, edit_group_patch};
+
+    fn member_edit(
+        reference: &str,
+        effort: &str,
+        fast: bool,
+        ultra: bool,
+        enabled: bool,
+    ) -> MemberEdit {
+        MemberEdit {
+            reference: reference.to_owned(),
+            effort: effort.to_owned(),
+            fast,
+            ultra,
+            enabled,
+        }
+    }
     use crate::{UpstreamTarget, load};
 
     const BASE: &str = "\
@@ -747,8 +790,8 @@ listen = \"127.0.0.1:0\"\n\
             None,
             None,
             Some(&[
-                ("group/inner".to_owned(), "high".to_owned(), true, true),
-                ("chat/m".to_owned(), String::new(), false, true),
+                member_edit("group/inner", "high", true, false, true),
+                member_edit("chat/m", "", false, false, true),
             ]),
             None,
             None,
@@ -807,7 +850,7 @@ listen = \"127.0.0.1:0\"\n\
             None,
             None,
             None,
-            Some(&[("unknown/pair".to_owned(), String::new(), false, true)]),
+            Some(&[member_edit("unknown/pair", "", false, false, true)]),
             None,
             None,
         )
@@ -849,9 +892,9 @@ listen = \"127.0.0.1:0\"\n\
             })
             .collect();
         let members = vec![
-            ("chat".to_owned(), String::new(), false, true),
-            ("live".to_owned(), "high".to_owned(), true, true),
-            ("codex/m".to_owned(), String::new(), false, true),
+            member_edit("chat", "", false, false, true),
+            member_edit("live", "high", true, false, true),
+            member_edit("codex/m", "", false, false, true),
         ];
         let (patched, _) = edit_group_patch(
             &created,

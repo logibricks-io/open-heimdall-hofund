@@ -317,6 +317,7 @@ fn decode_request(bytes: &[u8]) -> Result<Request, CodecError> {
         .and_then(|reasoning| reasoning.get("effort"))
         .and_then(Value::as_str)
         .and_then(Effort::from_label);
+    crate::service_tier::rewrite_fast_word(&mut object);
     let mut extensions = Extensions::from_map(object);
     if let Some(raw) = raw_tools
         && needs_raw_tools(&raw)
@@ -1773,6 +1774,24 @@ fn decode_response(bytes: &[u8]) -> Result<Response, CodecError> {
         .with_extensions(Extensions::from_map(object)))
 }
 
+fn served_tier_word(object: &Object, response: &Object) -> Option<String> {
+    let word = |map: &Object| {
+        map.get("service_tier")
+            .and_then(Value::as_str)
+            .filter(|tier| !tier.is_empty())
+            .map(str::to_owned)
+    };
+    word(response).or_else(|| word(object))
+}
+
+fn extensions_with_tier(tier: Option<String>) -> Extensions {
+    let mut extensions = Extensions::new();
+    if let Some(tier) = tier {
+        extensions.insert("service_tier", Value::String(tier));
+    }
+    extensions
+}
+
 fn flatten_assistant(messages: Vec<Message>) -> Message {
     let mut content = Vec::new();
     let mut extensions = Extensions::new();
@@ -2737,6 +2756,7 @@ impl Decoder {
             return Ok(());
         }
         let mut response = take_object(&mut object, "response")?.unwrap_or_default();
+        let tier = served_tier_word(&object, &response);
         let id = take_string(&mut response, "id")?;
         let model = take_string(&mut response, "model")?;
         self.started = true;
@@ -2744,7 +2764,7 @@ impl Decoder {
             id,
             model,
             usage: None,
-            extensions: Extensions::new(),
+            extensions: extensions_with_tier(tier),
         }));
         Ok(())
     }
@@ -2965,6 +2985,7 @@ impl Decoder {
         events: &mut Vec<StreamEvent>,
     ) -> Result<(), CodecError> {
         let mut response = take_object(&mut object, "response")?.unwrap_or_default();
+        let tier = served_tier_word(&object, &response);
         let refusal = response.get("error").and_then(refusal_reason);
         if !self.started {
             let id = take_string(&mut response, "id")?;
@@ -2974,7 +2995,7 @@ impl Decoder {
                 id,
                 model,
                 usage: None,
-                extensions: Extensions::new(),
+                extensions: extensions_with_tier(tier.clone()),
             }));
         } else {
             let _ = response.remove("id");
@@ -3004,7 +3025,7 @@ impl Decoder {
         events.push(StreamEvent::MessageDelta(MessageDelta {
             stop: Some(stop),
             usage,
-            extensions: Extensions::new(),
+            extensions: extensions_with_tier(tier),
         }));
         events.push(StreamEvent::MessageStop(MessageStop {
             extensions: Extensions::new(),

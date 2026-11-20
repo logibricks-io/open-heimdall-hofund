@@ -391,6 +391,7 @@ GroupMember.effort
 GroupMember.enabled
 GroupMember.fast
 GroupMember.reference
+GroupMember.ultra
 GroupMemberCandidate #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
 GroupMemberCandidate.decision
 GroupMemberCandidate.reference
@@ -403,6 +404,7 @@ GroupMemberWire.effort
 GroupMemberWire.enabled
 GroupMemberWire.fast
 GroupMemberWire.reference
+GroupMemberWire.ultra
 GroupMemberWire::fn new (reference : String) -> Self
 GroupPatchRequest #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
 GroupPatchRequest.classifier
@@ -970,7 +972,9 @@ RouteTry.member
 RouteTry.model
 RouteTry.provider
 RouteTry.status
+RouteTry.tier
 RouteTry::fn new (member : impl Into < String > , provider : impl Into < String > , model : impl Into < String > , done : bool , status : Option < u16 > , fail : impl Into < String > ,) -> Self
+RouteTry::fn with_tier (mut self , tier : impl Into < String >) -> Self
 RoutingDecision #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
 RoutingDecision.affinity
 RoutingDecision.agent
@@ -1465,4 +1469,6 @@ const MAX_RESPONSE_BODY_BYTES
 fn decode_error_envelope (path_version : u32 , body : & [u8] ,) -> Result < ErrorEnvelope , ControlError >
 fn decode_request < T : Request > (path_version : u32 , body : & [u8]) -> Result < T , ControlError >
 fn decode_response < T : Response > (path_version : u32 , body : & [u8]) -> Result < T , ControlError >
+fn member_speed_label (fast : bool , ultra : bool) -> Option < & 'static str >
 fn resume_plan (last_event_id : Option < & str > , boot_id : & str , requested : & [Topic] ,) -> Vec < (Topic , Resume) >
+fn sent_tier_label (tier : & str) -> & 'static str

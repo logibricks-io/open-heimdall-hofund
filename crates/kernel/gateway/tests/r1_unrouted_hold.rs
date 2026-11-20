@@ -103,6 +103,7 @@ fn fixture_with(slow: Option<Arc<dyn Member>>) -> Fixture {
             nearly_spent: false,
             fallback: false,
             effort: String::new(),
+            service_tier: String::new(),
             units: Vec::new(),
         }],
     )]);
