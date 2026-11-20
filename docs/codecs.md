@@ -323,6 +323,21 @@ only and is lost when the socket closes or the gateway restarts. P0-1e (#481)
 added the Codex-backend Responses path with this same behavior; it is no longer
 an out-of-scope gap.
 
+## A Realtime session
+
+`GET /v1/realtime` and `GET /realtime` accept a WebSocket upgrade. A plain GET
+answers 426 with `Upgrade: websocket`. The query must name one model. Routing
+uses the same resolution as a chat call. A routing group is refused. A provider
+is eligible only when it declares a realtime endpoint: a path replaces the
+selected base path on the same origin, and an absolute `http`, `https`, `ws`,
+or `wss` URL is used as given. The dial adds `model` as a query and uses
+`wss` or `ws`. Frames relay in both directions, up to 32 MiB. An idle session
+closes after 10 minutes. A `response.done` usage object is recorded as kind
+`realtime`, with cached input stored as a cache read and subtracted from the
+input count. The gateway key's spending reservation is held until the socket
+closes. Shutdown closes the session with 1001. Subprotocols that carry a key,
+an organization, or a project are not sent upstream.
+
 ## Client-facing ids and Chat usage chunks
 
 A Responses body and each `response.created` / completed skeleton use an id

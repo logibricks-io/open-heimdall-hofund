@@ -9,7 +9,7 @@ use hofund_plugin_api::{
     Completion, CountOutcome, MemberId, PluginError, RawAnswer, RawBody, Request,
 };
 
-use crate::{AttemptHook, MemberAttempt};
+use crate::{AttemptHook, MemberAttempt, RealtimeDial};
 
 /// Proof that a member answered a background model-list request.
 #[derive(Clone, Debug)]
@@ -169,6 +169,15 @@ pub trait Member: Send + Sync {
     ) -> Result<RawAnswer, PluginError> {
         let _ = model;
         self.forward(path, body).await
+    }
+
+    /// Dial material for a realtime session on `model`, when this member declares one.
+    ///
+    /// The default is no realtime endpoint. The URL already carries the model
+    /// query. Header values are credentials and must not be logged.
+    fn realtime(&self, model: &str) -> Option<RealtimeDial> {
+        let _ = model;
+        None
     }
 
     /// Drops idle keep-alive connections before the next upstream attempt.

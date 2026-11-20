@@ -19,6 +19,7 @@ mod oidc_keys;
 mod prev_response;
 mod quotas;
 mod readonly;
+mod realtime;
 mod refusal_handover;
 mod relisten;
 mod responses_ws;
@@ -110,6 +111,7 @@ struct Inner {
     /// Shared in-flight counter surfaced on control status and snapshots.
     in_flight: Arc<AtomicU64>,
     sockets: Arc<responses_ws::SocketRegistry>,
+    realtimes: Arc<realtime::Registry>,
     /// Quota report and history source. Absent until attached.
     quota_source: Option<Arc<dyn QuotaSource>>,
     /// What each caller of the quota routes may be told.
@@ -465,6 +467,7 @@ pub struct Running {
     shutdown_request: Option<(watch::Sender<bool>, watch::Receiver<bool>)>,
     drain_bound: Option<std::time::Duration>,
     sockets: Option<Arc<responses_ws::SocketRegistry>>,
+    realtimes: Option<Arc<realtime::Registry>>,
     relisten: Option<Relisten>,
     fatal: Option<watch::Receiver<Option<String>>>,
     after_drain: Option<AfterDrainHook>,
@@ -559,6 +562,7 @@ impl Gateway {
                 surface_http: None,
                 in_flight: Arc::new(AtomicU64::new(0)),
                 sockets: Arc::new(responses_ws::SocketRegistry::default()),
+                realtimes: Arc::new(realtime::Registry::new()),
                 quota_source: None,
                 quota_scope: tell_everything(),
                 visible_catalog: None,
@@ -757,8 +761,10 @@ impl Gateway {
     /// [`Running::relisten`].
     pub async fn bind(self, listen: SocketAddr) -> Result<Running, GatewayError> {
         let sockets = Arc::clone(&self.inner.sockets);
+        let realtimes = Arc::clone(&self.inner.realtimes);
         let prune = self.inner.keys.clone().map(issue_keys::prune_task);
-        let mut running = serve_relistenable(self.into_router(), listen, sockets).await?;
+        let mut running =
+            serve_relistenable(self.into_router(), listen, sockets, realtimes).await?;
         if let Some(task) = prune {
             running = running.with_task(task);
         }
@@ -771,6 +777,7 @@ async fn serve_relistenable(
     router: axum::Router,
     listen: SocketAddr,
     sockets: Arc<responses_ws::SocketRegistry>,
+    realtimes: Arc<realtime::Registry>,
 ) -> Result<Running, GatewayError> {
     let listener = TcpListener::bind(listen)
         .await
@@ -793,6 +800,7 @@ async fn serve_relistenable(
     let mut running = Running::new(local_addr, shutdown, task);
     running.relisten = Some(handle);
     running.sockets = Some(sockets);
+    running.realtimes = Some(realtimes);
     Ok(running)
 }
 
@@ -814,6 +822,7 @@ impl Running {
             shutdown_request: None,
             drain_bound: None,
             sockets: None,
+            realtimes: None,
             relisten: None,
             fatal: None,
             after_drain: None,
@@ -1035,6 +1044,9 @@ impl Running {
         if let Some(sockets) = &self.sockets {
             sockets.drain();
         }
+        if let Some(realtimes) = &self.realtimes {
+            realtimes.drain();
+        }
         for linked in self.linked.drain(..) {
             Box::pin(linked.shutdown()).await;
         }
@@ -1043,6 +1055,9 @@ impl Running {
         }
         if let Some(sockets) = &self.sockets {
             sockets.wait().await;
+        }
+        if let Some(realtimes) = &self.realtimes {
+            realtimes.wait().await;
         }
         if let Some(mut task) = self.task.take() {
             match self.drain_bound {
@@ -1070,6 +1085,9 @@ impl Drop for Running {
         }
         if let Some(sockets) = &self.sockets {
             sockets.cut();
+        }
+        if let Some(realtimes) = &self.realtimes {
+            realtimes.cut();
         }
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
@@ -1118,7 +1136,9 @@ fn codec_routes(inner: &Inner) -> readonly::RouteSet {
     let mut routes = readonly::RouteSet::new()
         .route(&["GET"], "/health", get(health))
         .route(&["GET"], "/v1/models", get(models))
-        .route(&["GET"], "/v1/hofund/limit", get(limits::limit_route));
+        .route(&["GET"], "/v1/hofund/limit", get(limits::limit_route))
+        .route(&["GET"], "/v1/realtime", get(realtime::get))
+        .route(&["GET"], "/realtime", get(realtime::get));
     let generative =
         inner.codecs.contains_key(GENERATIVE_UNARY) || inner.codecs.contains_key(GENERATIVE_STREAM);
     let responses = inner
@@ -3748,6 +3768,44 @@ fn write_usage_stopped_waiting(usage: &Ledger, meta: &UsageMeta) {
         false,
         OUTCOME_STOPPED_WAITING,
     );
+}
+
+fn record_realtime_usage(
+    app: &Inner,
+    identity: &Identity,
+    model: &str,
+    upstream: &str,
+    input: Option<i64>,
+    output: Option<i64>,
+    cache_read: Option<i64>,
+) {
+    let started = Instant::now();
+    let uncached = input.map(|input| input.saturating_sub(cache_read.unwrap_or(0)));
+    let meta = UsageMeta {
+        model: model.to_owned(),
+        upstream: upstream.to_owned(),
+        provider_key_id: String::new(),
+        wire_model: model.to_owned(),
+        served_model: String::new(),
+        started,
+        identity: identity.clone(),
+        client_agent: String::new(),
+        session_id: String::new(),
+        native_session_id: String::new(),
+        endpoint: "/v1/realtime".to_owned(),
+        kind: "realtime".to_owned(),
+        input: uncached,
+        output,
+        ttft_ms: None,
+        details: hofund_usage::UsageDetails {
+            uncached_input_tokens: uncached,
+            cache_read_tokens: cache_read,
+            ..hofund_usage::UsageDetails::default()
+        },
+        saw_reasoning: false,
+        stream_timing: stream_timing::StreamTiming::new(started),
+    };
+    write_usage_app(app, &meta, Some((uncached, output)), StatusCode::OK);
 }
 
 fn write_usage_app(

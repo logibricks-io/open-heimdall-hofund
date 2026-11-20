@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- D-230: `GET /v1/realtime` and `GET /realtime` upgrade to a WebSocket and pass the Realtime session through to a provider that declares a realtime endpoint. The upgrade uses the same front guards as other routes. A gateway key's spending reservation is held until the socket closes. Frame size, idle time, and close are bounded. Verified with a local fake upstream only.
+
 ### Changed
 
 - D-221: Antigravity sign-in, import, and add are refused for new accounts because Google suspends accounts it sees on Code Assist through Antigravity's own client. Saved accounts keep working and show a risk line. The message points at the agy CLI route. Gemini CLI is unchanged.

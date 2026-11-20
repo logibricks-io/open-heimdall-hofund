@@ -690,6 +690,8 @@ pub struct CompiledPreset {{
     pub anthropic: &'static str,
     /// Generative Language base URL.
     pub generative: &'static str,
+    /// Realtime session declaration. Empty when this preset does not serve one.
+    pub realtime: &'static str,
     /// Static config entries, in key order.
     pub config: &'static [(&'static str, &'static str)],
     /// Regions in declared order.

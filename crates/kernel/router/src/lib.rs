@@ -134,6 +134,41 @@ pub struct Unit {
     pub group_patience: Option<PoolMemberPatience>,
 }
 
+/// What a member needs to open one realtime session.
+///
+/// `headers` carry the upstream credential. Debug output redacts them.
+pub struct RealtimeDial {
+    /// WebSocket URL, including the model query.
+    pub url: String,
+    /// Header names and values. Values must not be logged.
+    pub headers: Vec<(String, String)>,
+}
+
+impl std::fmt::Debug for RealtimeDial {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let url = self
+            .url
+            .split_once('?')
+            .map_or(self.url.clone(), |(base, _)| format!("{base}?<redacted>"));
+        formatter
+            .debug_struct("RealtimeDial")
+            .field("url", &url)
+            .field("headers", &self.headers.len())
+            .finish()
+    }
+}
+
+/// Hops a realtime session may dial for one resolved model.
+#[derive(Clone)]
+pub struct Candidates {
+    /// Configured route name.
+    pub route: String,
+    /// Model name used when a hop has no wire model.
+    pub model: String,
+    /// Hops that passed the caller's scope, in configured order.
+    pub hops: Vec<Hop>,
+}
+
 /// One member a route may call, and the model name that member expects.
 #[derive(Clone)]
 pub struct Hop {
@@ -1424,6 +1459,26 @@ impl Router {
         first.extend(middle);
         first.extend(last);
         *hops = first;
+    }
+
+    /// Resolves `asked` the same way a chat call does, then applies `scope`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same routing errors as a chat call for an unknown model,
+    /// an ambiguous name, or a model or account outside `scope`.
+    pub fn candidates(
+        &self,
+        asked: &str,
+        scope: Option<&RouteScope>,
+    ) -> Result<Candidates, RouterError> {
+        let resolved = self.resolve(asked)?;
+        let hops = scoped_hops(asked, &resolved, scope)?;
+        Ok(Candidates {
+            route: resolved.route,
+            model: resolved.bare,
+            hops,
+        })
     }
 
     fn resolve(&self, asked: &str) -> Result<Resolved, RouterError> {
