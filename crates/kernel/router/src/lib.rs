@@ -593,6 +593,50 @@ impl Router {
         }
     }
 
+    /// Short name of the API `/v1/models` should name for `model`.
+    ///
+    /// A preference a member learned from a remote list wins. A route whose id
+    /// or unit pool starts with `group/` uses Responses only when every member
+    /// speaks Responses. Any other known member protocol is that member's own
+    /// API. An unknown protocol omits the field.
+    #[must_use]
+    pub fn preferred_api(&self, model: &str) -> Option<String> {
+        let route = self.routes.get(model)?;
+        for hop in &route.hops {
+            let wire = hop.wire_model.as_deref().unwrap_or(model);
+            if let Some(name) = learned_name(hop.member.learned_preferred(wire))
+                .or_else(|| learned_name(hop.member.learned_preferred(model)))
+            {
+                return Some(name.to_owned());
+            }
+        }
+        if route_is_group(model, route) {
+            return group_preferred(route).map(str::to_owned);
+        }
+        route
+            .hops
+            .first()
+            .and_then(|hop| native_preferred(hop.member.protocol()))
+            .map(str::to_owned)
+    }
+
+    /// A coding-agent catalog entry a member learned for `model`, as a JSON object.
+    #[must_use]
+    pub fn learned_catalog_entry(&self, model: &str) -> Option<String> {
+        let route = self.routes.get(model)?;
+        for hop in &route.hops {
+            let wire = hop.wire_model.as_deref().unwrap_or(model);
+            if let Some(entry) = hop
+                .member
+                .learned_catalog_entry(wire)
+                .or_else(|| hop.member.learned_catalog_entry(model))
+            {
+                return Some(entry);
+            }
+        }
+        None
+    }
+
     /// Member ids on the current routes, in first-seen order.
     #[must_use]
     pub fn member_ids(&self) -> Vec<MemberId> {
@@ -1717,6 +1761,41 @@ impl Router {
             detail,
         }
     }
+}
+
+fn learned_name(name: Option<String>) -> Option<&'static str> {
+    name.as_deref()
+        .and_then(hofund_plugin_api::preferred_api_name)
+}
+
+fn native_preferred(protocol: &str) -> Option<&'static str> {
+    hofund_plugin_api::preferred_api_name(protocol)
+}
+
+fn route_is_group(model: &str, route: &Route) -> bool {
+    model.starts_with("group/")
+        || route
+            .hops
+            .iter()
+            .any(|hop| hop.units.iter().any(|unit| unit.pool.starts_with("group/")))
+}
+
+/// Responses when every member speaks it. A Chat-only or Messages-only member
+/// leaves the field off, so the route stays on Chat.
+fn group_preferred(route: &Route) -> Option<&'static str> {
+    if route.hops.is_empty() {
+        return None;
+    }
+    let mut responses = false;
+    for hop in &route.hops {
+        match native_preferred(hop.member.protocol()) {
+            Some("responses") => responses = true,
+            Some(_) => return None,
+            None if hop.member.protocol().is_empty() => {}
+            None => return None,
+        }
+    }
+    responses.then_some("responses")
 }
 
 fn scoped_hops(

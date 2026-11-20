@@ -171,6 +171,25 @@ pub trait Provider: Send + Sync {
         ))
     }
 
+    /// Whether a background rest probe may list with this key.
+    fn rest_probe(&self) -> bool {
+        false
+    }
+
+    /// The list a background rest probe asks.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`](hofund_plugin_api::PluginError) when the list
+    /// fails or this adapter has no probe list.
+    async fn list_for_probe(
+        &self,
+    ) -> Result<hofund_plugin_api::ModelList, hofund_plugin_api::PluginError> {
+        Err(hofund_plugin_api::PluginError::unsupported(
+            "this upstream has no model list",
+        ))
+    }
+
     /// Sends one minimal request on this adapter's configured wire.
     ///
     /// # Errors
@@ -189,4 +208,14 @@ pub trait Provider: Send + Sync {
 
     /// Drops idle keep-alive connections before the next upstream attempt.
     fn close_idle_connections(&self) {}
+
+    /// `chat`, `responses`, or `anthropic` when a list named the API `model` is asked on best.
+    fn learned_preferred(&self, _model: &str) -> Option<String> {
+        None
+    }
+
+    /// A coding-agent catalog entry learned for `model`, as a JSON object.
+    fn learned_catalog_entry(&self, _model: &str) -> Option<String> {
+        None
+    }
 }

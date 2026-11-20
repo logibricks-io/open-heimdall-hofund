@@ -2407,6 +2407,7 @@ dependencies = [
  "hofund-plugin-host",
  "http",
  "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]
@@ -2729,6 +2730,7 @@ dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
  "http",
+ "hyper-util",
  "keyring",
  "keyring-core",
  "reqwest 0.12.28",
@@ -2741,6 +2743,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
+ "tokio-tungstenite",
  "tracing",
  "url",
  "windows-native-keyring-store",

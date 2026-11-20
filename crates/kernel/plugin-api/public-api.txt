@@ -289,6 +289,7 @@ BuildError
 BuildError #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Error)
 BuildError::fn message (& self) -> & str
 BuildError::fn new (message : impl Into < String >) -> Self
+CATALOG_ENTRY_FIELD
 CallerLimit
 CallerScope
 CallerScope #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq)
@@ -520,6 +521,7 @@ HostReadBudget derives(Clone, Copy, Debug, PartialEq, Eq)
 HttpHandle
 HttpHandle #[non_exhaustive] derives(Clone)
 HttpHandle::async fn open_duplex (& self , request : DuplexRequest) -> Result < DuplexSession , PluginError >
+HttpHandle::async fn open_websocket (& self , request : WebSocketRequest ,) -> Result < WebSocketSession , PluginError >
 HttpHandle::async fn send (& self , request : http :: Request < Body > ,) -> Result < http :: Response < BodyStream > , PluginError >
 HttpHandle::fn fresh_client (& self) -> Option < Result < Arc < dyn Any + Send + Sync > , PluginError > >
 HttpHandle::fn pooled_client (& self) -> Option < Arc < dyn Any + Send + Sync > >
@@ -687,6 +689,7 @@ ModelSpec::const fn with_free (mut self , free : bool) -> Self
 ModelSpec::const fn with_image_input (mut self , image_input : Option < bool >) -> Self
 ModelSpec::const fn with_prices (mut self , input : u64 , output : u64 , cache_read : u64) -> Self
 ModelSpec::const fn with_rate (mut self , rate : u64 , rate_was : u64) -> Self
+ModelSpec::fn catalog_entry (& self) -> Option < & str >
 ModelSpec::fn display_name (& self) -> Option < & str >
 ModelSpec::fn efforts (& self) -> & [String]
 ModelSpec::fn endpoints (& self) -> & [String]
@@ -694,16 +697,19 @@ ModelSpec::fn id (& self) -> & str
 ModelSpec::fn input_modalities (& self) -> & [String]
 ModelSpec::fn new (id : impl Into < String > , display_name : Option < String >) -> Result < Self , PluginError >
 ModelSpec::fn output_modalities (& self) -> & [String]
+ModelSpec::fn preferred_api (& self) -> Option < & str >
 ModelSpec::fn rate (& self) -> Option < f64 >
 ModelSpec::fn rate_was (& self) -> f64
 ModelSpec::fn service_tiers (& self) -> & [String]
 ModelSpec::fn web_search (& self) -> Option < & str >
+ModelSpec::fn with_catalog_entry (mut self , entry : impl Into < String >) -> Self
 ModelSpec::fn with_context (mut self , context : u64) -> Self
 ModelSpec::fn with_efforts (mut self , efforts : Vec < String >) -> Self
 ModelSpec::fn with_endpoints (mut self , endpoints : Vec < String >) -> Self
 ModelSpec::fn with_input_modalities (mut self , modalities : Vec < String >) -> Self
 ModelSpec::fn with_max_output (mut self , max_output : u64) -> Self
 ModelSpec::fn with_output_modalities (mut self , modalities : Vec < String >) -> Self
+ModelSpec::fn with_preferred_api (mut self , api : impl Into < String >) -> Self
 ModelSpec::fn with_service_tiers (mut self , service_tiers : Vec < String >) -> Self
 ModelSpec::fn with_web_search (mut self , web_search : impl Into < String >) -> Self
 ModelValue
@@ -731,6 +737,7 @@ OwnerTest::const fn key (& self) -> & 'static str
 OwnerTest::const fn prefix (key : & 'static str , text : & 'static str) -> Self
 OwnerTest::const fn text (& self) -> & 'static str
 OwnerTest::fn matches (& self , value : & str) -> bool
+PREFERRED_API_FIELD
 PROBE_CAP
 PipedChild
 PipedChild #[non_exhaustive]
@@ -809,6 +816,7 @@ PluginError::const fn credit_soon (& self) -> bool
 PluginError::const fn is_account_restricted (& self) -> bool
 PluginError::const fn is_credit (& self) -> bool
 PluginError::const fn is_ordinary_failure (& self) -> bool
+PluginError::const fn is_subscription_suspended (& self) -> bool
 PluginError::const fn kind (& self) -> PluginErrorKind
 PluginError::const fn ordinary_failure (mut self) -> Self
 PluginError::const fn reset_after (& self) -> Option < Duration >
@@ -817,6 +825,7 @@ PluginError::const fn scopes_model (& self) -> bool
 PluginError::const fn skip_failover_same_plugin (mut self) -> Self
 PluginError::const fn skips_failover_same_plugin (& self) -> bool
 PluginError::const fn status (& self) -> Option < u16 >
+PluginError::const fn subscription_suspended (mut self) -> Self
 PluginError::const fn verifies_account (& self) -> bool
 PluginError::const fn with_credit_soon (mut self) -> Self
 PluginError::const fn with_model_scope (mut self) -> Self
@@ -1355,6 +1364,7 @@ UpstreamProvider::async fn count_input (& self , request : Request , inbound : P
 UpstreamProvider::async fn execute (& self , request : Request , inbound : ProtocolId ,) -> Result < Completion , PluginError >
 UpstreamProvider::async fn forward (& self , path : & str , body : RawBody) -> Result < RawAnswer , PluginError >
 UpstreamProvider::async fn health (& self) -> Result < () , PluginError >
+UpstreamProvider::async fn list_for_probe (& self , query : & ListQuery) -> Result < ModelList , PluginError >
 UpstreamProvider::async fn list_models (& self , query : & ListQuery) -> Result < ModelList , PluginError >
 UpstreamProvider::async fn probe (& self , query : & ProbeQuery) -> Result < ProbeReport , PluginError >
 UpstreamProvider::async fn quota (& self , query : & QuotaQuery) -> Result < Vec < QuotaWindow > , PluginError >
@@ -1362,6 +1372,10 @@ UpstreamProvider::async fn shutdown (& self , deadline : Duration) -> Result < (
 UpstreamProvider::fn attempt_base (& self) -> String
 UpstreamProvider::fn attempt_protocol (& self) -> String
 UpstreamProvider::fn close_idle_connections (& self)
+UpstreamProvider::fn learned_catalog_entry (& self , _model : & str) -> Option < String >
+UpstreamProvider::fn learned_preferred (& self , _model : & str) -> Option < String >
+UpstreamProvider::fn remember_listed (& self , models : & [ModelSpec])
+UpstreamProvider::fn rest_probe (& self) -> bool
 UpstreamSpec
 UpstreamSpec #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 UpstreamSpec::const fn credential (& self) -> CredentialStyle
@@ -1395,6 +1409,26 @@ WarmupRecord::const fn at (& self) -> SystemTime
 WarmupRecord::const fn outcome (& self) -> WarmupOutcome
 WarmupRecord::fn detail (& self) -> & str
 WarmupRecord::fn new (at : SystemTime , outcome : WarmupOutcome , detail : impl Into < String >) -> Self
+WebSocketMessage
+WebSocketMessage #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
+WebSocketMessage::Binary
+WebSocketMessage::Text
+WebSocketRequest
+WebSocketRequest #[non_exhaustive] derives(Clone)
+WebSocketRequest::fn get (uri : impl Into < String >) -> Self
+WebSocketRequest::fn header (mut self , name : impl Into < String > , value : impl Into < String >) -> Self
+WebSocketRequest::fn kernel_age (& self) -> Option < Duration >
+WebSocketRequest::fn kernel_headers (& self) -> Vec < (& str , & str , bool) >
+WebSocketRequest::fn kernel_idle (& self) -> Option < Duration >
+WebSocketRequest::fn kernel_uri (& self) -> & str
+WebSocketRequest::fn lifetime (mut self , idle : Duration , age : Duration) -> Self
+WebSocketRequest::fn sensitive_header (mut self , name : impl Into < String > , value : impl Into < String >) -> Self
+WebSocketSession
+WebSocketSession #[non_exhaustive]
+WebSocketSession::async fn close (& mut self) -> Result < () , PluginError >
+WebSocketSession::async fn recv (& mut self) -> Result < Option < WebSocketMessage > , PluginError >
+WebSocketSession::async fn send_text (& mut self , text : String) -> Result < () , PluginError >
+WebSocketSession::fn kernel_new (io : Box < dyn WebSocketIo >) -> Self
 WriteCtx
 WriteCtx #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 WriteCtx::fn home (& self) -> & Path
@@ -1402,8 +1436,12 @@ WriteCtx::fn new (home : impl Into < PathBuf >) -> Self
 const ANOTHER_ROUTING_CANDIDATE
 const API
 const BRIDGE_CALLBACK_PATH_PREFIX
+const CATALOG_ENTRY_FIELD
 const LOOPBACK_CANCEL_PATH
+const PREFERRED_API_FIELD
 const PROBE_CAP
+fn preferred_api_name (raw : & str) -> Option < & 'static str >
+fn preferred_api_path (name : & str) -> Option < & 'static str >
 fn read_budget (request : & http :: Request < crate :: Body >) -> Option < Duration >
 fn redact_token (text : & str , secret : & str) -> String
 fn safe_url (url : & str) -> String
@@ -1441,6 +1479,7 @@ kernel::GatewayBackend::async fn call (& self , request : http :: Request < Body
 kernel::GatewayBackend::async fn forward (& self , call : Forward) -> Result < RawAnswer , PluginError >
 kernel::HttpBackend
 kernel::HttpBackend::async fn open_duplex (& self , request : DuplexRequest) -> Result < DuplexSession , PluginError >
+kernel::HttpBackend::async fn open_websocket (& self , request : WebSocketRequest ,) -> Result < WebSocketSession , PluginError >
 kernel::HttpBackend::async fn send (& self , request : HttpRequest < Body > ,) -> Result < HttpResponse < BodyStream > , PluginError >
 kernel::HttpBackend::fn fresh_client (& self) -> Option < Result < Arc < dyn Any + Send + Sync > , PluginError > >
 kernel::HttpBackend::fn pooled_client (& self) -> Option < Arc < dyn Any + Send + Sync > >
@@ -1480,9 +1519,15 @@ kernel::SchedulerBackend::fn run_once (& self , name : & str , work : BoxFuture 
 kernel::SchedulerBackend::fn shutdown (& self)
 kernel::SecretsBackend
 kernel::SecretsBackend::async fn get (& self , plugin : & PluginKey , id : & str) -> Result < Option < SecretString > , PluginError >
+kernel::WebSocketIo
+kernel::WebSocketIo::async fn close (& mut self) -> Result < () , PluginError >
+kernel::WebSocketIo::async fn recv (& mut self) -> Result < Option < WebSocketMessage > , PluginError >
+kernel::WebSocketIo::async fn send_text (& mut self , text : String) -> Result < () , PluginError >
 kernel::fn expose_secret (secret : & SecretString) -> & str
 mod kernel
 mod responses_ws
+preferred_api_name
+preferred_api_path
 read_budget
 redact_token
 safe_url

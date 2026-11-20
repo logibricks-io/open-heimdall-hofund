@@ -113,6 +113,25 @@ impl CopilotUpstream {
                 secret_text(token).to_owned(),
             ));
         }
+        if protocol == ProtocolId::OPENAI_RESPONSES
+            && self.book.responses_socket(&self.account, &request.model)
+        {
+            match crate::socket::try_responses(
+                &self.book,
+                &self.host,
+                &self.account,
+                session,
+                &headers,
+                &request,
+                inbound,
+            )
+            .await
+            {
+                Ok(completion) => return Ok(completion),
+                Err(crate::socket::TurnFail::Failed(error)) => return Err(error),
+                Err(crate::socket::TurnFail::Fallback) => {}
+            }
+        }
         let target = Target::new(protocol, session.base.clone())
             .credential(CredentialStyle::Bearer)
             .headers(headers);
@@ -249,6 +268,12 @@ impl UpstreamProvider for CopilotUpstream {
         Err(last_error.unwrap_or_else(|| {
             PluginError::status_error(400, "Copilot Auto could not pick a served model")
         }))
+    }
+
+    fn close_idle_connections(&self) {
+        self.book
+            .sockets
+            .close_idle(&self.account, self.host.clock().monotonic());
     }
 
     async fn probe(&self, query: &ProbeQuery) -> Result<ProbeReport, PluginError> {

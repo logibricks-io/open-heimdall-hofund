@@ -1250,6 +1250,15 @@ fn status_failure(
     status_failure_with_reset(status, retry_after, None, body, allocation_quota_rate)
 }
 
+/// Classifies an upstream error body the way [`execute`] does.
+///
+/// The message keeps `error.code` when the words leave it out. Quota, credit,
+/// and a retry delay written in the body are the same as an HTTP error.
+#[must_use]
+pub fn failure_from_body(status: u16, body: &[u8]) -> PluginError {
+    status_failure(status, None, body, false)
+}
+
 fn status_failure_with_reset(
     status: u16,
     retry_after: Option<std::time::Duration>,
@@ -1814,8 +1823,25 @@ pub fn encode_outbound(
     request: Request,
 ) -> Result<Vec<u8>, PluginError> {
     let target = Target::new(outbound, "https://invalid.example");
-    let (codec, prepare, _) = route(outbound)?;
-    prepare_body(&target, codec, request, prepare, inbound)
+    prepare_outbound(&target, request, inbound)
+}
+
+/// Encodes `request` for `target` the way [`send`] would before it posts.
+///
+/// A target rewrite runs. Compression does not.
+///
+/// # Errors
+///
+/// Returns [`PluginError`] when the protocol has no SDK transport or the
+/// request cannot be encoded.
+pub fn prepare_outbound(
+    target: &Target,
+    request: Request,
+    inbound: ProtocolId,
+) -> Result<Vec<u8>, PluginError> {
+    let (codec, prepare, _) = route(target.protocol)?;
+    let body = prepare_body(target, codec, request, prepare, inbound)?;
+    Ok(rewritten(target.rewrite.as_ref(), body).0)
 }
 
 /// Decodes a successful upstream HTTP response the way [`Sent::complete`] or

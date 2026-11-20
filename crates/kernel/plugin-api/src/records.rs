@@ -528,6 +528,8 @@ pub struct ModelSpec {
     cache_read_price: Option<u64>,
     rate: Option<u64>,
     rate_was: u64,
+    preferred_api: String,
+    catalog_entry: Option<String>,
 }
 
 impl ModelSpec {
@@ -562,6 +564,8 @@ impl ModelSpec {
             cache_read_price: None,
             rate: None,
             rate_was: 0,
+            preferred_api: String::new(),
+            catalog_entry: None,
         })
     }
 
@@ -676,6 +680,29 @@ impl ModelSpec {
         self
     }
 
+    /// Sets the API this model is asked on best.
+    ///
+    /// A path, a codec id, or `chat` / `responses` / `anthropic` is stored as
+    /// that short name. Anything else leaves the choice unknown.
+    #[must_use]
+    pub fn with_preferred_api(mut self, api: impl Into<String>) -> Self {
+        crate::preferred_api_name(&api.into())
+            .unwrap_or("")
+            .clone_into(&mut self.preferred_api);
+        self
+    }
+
+    /// Sets a coding-agent catalog entry learned with this model.
+    ///
+    /// An empty string clears it. The text is the JSON object, kept as the
+    /// remote wrote it.
+    #[must_use]
+    pub fn with_catalog_entry(mut self, entry: impl Into<String>) -> Self {
+        let entry = entry.into();
+        self.catalog_entry = (!entry.is_empty()).then_some(entry);
+        self
+    }
+
     /// The model id.
     #[must_use]
     pub fn id(&self) -> &str {
@@ -758,6 +785,18 @@ impl ModelSpec {
     #[must_use]
     pub fn service_tiers(&self) -> &[String] {
         &self.service_tiers
+    }
+
+    /// `chat`, `responses`, or `anthropic` when a list named a preferred API.
+    #[must_use]
+    pub fn preferred_api(&self) -> Option<&str> {
+        crate::preferred_api_name(&self.preferred_api)
+    }
+
+    /// A coding-agent catalog entry learned with this model, as a JSON object.
+    #[must_use]
+    pub fn catalog_entry(&self) -> Option<&str> {
+        self.catalog_entry.as_deref()
     }
 
     /// The catalog's explicit free-model flag, when one was reported.
@@ -3314,6 +3353,8 @@ mod tests {
         assert_eq!(model.efforts(), ["low", "high"]);
         assert_eq!(model.web_search(), Some("native"));
         assert_eq!(model.service_tiers(), ["default"]);
+        assert_eq!(model.preferred_api(), None);
+        assert_eq!(model.catalog_entry(), None);
         assert_eq!(model.free(), None);
         assert_eq!(model.prices(), (Some(0), Some(0), Some(0)));
         assert!(model.costs_nothing());

@@ -9,8 +9,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use hofund_plugin_api::{
-    Completion as PluginCompletion, CountOutcome as PluginCount, PluginError, PluginErrorKind,
-    ProtocolId, RawAnswer, RawBody, Request, UpstreamProvider,
+    Completion as PluginCompletion, CountOutcome as PluginCount, ListQuery, ModelList, PluginError,
+    PluginErrorKind, ProtocolId, RawAnswer, RawBody, Request, UpstreamProvider,
 };
 use hofund_provider::{AttemptRoute, Completion, CountOutcome, Provider, ProviderError};
 
@@ -52,6 +52,14 @@ impl Provider for ProviderAdapter {
         }
     }
 
+    fn learned_preferred(&self, model: &str) -> Option<String> {
+        self.inner.learned_preferred(model)
+    }
+
+    fn learned_catalog_entry(&self, model: &str) -> Option<String> {
+        self.inner.learned_catalog_entry(model)
+    }
+
     async fn count_input(
         &self,
         request: Request,
@@ -86,6 +94,14 @@ impl Provider for ProviderAdapter {
 
     async fn forward(&self, path: &str, body: RawBody) -> Result<RawAnswer, ProviderError> {
         self.inner.forward(path, body).await.map_err(provider_error)
+    }
+
+    fn rest_probe(&self) -> bool {
+        self.inner.rest_probe()
+    }
+
+    async fn list_for_probe(&self) -> Result<ModelList, PluginError> {
+        self.inner.list_for_probe(&ListQuery::new()).await
     }
 }
 
@@ -136,6 +152,9 @@ pub(crate) fn provider_error(error: PluginError) -> ProviderError {
     }
     if error.is_ordinary_failure() {
         converted = converted.ordinary_failure();
+    }
+    if error.is_subscription_suspended() {
+        converted = converted.subscription_suspended();
     }
     converted
 }

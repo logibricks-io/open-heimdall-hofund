@@ -206,6 +206,7 @@ fn a_catalog_past_codexs_limit_leaves_out_the_last() {
             id: id.clone(),
             context_window: None,
             service_tiers: Vec::new(),
+            catalog_entry: None,
         })
         .collect();
     let (body, left_out) = catalog(&listed, true);
@@ -328,16 +329,19 @@ fn d224_catalog_copies_tiers_the_model_list_already_offers() {
             id: "gpt-6.2-sol".to_owned(),
             context_window: None,
             service_tiers: Vec::new(),
+            catalog_entry: None,
         },
         ListedModel {
             id: "pool".to_owned(),
             context_window: None,
             service_tiers: vec!["priority".to_owned(), "ultrafast".to_owned()],
+            catalog_entry: None,
         },
         ListedModel {
             id: "glm-4.6".to_owned(),
             context_window: None,
             service_tiers: Vec::new(),
+            catalog_entry: None,
         },
     ];
     let (body, _) = catalog(&listed, false);

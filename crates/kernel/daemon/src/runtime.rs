@@ -274,7 +274,28 @@ impl Runtime {
         providers: &[hofund_config::Provider],
     ) {
         self.spend_caps.load();
-        let spent = Arc::new(hofund_usage::KeySpent::new(usage));
+        let configured = self
+            .fingerprints
+            .lock()
+            .expect("provider fingerprints")
+            .keys()
+            .cloned()
+            .collect();
+        let current_keys = {
+            let plan = self.plan.lock().expect("published plan");
+            let mut keys = HashMap::new();
+            for (id, provider) in &plan.built {
+                crate::served::remember_single_key(
+                    &mut keys,
+                    id,
+                    provider.key.is_some(),
+                    &provider.key_id,
+                );
+            }
+            keys
+        };
+        crate::served::load(&self.cooldowns, &configured, &current_keys, &usage);
+        let spent = Arc::new(hofund_usage::KeySpent::new(Arc::clone(&usage)));
         let gate = Arc::new(crate::spend_caps::SpendCapGate::new(
             Arc::clone(&self.spend_caps),
             Arc::clone(&spent),
@@ -575,18 +596,7 @@ impl Runtime {
         *published = plan;
         drop(published);
         if let Some(host) = self.models.get() {
-            host.replace_instances(
-                instances
-                    .values()
-                    .filter(|instance| instance.model_list)
-                    .map(|instance| {
-                        (
-                            instance.provider.id.clone(),
-                            Arc::clone(&instance.upstream),
-                            instance.base_url.clone(),
-                        )
-                    }),
-            );
+            host.install_upstreams(&instances);
         }
         // Retired instances drop here unless a request still holds them.
         *self.instances.lock().expect("provider instances") = instances;
@@ -597,7 +607,14 @@ impl Runtime {
 
         let mut previous = self.fingerprints.lock().expect("provider fingerprints");
         for (was, now) in key_moves {
+            let secret_changed = previous
+                .get(was)
+                .zip(fingerprints.get(now))
+                .is_some_and(|(before, after)| before != after);
             self.cooldowns.move_member(was, now);
+            if secret_changed {
+                self.cooldowns.forget_prior_service(now);
+            }
             if previous.remove(was).is_some()
                 && let Some(fingerprint) = fingerprints.get(now)
             {

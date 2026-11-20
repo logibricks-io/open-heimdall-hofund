@@ -109,11 +109,13 @@ fn d47_4_served_catalog_uses_window_from_the_gateway_list() {
             id: "vendor/windowed".to_owned(),
             context_window: Some(200_000),
             service_tiers: Vec::new(),
+            catalog_entry: None,
         },
         ListedModel {
             id: "vendor/open".to_owned(),
             context_window: None,
             service_tiers: Vec::new(),
+            catalog_entry: None,
         },
     ];
     let (built, _) = catalog(&listed, false);
