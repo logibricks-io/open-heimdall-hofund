@@ -59,6 +59,7 @@ pub fn cooldown_reason(cause: CooldownCause) -> CooldownReason {
         CooldownCause::Observed => CooldownReason::Observed,
         CooldownCause::Panic => CooldownReason::Panic,
         CooldownCause::Overload => CooldownReason::Overload,
+        CooldownCause::Verify => CooldownReason::Verify,
         CooldownCause::Restricted => CooldownReason::Restricted,
         _ => CooldownReason::Unknown,
     }
@@ -176,6 +177,7 @@ mod tests {
             CooldownCause::Observed,
             CooldownCause::Panic,
             CooldownCause::Overload,
+            CooldownCause::Verify,
             CooldownCause::Restricted,
         ];
         for cause in causes {

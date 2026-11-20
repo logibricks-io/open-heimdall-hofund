@@ -77,8 +77,18 @@ fn member(
     plugin_id: &'static str,
     error: Option<PluginError>,
 ) -> Arc<dyn Member> {
+    member_on(id, id, hits, plugin_id, error)
+}
+
+fn member_on(
+    route_id: &'static str,
+    id: &'static str,
+    hits: &Arc<AtomicUsize>,
+    plugin_id: &'static str,
+    error: Option<PluginError>,
+) -> Arc<dyn Member> {
     Arc::new(Fake {
-        route_id: id,
+        route_id,
         member_id: MemberId::from_preset(
             PresetId::try_from(id).expect("preset"),
             MemberKey::from_static("row"),
@@ -350,4 +360,90 @@ async fn d234_restricted_rests_even_when_the_words_would_not() {
         None,
         "the same words without the mark do not rest"
     );
+}
+
+#[test]
+fn d234_restricted_502_stream_event_does_not_arm_or_lift_a_probe() {
+    let (cooldowns, start) = book();
+    let id = MemberId::from_preset(
+        PresetId::try_from("api-key").expect("preset"),
+        MemberKey::from_static("row"),
+    );
+    assert!(id.subscription().is_none());
+    // An in-band permission error is inferred as 502. That status would arm a
+    // model-list probe on a non-subscription member when the cause is generic.
+    let error =
+        PluginError::status_error(502, "account cannot receive replies").account_restricted();
+    let cooling = cooldowns
+        .record_failure_for_model(&id, "demo", &error)
+        .expect("restricted rest");
+    assert_eq!(cooling.cause(), CooldownCause::Restricted);
+    assert_eq!(cooling.until().duration_since(start), TWO_HOURS);
+    assert!(!cooling.background_probe());
+    assert!(cooldowns.cooling(&id).is_some());
+    assert!(cooldowns.cooling_for_model(&id, "other-model").is_some());
+    assert!(!cooldowns.lift_probe(&id, cooling.until()));
+    let still = cooldowns.cooling(&id).expect("rest stands");
+    assert_eq!(still.cause(), CooldownCause::Restricted);
+    assert_eq!(still.until().duration_since(start), TWO_HOURS);
+    assert!(!still.background_probe());
+}
+
+#[test]
+fn d234_restricted_unserved_words_stay_member_wide() {
+    let (cooldowns, start) = book();
+    let id = MemberId::from_preset(
+        PresetId::try_from("api-key").expect("preset"),
+        MemberKey::from_static("row"),
+    );
+    let message = "model model-a is not supported";
+    let error = PluginError::status_error(404, message).account_restricted();
+    let cooling = cooldowns
+        .record_failure_for_model(&id, "model-a", &error)
+        .expect("restricted rest");
+    assert_eq!(cooling.cause(), CooldownCause::Restricted);
+    assert_eq!(cooling.until().duration_since(start), TWO_HOURS);
+    assert!(cooldowns.cooling(&id).is_some());
+    assert!(cooldowns.cooling_for_model(&id, "model-b").is_some());
+    assert_eq!(cooldowns.scoped_entries().len(), 1);
+    assert_eq!(cooldowns.scoped_entries()[0].1, None);
+
+    let (plain, _) = book();
+    plain
+        .record_failure_for_model(&id, "model-a", &PluginError::status_error(404, message))
+        .expect("model rest");
+    assert!(plain.cooling(&id).is_none());
+    assert!(plain.cooling_for_model(&id, "model-b").is_none());
+    assert_eq!(
+        plain.scoped_entries()[0].1.as_deref(),
+        Some("model-a"),
+        "the same unserved words without the mark rest only that model"
+    );
+}
+
+#[tokio::test]
+async fn d234_restricted_protection_words_still_ask_sibling_keys() {
+    let (cooldowns, _) = book();
+    let mate = Arc::new(AtomicUsize::new(0));
+    let other = Arc::new(AtomicUsize::new(0));
+    let message = "response protection is unavailable";
+    let first = member_on(
+        "shared",
+        "first",
+        &Arc::new(AtomicUsize::new(0)),
+        "pool",
+        Some(PluginError::status_error(502, message).account_restricted()),
+    );
+    let router = router(
+        vec![
+            first,
+            member_on("shared", "mate", &mate, "pool", None),
+            member_on("other", "spare", &other, "pool", None),
+        ],
+        cooldowns,
+    );
+    let routed = dispatch(&router).await.expect("sibling is asked");
+    assert_eq!(routed.upstream_id, "shared");
+    assert_eq!(mate.load(Ordering::SeqCst), 1);
+    assert_eq!(other.load(Ordering::SeqCst), 0);
 }

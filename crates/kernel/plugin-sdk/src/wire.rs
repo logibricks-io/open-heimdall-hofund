@@ -55,7 +55,8 @@ use hofund_codec::{
 };
 use hofund_plugin_api::{
     BilledUsage, BodyStream, Completion, ContentPart, CountOutcome, CredentialStyle, HttpHandle,
-    PluginError, ProtocolId, RawAnswer, RawBody, Request, Role, SecretString, StreamEvent,
+    PluginError, PluginErrorKind, ProtocolId, RawAnswer, RawBody, Request, Role, SecretString,
+    StreamEvent,
 };
 use secrecy::ExposeSecret;
 
@@ -801,7 +802,8 @@ pub async fn count_input(
         .open_raw(http, ATTEMPTS)
         .await?;
     let status = response.status().as_u16();
-    let retry_after = parse_retry_after_headers(response.headers(), std::time::SystemTime::now());
+    let headers = response.headers().clone();
+    let retry_after = parse_retry_after_headers(&headers, std::time::SystemTime::now());
     let success = response.status().is_success();
     let mut bytes = Vec::new();
     while let Some(chunk) = response.body_mut().next_chunk().await {
@@ -817,7 +819,7 @@ pub async fn count_input(
     }
     classify_count(status, retry_after, &bytes, field).map_err(|error| {
         match target.classify.as_ref() {
-            Some(classify) => classify(status, &http::HeaderMap::new(), &bytes, error),
+            Some(classify) => classify(status, &headers, &bytes, error),
             None => error,
         }
     })
@@ -1234,9 +1236,20 @@ fn status_failure_with_reset(
     };
     let credit = error.is_credit();
     let named_reset = reset_after_from_body(body, std::time::SystemTime::now()).or(reset_after);
-    let error = match named_reset.filter(|_| credit) {
-        Some(after) => error.with_reset_after(after),
-        None => error,
+    let error = if credit {
+        match named_reset {
+            Some(after) => error.with_reset_after(after),
+            None => error,
+        }
+    } else if error.kind() == PluginErrorKind::Quota {
+        // A duration written in the body is the reset. Header hints stay on
+        // retry_after, which the router still caps at one hour.
+        match reset_after_from_body(body, std::time::SystemTime::now()) {
+            Some(after) => error.with_reset_after(after),
+            None => error,
+        }
+    } else {
+        error
     };
     let error = if credit && credit_soon(body) {
         error.with_credit_soon()
@@ -2580,6 +2593,31 @@ mod tests {
         assert_eq!(
             header.retry_after(),
             Some(std::time::Duration::from_secs(7))
+        );
+    }
+
+    #[test]
+    fn d222_quota_body_reset_stays_off_the_retry_header() {
+        let body = br#"{"error":{"code":429,"message":"You have exhausted your capacity on this model. Your quota will reset after 1h18m40s.","status":"RESOURCE_EXHAUSTED"}}"#;
+        let header =
+            super::status_failure(429, Some(std::time::Duration::from_secs(30)), body, false);
+        assert_eq!(header.kind(), PluginErrorKind::Quota);
+        assert_eq!(
+            header.reset_after(),
+            Some(std::time::Duration::from_secs(4_720))
+        );
+        assert_eq!(
+            header.retry_after(),
+            Some(std::time::Duration::from_secs(30))
+        );
+        let written = super::status_failure(429, None, body, false);
+        assert_eq!(
+            written.reset_after(),
+            Some(std::time::Duration::from_secs(4_720))
+        );
+        assert_eq!(
+            written.retry_after(),
+            Some(std::time::Duration::from_secs(4_720))
         );
     }
 

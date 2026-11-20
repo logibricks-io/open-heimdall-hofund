@@ -35,6 +35,10 @@ The executable declaration is `plugins/registry/tests/subscription_conformance/m
 | Gemini | OpenAI Responses | N/A | N/A | N/A | N/A |
 | Gemini | Anthropic Messages | N/A | N/A | N/A | N/A |
 | Gemini | Generative Language | pass | pass | pass | pass |
+| agy CLI | OpenAI Chat | pass | pass | pass | pass |
+| agy CLI | OpenAI Responses | pass | pass | pass | pass |
+| agy CLI | Anthropic Messages | pass | pass | pass | pass |
+| agy CLI | Generative Language | pass | pass | pass | pass |
 | Antigravity | OpenAI Chat | N/A | N/A | N/A | N/A |
 | Antigravity | OpenAI Responses | N/A | N/A | N/A | N/A |
 | Antigravity | Anthropic Messages | N/A | N/A | N/A | N/A |
