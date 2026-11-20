@@ -29,10 +29,11 @@ pub fn without_foreign_thinking(base_url: &str, protocol: &str, body: &[u8]) -> 
         };
         let before = content.len();
         content.retain(|block| !drops_foreign_thinking(block));
-        if content.is_empty() {
+        let removed = content.len() != before;
+        if removed && content.is_empty() {
             *message = Value::Null;
             changed = true;
-        } else if content.len() != before {
+        } else if removed {
             changed = true;
         }
     }
@@ -144,6 +145,22 @@ mod tests {
         let body = br#"{"model":"claude-sonnet-4-20250514","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"x","signature":"550e8400-e29b-41d4-a716-446655440000a"}]}]}"#;
         let out = without_foreign_thinking("https://api.anthropic.com", "anthropic-messages", body);
         assert_eq!(out, body);
+    }
+
+    #[test]
+    fn d70_7_empty_content_stays_when_no_block_was_removed() {
+        let body = br#"{"model":"claude-sonnet-4-20250514","messages":[{"role":"system","content":[],"output_config":{"effort":"max"},"signature":"550e8400-e29b-41d4-a716-446655440000"},{"role":"user","content":"hi"}]}"#;
+        let out = without_foreign_thinking("https://api.anthropic.com", "anthropic-messages", body);
+        assert_eq!(out, body);
+    }
+
+    #[test]
+    fn d70_8_a_message_emptied_by_a_removed_block_is_deleted() {
+        let body = br#"{"model":"claude-sonnet-4-20250514","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"x","signature":"550e8400-e29b-41d4-a716-446655440000"}]},{"role":"user","content":"hi"}]}"#;
+        let out = without_foreign_thinking("https://api.anthropic.com", "anthropic-messages", body);
+        let value: serde_json::Value = serde_json::from_slice(&out).expect("json");
+        assert_eq!(value["messages"].as_array().expect("messages").len(), 1);
+        assert_eq!(value["messages"][0]["role"], "user");
     }
 
     #[test]
