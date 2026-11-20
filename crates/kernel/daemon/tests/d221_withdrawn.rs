@@ -116,11 +116,11 @@ impl Subscription for Fake {
     async fn start_sign_in(
         &self,
         _ctx: &SignInCtx,
-        _host: &HostContext,
+        host: &HostContext,
     ) -> Result<SignInChallenge, PluginError> {
         self.calls.starts.fetch_add(1, Ordering::SeqCst);
-        if let Some(refusal) = self.account_enrollment().refusal() {
-            return Err(PluginError::config(refusal));
+        if self.withdrawn() && host.accounts().list().await?.is_empty() {
+            return Err(PluginError::config(REFUSAL));
         }
         Ok(SignInChallenge::OpenUrl {
             url: "https://auth.example.test/authorize".to_owned(),
@@ -375,7 +375,7 @@ fn message(status: reqwest::StatusCode, body: &[u8]) -> String {
 }
 
 #[tokio::test]
-async fn d221_control_refuses_new_accounts_and_lists_the_risk_line() {
+async fn d221_control_signs_in_a_stored_account_and_lists_the_risk_line() {
     let rig = Rig::start().await;
 
     let (status, body) = rig
@@ -385,8 +385,13 @@ async fn d221_control_refuses_new_accounts_and_lists_the_risk_line() {
             Some(json!({"version": 1})),
         )
         .await;
-    assert_eq!(message(status, &body), REFUSAL);
-    assert_eq!(rig.calls.starts.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    assert_eq!(rig.calls.starts.load(Ordering::SeqCst), 1);
 
     let (status, body) = rig
         .send(
@@ -401,7 +406,7 @@ async fn d221_control_refuses_new_accounts_and_lists_the_risk_line() {
         "{}",
         String::from_utf8_lossy(&body)
     );
-    assert_eq!(rig.calls.starts.load(Ordering::SeqCst), 1);
+    assert_eq!(rig.calls.starts.load(Ordering::SeqCst), 2);
 
     let (status, body) = rig
         .send(reqwest::Method::GET, "/v1/hofund/subscriptions", None)

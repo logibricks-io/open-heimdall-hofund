@@ -33,7 +33,7 @@ pub(crate) const SCOPES: &str = "https://www.googleapis.com/auth/cloud-platform 
      https://www.googleapis.com/auth/cclog \
      https://www.googleapis.com/auth/experimentsandconfigs";
 
-/// Shown when a saved Antigravity account is still configured.
+/// Shown whenever the Antigravity subscription is configured.
 pub const RISK_LINE: &str = "Google may suspend this saved Antigravity account: it sees Code Assist use through Antigravity's own client. Saved accounts keep working. Use the agy CLI route. Gemini CLI is unchanged.";
 
 /// Returned when sign-in, import, or add would create an Antigravity account.
@@ -96,9 +96,9 @@ pub struct AntigravityFactory {
 
 impl AntigravityFactory {
     /// Lets a recording test create an account. User config cannot set this.
-    #[doc(hidden)]
+    #[cfg(test)]
     #[must_use]
-    pub fn with_new_accounts_for_test(mut self) -> Self {
+    pub(crate) fn with_new_accounts_for_test(mut self) -> Self {
         self.allow_new_accounts = true;
         self
     }
@@ -201,12 +201,22 @@ struct Antigravity {
 }
 
 impl Antigravity {
-    fn enrollment_refusal(&self) -> Result<(), PluginError> {
+    async fn stored_account(
+        &self,
+        host: &HostContext,
+        id: &AccountId,
+    ) -> Result<bool, PluginError> {
         if self.allow_new_accounts {
-            Ok(())
-        } else {
-            Err(PluginError::config(ENROLLMENT_REFUSAL))
+            return Ok(true);
         }
+        Ok(host.accounts().secret(id).await?.is_some())
+    }
+
+    async fn has_stored_account(&self, host: &HostContext) -> Result<bool, PluginError> {
+        if self.allow_new_accounts {
+            return Ok(true);
+        }
+        Ok(!host.accounts().list().await?.is_empty())
     }
 
     fn take_pending(&self, session: &str) -> Option<Pending> {
@@ -251,7 +261,9 @@ impl Subscription for Antigravity {
         ctx: &SignInCtx,
         host: &HostContext,
     ) -> Result<SignInChallenge, PluginError> {
-        self.enrollment_refusal()?;
+        if !self.has_stored_account(host).await? {
+            return Err(PluginError::config(ENROLLMENT_REFUSAL));
+        }
         let pkce = Pkce::generate()?;
         let state = new_state()?;
         let spec = LoopbackSpec::ephemeral()
@@ -293,7 +305,9 @@ impl Subscription for Antigravity {
         proof: SignInProof,
         host: &HostContext,
     ) -> Result<AccountId, PluginError> {
-        self.enrollment_refusal()?;
+        if !self.has_stored_account(host).await? {
+            return Err(PluginError::config(ENROLLMENT_REFUSAL));
+        }
         let pending = self.take_pending(ctx.session());
         host.loopback().release(ctx);
         let Some(pending) = pending else {
@@ -321,6 +335,9 @@ impl Subscription for Antigravity {
             self.project.as_deref(),
         )
         .await?;
+        if !self.stored_account(host, &signed_in.id).await? {
+            return Err(PluginError::config(ENROLLMENT_REFUSAL));
+        }
         let account = host
             .accounts()
             .account(signed_in.id.clone(), signed_in.label)?;
@@ -464,7 +481,7 @@ impl Subscription for Antigravity {
         host: &HostContext,
     ) -> Result<Vec<AccountId>, PluginError> {
         if !self.allow_new_accounts {
-            import::reject_new_enrollment(text)?;
+            import::refuse_unknown_targets(host, text).await?;
         }
         let imported = import::store(
             host,
@@ -472,6 +489,7 @@ impl Subscription for Antigravity {
             &self.oauth,
             text,
             self.project.as_deref(),
+            self.allow_new_accounts,
         )
         .await?;
         for id in &imported {
@@ -488,7 +506,9 @@ impl Subscription for Antigravity {
         host: &HostContext,
     ) -> Result<AccountId, PluginError> {
         let _ = (home, reference, host);
-        self.enrollment_refusal()?;
+        if !self.allow_new_accounts {
+            return Err(PluginError::config(ENROLLMENT_REFUSAL));
+        }
         Err(PluginError::unsupported(
             "this subscription does not import an agent sign-in",
         ))

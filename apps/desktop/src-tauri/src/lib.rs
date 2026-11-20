@@ -96,6 +96,7 @@ pub fn run() -> Result<(), String> {
                     let snapshot = {
                         let state = handle.state::<AppState>();
                         let mut control = state.control.lock().await;
+                        control.refresh_stopped_risks().await;
                         control.refresh_tray().await;
                         control.snapshot(&hofund_daemon::agent_session())
                     };

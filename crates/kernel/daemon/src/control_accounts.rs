@@ -143,7 +143,15 @@ impl AccountOps {
         let opened = self.opened();
         let entry = sign_in::find(&opened, &id).map_err(|_| not_found("subscription"))?;
         if let Some(message) = entry.instance.account_enrollment().refusal() {
-            return Err(invalid(message));
+            let stored = entry
+                .host
+                .accounts()
+                .list()
+                .await
+                .map_err(|_| invalid(message))?;
+            if stored.is_empty() {
+                return Err(invalid(message));
+            }
         }
         let flow = flow(entry.instance.flow().kind());
         let options = SignInOptions {
@@ -388,6 +396,8 @@ impl AccountOps {
             account_discovery::discover_opened(&opened, self.registry.as_ref(), &config, add)
                 .await
                 .map_err(|error| visible_account_failure(&opened, error))?;
+        let report = account_discovery::reject_refused_only_add(report, add)
+            .map_err(|error| visible_account_failure(&opened, error))?;
         if add {
             self.runtime.refresh_subscriptions().await;
         }

@@ -16,8 +16,10 @@
 //! - A Generative Language call names the model in the path:
 //!   `{base}/models/{model}:generateContent`, or
 //!   `{base}/models/{model}:streamGenerateContent?alt=sse` for a stream. A
-//!   leading `models/` is dropped and the rest is one escaped path segment. An
-//!   empty model is status 400 before anything is sent. [`Target::model_root`]
+//!   leading `models/` is dropped. Each slash-separated segment is escaped
+//!   and the slashes stay. An empty segment, `.`, or `..` escapes the rest
+//!   of the id as one segment, so the path cannot leave `models/`. An empty
+//!   model is status 400 before anything is sent. [`Target::model_root`]
 //!   replaces `models` for an upstream such as Vertex AI, whose models sit at
 //!   `{base}/publishers/google/models/{model}`.
 //! - A Bedrock Converse call names the model in the path:

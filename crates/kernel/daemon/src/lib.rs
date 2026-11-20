@@ -104,9 +104,12 @@ pub use provider_rename::{ProviderRenameFailAfter, set_rename_fail_after};
 pub use registry::{CompiledPreset, DaemonRegistry, RegistryAdapter};
 pub use sign_in::{
     AccountListing, INTERRUPTED_EXIT, QuotaLine, QuotaListing, SIGN_IN_DEADLINE, SignInError,
-    SignInOptions, SubscriptionListing, quota_json, subscription_list, subscription_quota,
-    subscription_refresh, subscription_sign_in, subscription_sign_out, subscriptions_json,
+    SignInOptions, SubscriptionListing, configured_subscription_risks, quota_json,
+    subscription_account_hooks, subscription_list, subscription_quota, subscription_refresh,
+    subscription_risk_lines, subscription_sign_in, subscription_sign_out, subscriptions_json,
 };
+#[doc(hidden)]
+pub use subscriptions::subscription_plugin_builds;
 pub use terminate::{
     ConsoleEvent, Signals, Termination, TolerantWriter, finish, serve_until_signal,
     serve_until_signals,
@@ -783,6 +786,7 @@ async fn start_inner(
     let probes = runtime.spawn_probes();
     let running = running
         .with_resource(AffinityFlush(runtime.affinity()))
+        .with_resource(sign_in::SubscriptionRisks::new(Arc::clone(&runtime)))
         .with_after_drain({
             let runtime = Arc::clone(&runtime);
             move || async move {
