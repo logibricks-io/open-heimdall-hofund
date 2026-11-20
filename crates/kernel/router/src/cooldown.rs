@@ -164,7 +164,7 @@ pub enum CooldownCause {
 
 impl CooldownCause {
     /// Every cooldown cause. A new variant must be added to this list.
-    pub const ALL: [CooldownCause; 8] = [
+    pub const ALL: [CooldownCause; 9] = [
         Self::Failure,
         Self::RateLimit,
         Self::Quota,
