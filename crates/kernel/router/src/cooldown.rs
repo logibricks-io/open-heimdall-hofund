@@ -765,7 +765,8 @@ impl Cooldowns {
 
     /// Clears only one model's cooldown and ladder state after its success.
     /// A sibling answer also restarts the member's generic-failure count, but
-    /// does not lift its active rest or touch its rate and credit ladders.
+    /// does not lift its active generic, rate, or credit rest. A member-wide
+    /// suspended rest is lifted, because the request itself answered.
     pub fn record_success_for_model(&self, id: &MemberId, model: &str) {
         self.clear_scoped(id, Some(model), None);
     }
@@ -853,10 +854,13 @@ impl Cooldowns {
         {
             recover(&mut book, key, cooling.cause);
         }
-        if model.is_some()
-            && let Some(state) = book.states.get_mut(&member)
-        {
-            state.failures = 0;
+        if model.is_some() {
+            // A real answer lifts a suspended subscription the same way a list
+            // probe does. Other member-wide rests stay.
+            lift_suspended_rest(&mut book, &member);
+            if let Some(state) = book.states.get_mut(&member) {
+                state.failures = 0;
+            }
         }
     }
 
@@ -1625,6 +1629,28 @@ fn qualify_suspension(book: &Book, id: &MemberId, failure: Failure) -> Failure {
         return Failure::Generic(CooldownCause::Failure);
     }
     failure
+}
+
+fn lift_suspended_rest(book: &mut Book, member: &CooldownKey) {
+    let lifted = {
+        let Some(state) = book.states.get_mut(member) else {
+            return;
+        };
+        let suspended = state
+            .cooling
+            .as_ref()
+            .is_some_and(|cooling| cooling.cause == CooldownCause::Suspended);
+        if !suspended {
+            return;
+        }
+        let cooling = state.cooling.take().expect("suspended rest");
+        state.idle_since = Some(cooling.until);
+        if state.last_cause == Some(CooldownCause::Suspended) {
+            state.last_cause = None;
+        }
+        cooling.cause
+    };
+    recover(book, member.clone(), lifted);
 }
 
 fn clear_suspension_locked(book: &mut Book, id: &MemberId, now: Instant) {

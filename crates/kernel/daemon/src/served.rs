@@ -2,7 +2,7 @@
 //!
 //! A failed read notes nothing. Unknown is not "it worked".
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use hofund_plugin_api::MemberId;
@@ -14,31 +14,68 @@ use crate::membership;
 
 /// Notes configured members whose ledger rows show an answer since the
 /// retention window. A query error notes nothing.
-pub(crate) fn load(cooldowns: &Cooldowns, configured: &HashSet<MemberId>, usage: &Ledger) {
+///
+/// `current_keys` maps each single-key member to the key id it is using now.
+/// A provider-level member is answered only by a row for that key.
+pub(crate) fn load(
+    cooldowns: &Cooldowns,
+    configured: &HashSet<MemberId>,
+    current_keys: &HashMap<MemberId, String>,
+    usage: &Ledger,
+) {
     let since = since_unix(SystemTime::now());
     match usage.answered_keys(since) {
-        Ok(rows) => note(cooldowns, configured, &rows),
+        Ok(rows) => note(cooldowns, configured, current_keys, &rows),
         Err(error) => {
             tracing::warn!(%error, "served answers were not read");
         }
     }
 }
 
+/// Records the key a one-key provider is using.
+///
+/// A provider with several keys, or with no key, is left out. Those members
+/// are named by [`note`] from the row's own key id.
+pub(crate) fn remember_single_key(
+    keys: &mut HashMap<MemberId, String>,
+    provider_id: &str,
+    several: bool,
+    key_id: &str,
+) {
+    if several || key_id.is_empty() {
+        return;
+    }
+    keys.insert(membership::member_id(provider_id), key_id.to_owned());
+}
+
 /// Notes each configured member named by an answered `(upstream, key id)` row.
+///
+/// The provider-level member is noted only when `key_id` is the key that
+/// member is using now. A different key id is not an answer. A key id that
+/// is not kebab-case is skipped.
 pub(crate) fn note(
     cooldowns: &Cooldowns,
     configured: &HashSet<MemberId>,
+    current_keys: &HashMap<MemberId, String>,
     rows: &[(String, String)],
 ) {
     for (upstream, key_id) in rows {
-        let mut ids = vec![membership::member_id(upstream)];
-        if !key_id.is_empty() {
-            ids.push(membership::key_member_id(upstream, key_id));
+        let provider_member = membership::member_id(upstream);
+        if configured.contains(&provider_member)
+            && current_keys
+                .get(&provider_member)
+                .is_some_and(|current| current == key_id)
+        {
+            cooldowns.note_answered(&provider_member);
         }
-        for id in ids {
-            if configured.contains(&id) {
-                cooldowns.note_answered(&id);
-            }
+        if key_id.is_empty() {
+            continue;
+        }
+        let Some(id) = membership::try_key_member_id(upstream, key_id) else {
+            continue;
+        };
+        if configured.contains(&id) {
+            cooldowns.note_answered(&id);
         }
     }
 }
@@ -53,17 +90,22 @@ fn since_unix(now: SystemTime) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 
     use hofund_plugin_api::PluginError;
     use hofund_router::{CooldownCause, CooldownPolicy, Cooldowns};
+    use hofund_usage::{Ledger, Row};
 
-    use super::note;
+    use super::{load, note, remember_single_key};
     use crate::membership::{key_member_id, member_id};
 
     fn book() -> Cooldowns {
         Cooldowns::with_clock(CooldownPolicy::default(), Arc::new(std::time::Instant::now))
+    }
+
+    fn marked() -> PluginError {
+        PluginError::status_error(401, "denied").subscription_suspended()
     }
 
     #[test]
@@ -73,22 +115,77 @@ mod tests {
         let kept = key_member_id("pool", "aaaa");
         let other = key_member_id("pool", "bbbb");
         let configured = HashSet::from([single.clone(), kept.clone(), other.clone()]);
+        let mut current = HashMap::new();
+        remember_single_key(&mut current, "solo", false, "1111111111");
         note(
             &cooldowns,
             &configured,
+            &current,
             &[
-                ("solo".to_owned(), String::new()),
+                ("solo".to_owned(), "1111111111".to_owned()),
                 ("pool".to_owned(), "aaaa".to_owned()),
                 ("gone".to_owned(), "cccc".to_owned()),
             ],
         );
-        let marked = PluginError::status_error(401, "denied").subscription_suspended();
-        let solo = cooldowns.record_failure(&single, &marked).expect("solo");
+        let solo = cooldowns.record_failure(&single, &marked()).expect("solo");
         assert_eq!(solo.cause(), CooldownCause::Suspended);
-        let pool = cooldowns.record_failure(&kept, &marked).expect("kept");
+        let pool = cooldowns.record_failure(&kept, &marked()).expect("kept");
         assert_eq!(pool.cause(), CooldownCause::Suspended);
-        let unused = cooldowns.record_failure(&other, &marked).expect("other");
+        let unused = cooldowns.record_failure(&other, &marked()).expect("other");
         assert_eq!(unused.cause(), CooldownCause::Failure);
         assert!(!unused.background_probe());
+    }
+
+    #[test]
+    fn d240_an_old_key_row_does_not_answer_the_current_single_key() {
+        let dir = tempfile::tempdir().expect("dir");
+        let ledger = Ledger::open(&dir.path().join("usage.sqlite")).expect("ledger");
+        let answered = Row {
+            created_unix: 50,
+            upstream: "solo".to_owned(),
+            provider_key_id: "oldkey0001".to_owned(),
+            status: "200".to_owned(),
+            ..Row::default()
+        };
+        ledger.record(&answered).expect("record");
+
+        let cooldowns = book();
+        let single = member_id("solo");
+        let configured = HashSet::from([single.clone()]);
+        let mut current = HashMap::new();
+        remember_single_key(&mut current, "solo", false, "newkey0002");
+        load(&cooldowns, &configured, &current, &ledger);
+
+        let cooling = cooldowns
+            .record_failure(&single, &marked())
+            .expect("current key");
+        assert_eq!(cooling.cause(), CooldownCause::Failure);
+        assert!(!cooling.background_probe());
+    }
+
+    #[test]
+    fn d240_a_non_kebab_ledger_key_is_skipped() {
+        let cooldowns = book();
+        let single = member_id("solo");
+        let configured = HashSet::from([single.clone()]);
+        let mut current = HashMap::new();
+        remember_single_key(&mut current, "solo", false, "1111111111");
+        note(
+            &cooldowns,
+            &configured,
+            &current,
+            &[("solo".to_owned(), "Not_A_Key".to_owned())],
+        );
+        let cooling = cooldowns.record_failure(&single, &marked()).expect("rest");
+        assert_eq!(cooling.cause(), CooldownCause::Failure);
+        assert!(!cooling.background_probe());
+    }
+
+    #[test]
+    fn d240_several_keys_are_not_stored_as_the_provider_member() {
+        let mut keys = HashMap::new();
+        remember_single_key(&mut keys, "pool", true, "aaaa");
+        remember_single_key(&mut keys, "empty", false, "");
+        assert!(keys.is_empty());
     }
 }

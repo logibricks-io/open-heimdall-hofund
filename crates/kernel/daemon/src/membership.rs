@@ -1364,10 +1364,18 @@ pub(crate) fn member_id(provider_id: &str) -> MemberId {
 }
 
 pub(crate) fn key_member_id(provider_id: &str, key_id: &str) -> MemberId {
+    try_key_member_id(provider_id, key_id).expect("a key fingerprint is a valid member key")
+}
+
+/// The per-key member id, or `None` when `key_id` is not kebab-case.
+///
+/// A usage row can carry a key id this process did not write. That row is
+/// skipped instead of failing startup.
+pub(crate) fn try_key_member_id(provider_id: &str, key_id: &str) -> Option<MemberId> {
     let base = member_id(provider_id);
-    let preset = base.preset().expect("provider member preset").clone();
-    let key = MemberKey::try_from(key_id).expect("a key fingerprint is a valid member key");
-    MemberId::from_preset(preset, key)
+    let preset = base.preset()?.clone();
+    let key = MemberKey::try_from(key_id).ok()?;
+    Some(MemberId::from_preset(preset, key))
 }
 
 fn kebab_of(value: &str) -> String {

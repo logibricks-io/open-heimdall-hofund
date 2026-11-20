@@ -281,7 +281,20 @@ impl Runtime {
             .keys()
             .cloned()
             .collect();
-        crate::served::load(&self.cooldowns, &configured, &usage);
+        let current_keys = {
+            let plan = self.plan.lock().expect("published plan");
+            let mut keys = HashMap::new();
+            for (id, provider) in &plan.built {
+                crate::served::remember_single_key(
+                    &mut keys,
+                    id,
+                    provider.key.is_some(),
+                    &provider.key_id,
+                );
+            }
+            keys
+        };
+        crate::served::load(&self.cooldowns, &configured, &current_keys, &usage);
         let spent = Arc::new(hofund_usage::KeySpent::new(Arc::clone(&usage)));
         let gate = Arc::new(crate::spend_caps::SpendCapGate::new(
             Arc::clone(&self.spend_caps),

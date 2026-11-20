@@ -410,7 +410,7 @@ async fn b7e_unsupported_model_list_stops_the_schedule() {
 #[tokio::test(start_paused = true)]
 async fn d240_suspended_rest_is_probed_until_the_list_answers() {
     let book = make_book(Duration::from_secs(30 * 60));
-    let member = Arc::new(Fake::new(id("azure"), vec![refused(), answer()]));
+    let member = Arc::new(Fake::new(id("member-a"), vec![refused(), answer()]));
     book.note_answered(member.id());
     let cooling = book
         .record_failure(member.id(), &suspended())

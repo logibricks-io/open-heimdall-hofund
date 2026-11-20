@@ -171,3 +171,27 @@ fn d240_removing_the_member_drops_the_answer() {
     let cooling = book.record_failure(&id, &marked()).expect("removed");
     assert_eq!(cooling.cause(), CooldownCause::Failure);
 }
+
+#[test]
+fn d240_a_model_success_lifts_the_member_wide_suspended_rest() {
+    let (book, id, _) = fixture();
+    book.note_answered(&id);
+    book.record_failure(&id, &marked()).expect("rest");
+    let revision = book.revision(&id);
+    book.record_success_for_model_if_unchanged(&id, "demo", revision);
+    assert!(book.cooling(&id).is_none());
+    let again = book.record_failure(&id, &marked()).expect("still answered");
+    assert_eq!(again.cause(), CooldownCause::Suspended);
+    assert!(again.background_probe());
+}
+
+#[test]
+fn d240_a_stale_model_success_keeps_the_suspended_rest() {
+    let (book, id, _) = fixture();
+    book.note_answered(&id);
+    let cooling = book.record_failure(&id, &marked()).expect("rest");
+    book.record_success_for_model_if_unchanged(&id, "demo", 0);
+    let kept = book.cooling(&id).expect("still resting");
+    assert_eq!(kept.cause(), CooldownCause::Suspended);
+    assert_eq!(kept.until(), cooling.until());
+}
