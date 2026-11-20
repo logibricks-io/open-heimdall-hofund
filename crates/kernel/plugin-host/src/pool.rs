@@ -141,6 +141,9 @@ impl Default for HttpLimits {
 pub struct PooledHttp {
     profile: HttpProfile,
     limits: HttpLimits,
+    #[cfg(test)]
+    #[doc = "Injected system-proxy environment. Absent means read the process."]
+    proxy_env: Option<crate::websocket::ProxyEnv>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -180,7 +183,20 @@ impl PooledHttp {
     /// The client for `profile` and the host's timeout config.
     #[must_use]
     pub fn with_limits(profile: HttpProfile, limits: HttpLimits) -> Self {
-        Self { profile, limits }
+        Self {
+            profile,
+            limits,
+            #[cfg(test)]
+            proxy_env: None,
+        }
+    }
+
+    /// Uses `env` instead of the process environment for the system proxy.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_proxy_env(mut self, env: crate::websocket::ProxyEnv) -> Self {
+        self.proxy_env = Some(env);
+        self
     }
 
     /// Builds the pooled client without sending.
@@ -591,6 +607,18 @@ impl HttpBackend for PooledHttp {
         &self,
         request: hofund_plugin_api::WebSocketRequest,
     ) -> Result<hofund_plugin_api::WebSocketSession, PluginError> {
+        let env = {
+            #[cfg(test)]
+            {
+                self.proxy_env
+                    .clone()
+                    .unwrap_or_else(crate::websocket::ProxyEnv::process)
+            }
+            #[cfg(not(test))]
+            {
+                crate::websocket::ProxyEnv::process()
+            }
+        };
         crate::websocket::connect(crate::websocket::Dial {
             uri: request.kernel_uri(),
             headers: request.kernel_headers(),
@@ -598,6 +626,7 @@ impl HttpBackend for PooledHttp {
             idle: request.kernel_idle(),
             age: request.kernel_age(),
             proxy: self.profile.proxy(),
+            env,
             insecure: self.profile.insecure,
         })
         .await

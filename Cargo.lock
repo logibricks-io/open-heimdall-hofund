@@ -2730,6 +2730,7 @@ dependencies = [
  "hofund-plugin-api",
  "hofund-plugin-sdk",
  "http",
+ "hyper-util",
  "keyring",
  "keyring-core",
  "reqwest 0.12.28",

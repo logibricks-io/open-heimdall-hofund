@@ -5,7 +5,8 @@
 //! same conversation and session token sends `previous_response_id` and only
 //! the new input. A refused handshake, a clean close before a terminal event,
 //! a read that sits past the host's read budget, or an error frame that names
-//! no HTTP status, uses the HTTP path instead. The host clock closes an idle
+//! no HTTP status, uses the HTTP path instead. Skipped frames count toward
+//! that read budget and toward the turn cap. The host clock closes an idle
 //! socket and one that has reached its age, and each account keeps a bounded
 //! number of them.
 
@@ -14,8 +15,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use hofund_plugin_api::{
-    AccountId, BodyStream, Completion, ContentPart, HostContext, PluginError, ProtocolId, Request,
-    WebSocketMessage, WebSocketRequest, WebSocketSession,
+    AccountId, BodyStream, ClockHandle, Completion, ContentPart, HostContext, PluginError,
+    ProtocolId, Request, WebSocketMessage, WebSocketRequest, WebSocketSession,
 };
 use hofund_plugin_sdk::digest;
 use hofund_plugin_sdk::json::{self, Map, Value};
@@ -35,6 +36,9 @@ const MAX_AGE: Duration = Duration::from_secs(55 * 60);
 pub(crate) const MAX_PER_ACCOUNT: usize = 32;
 /// Largest assembled turn. A larger reply goes over HTTP.
 const MAX_TURN: usize = 8 * 1024 * 1024;
+/// Gap between frames that carry the turn. This is the pooled client's default
+/// read budget. A skipped frame does not start it over.
+const READ_BUDGET: Duration = Duration::from_secs(60);
 
 /// A turn that should go over HTTP, or a failure whose status must stand.
 pub(crate) enum TurnFail {
@@ -202,10 +206,11 @@ pub(crate) async fn try_responses(
     if live.send_text(message).await.is_err() {
         return Err(TurnFail::Fallback);
     }
-    let read = match read_turn(&mut live).await {
+    let read = match read_turn(&mut live, host.clock()).await {
         Ok(read) => read,
         Err(error) => return Err(error),
     };
+    let used = host.clock().monotonic();
     if let Some(shape) = shape.filter(|_| !read.reply_id.is_empty() && read.track) {
         book.sockets.put(
             account.clone(),
@@ -213,7 +218,7 @@ pub(crate) async fn try_responses(
                 key,
                 session: live,
                 opened: opened_at,
-                used: now,
+                used,
                 fields: shape.fields,
                 input: shape.sums,
                 output: read.output,
@@ -263,7 +268,7 @@ fn skip_handshake(name: &str) -> bool {
         || name.eq_ignore_ascii_case("connection")
 }
 
-async fn read_turn(session: &mut WebSocketSession) -> Result<Read, TurnFail> {
+async fn read_turn(session: &mut WebSocketSession, clock: &ClockHandle) -> Result<Read, TurnFail> {
     let mut read = Read {
         sse: Vec::new(),
         output: Vec::new(),
@@ -273,19 +278,33 @@ async fn read_turn(session: &mut WebSocketSession) -> Result<Read, TurnFail> {
     };
     let mut saw_content = false;
     let mut terminal = false;
+    let mut used = 0_usize;
+    let mut progress = clock.monotonic();
     loop {
         let message = session.recv().await.map_err(|_| TurnFail::Fallback)?;
-        let Some(WebSocketMessage::Text(text)) = message else {
-            if message.is_none() {
-                break;
-            }
-            continue;
+        if clock.monotonic().saturating_sub(progress) >= READ_BUDGET {
+            return Err(TurnFail::Fallback);
+        }
+        let Some(message) = message else {
+            break;
         };
-        let Ok(value) = json::from_str::<Value>(&text) else {
-            if !fits(&read.sse, &text) {
-                return Err(TurnFail::Fallback);
+        let text = match message {
+            WebSocketMessage::Binary(bytes) => {
+                if !charge(&mut used, bytes.len()) {
+                    return Err(TurnFail::Fallback);
+                }
+                continue;
             }
-            push_sse(&mut read.sse, &text);
+            WebSocketMessage::Text(text) => text,
+            _ => continue,
+        };
+        let bytes = sse_bytes(&text);
+        if !charge(&mut used, bytes.len()) {
+            return Err(TurnFail::Fallback);
+        }
+        let Ok(value) = json::from_str::<Value>(&text) else {
+            read.sse.extend_from_slice(&bytes);
+            progress = clock.monotonic();
             continue;
         };
         let kind = value.get("type").and_then(Value::as_str).unwrap_or("");
@@ -307,10 +326,8 @@ async fn read_turn(session: &mut WebSocketSession) -> Result<Read, TurnFail> {
         {
             read.reply_id = id.to_owned();
         }
-        if !fits(&read.sse, &text) {
-            return Err(TurnFail::Fallback);
-        }
-        push_sse(&mut read.sse, &text);
+        read.sse.extend_from_slice(&bytes);
+        progress = clock.monotonic();
         if matches!(
             kind,
             "response.completed"
@@ -329,8 +346,14 @@ async fn read_turn(session: &mut WebSocketSession) -> Result<Read, TurnFail> {
     Ok(read)
 }
 
-fn fits(sse: &[u8], frame: &str) -> bool {
-    sse.len().saturating_add(frame.len()).saturating_add(32) <= MAX_TURN
+fn charge(used: &mut usize, extra: usize) -> bool {
+    match used.checked_add(extra) {
+        Some(next) if next <= MAX_TURN => {
+            *used = next;
+            true
+        }
+        _ => false,
+    }
 }
 
 fn note_item(value: &Value, read: &mut Read) {
@@ -370,7 +393,8 @@ fn error_status(value: &Value) -> Option<u16> {
         .filter(|status| (400..=599).contains(status))
 }
 
-fn push_sse(out: &mut Vec<u8>, frame: &str) {
+fn sse_bytes(frame: &str) -> Vec<u8> {
+    let mut out = Vec::new();
     let compact = json::from_str::<Value>(frame)
         .ok()
         .and_then(|value| json::to_string(&value).ok())
@@ -387,6 +411,7 @@ fn push_sse(out: &mut Vec<u8>, frame: &str) {
     out.extend_from_slice(b"data: ");
     out.extend_from_slice(compact.as_bytes());
     out.extend_from_slice(b"\n\n");
+    out
 }
 
 async fn decode_sse(

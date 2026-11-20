@@ -210,8 +210,9 @@ transport and `ir` to fold a stream into one response.
 `plugin-host` depends on `plugin-api`. Its tests also depend on
 `plugin-sdk` so the retry contract runs against the pooled client. The pooled
 HTTP client and the outbound WebSocket client live in `plugin-host`. The dial
-uses the same proxy and TLS profile as that client. A configured proxy refuses
-the socket instead of connecting directly. `plugin-registry` depends on
+uses the same proxy decision as that client for the HTTP origin, including
+environment proxies, and the same TLS profile. A proxy refuses the socket
+instead of connecting directly. `plugin-registry` depends on
 `plugin-api`,
 `plugin-sdk`, the plugin crates it composes, and `provider` and `quirks`
 for the built-in factories. Those factories still call the `provider`

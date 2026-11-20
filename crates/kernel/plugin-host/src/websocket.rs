@@ -36,15 +36,129 @@ pub(crate) struct Dial<'a> {
     pub idle: Option<Duration>,
     /// Close this long after the handshake.
     pub age: Option<Duration>,
-    /// Proxy the HTTP client would use. A value here refuses the dial.
+    /// Explicit profile proxy. `reqwest` sends every origin through it.
     pub proxy: Option<&'a str>,
+    /// Environment the pooled client reads when `proxy` is absent.
+    pub env: ProxyEnv,
     /// Skip certificate checks, matching the HTTP client's insecure profile.
     pub insecure: bool,
 }
 
+/// Environment variables the pooled HTTP client uses for its system proxy.
+///
+/// This is the same set `reqwest` reads when the profile has no explicit proxy:
+/// `ALL_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY`, each with its
+/// lowercase twin. A set `REQUEST_METHOD` is the CGI exception and disables
+/// those variables, matching `hyper-util`'s matcher.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ProxyEnv {
+    all: String,
+    http: String,
+    https: String,
+    no: String,
+    cgi: bool,
+}
+
+impl ProxyEnv {
+    /// No proxy variables and no CGI exception.
+    #[must_use]
+    pub(crate) fn empty() -> Self {
+        Self::default()
+    }
+
+    /// The process environment, read the way the pooled client reads it.
+    #[must_use]
+    pub(crate) fn process() -> Self {
+        Self {
+            cgi: std::env::var_os("REQUEST_METHOD").is_some(),
+            all: first_var(&["ALL_PROXY", "all_proxy"]),
+            http: first_var(&["HTTP_PROXY", "http_proxy"]),
+            https: first_var(&["HTTPS_PROXY", "https_proxy"]),
+            no: first_var(&["NO_PROXY", "no_proxy"]),
+        }
+    }
+
+    /// A stand-in environment. Names match the process variables exactly.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn from_pairs(pairs: &[(&str, &str)]) -> Self {
+        Self {
+            cgi: pairs.iter().any(|(name, _)| *name == "REQUEST_METHOD"),
+            all: pair(pairs, &["ALL_PROXY", "all_proxy"]),
+            http: pair(pairs, &["HTTP_PROXY", "http_proxy"]),
+            https: pair(pairs, &["HTTPS_PROXY", "https_proxy"]),
+            no: pair(pairs, &["NO_PROXY", "no_proxy"]),
+        }
+    }
+
+    fn has_candidate(&self) -> bool {
+        !self.all.is_empty() || !self.http.is_empty() || !self.https.is_empty()
+    }
+}
+
+fn first_var(names: &[&str]) -> String {
+    for name in names {
+        if let Ok(value) = std::env::var(name) {
+            return value;
+        }
+    }
+    String::new()
+}
+
+#[cfg(test)]
+fn pair(pairs: &[(&str, &str)], names: &[&str]) -> String {
+    for name in names {
+        if let Some((_, value)) = pairs.iter().find(|(key, _)| *key == *name) {
+            return (*value).to_owned();
+        }
+    }
+    String::new()
+}
+
+/// Whether the pooled HTTP client would send this origin through a proxy.
+///
+/// `uri` may be `ws` or `wss`. The decision uses the `http` or `https` origin
+/// the HTTP client would call, because the system matcher ignores `ws` and `wss`.
+#[must_use]
+pub(crate) fn http_path_uses_proxy(profile_proxy: Option<&str>, env: &ProxyEnv, uri: &str) -> bool {
+    if profile_proxy.is_some() {
+        return true;
+    }
+    if env.cgi {
+        return false;
+    }
+    let Some(http_uri) = http_origin(uri) else {
+        return env.has_candidate();
+    };
+    let Ok(parsed) = http_uri.parse::<::http::Uri>() else {
+        return env.has_candidate();
+    };
+    hyper_util::client::proxy::matcher::Matcher::builder()
+        .all(env.all.as_str())
+        .http(env.http.as_str())
+        .https(env.https.as_str())
+        .no(env.no.as_str())
+        .build()
+        .intercept(&parsed)
+        .is_some()
+}
+
+fn http_origin(uri: &str) -> Option<String> {
+    if let Some(rest) = uri.strip_prefix("wss://") {
+        Some(format!("https://{rest}"))
+    } else if let Some(rest) = uri.strip_prefix("ws://") {
+        Some(format!("http://{rest}"))
+    } else if uri.starts_with("https://") || uri.starts_with("http://") {
+        Some(uri.to_owned())
+    } else {
+        None
+    }
+}
+
 /// Dials `dial` and returns an open session.
 ///
-/// A configured proxy returns [`PluginErrorKind::Unsupported`](hofund_plugin_api::PluginErrorKind::Unsupported)
+/// A proxy the pooled client would use for this origin returns
+/// [`PluginErrorKind::Unsupported`](hofund_plugin_api::PluginErrorKind::Unsupported)
 /// before any connection, so the bearer is not sent on a direct socket.
 /// `insecure` uses a TLS client that accepts any certificate. The default
 /// verifies with the native root store, the same policy as the pooled client.
@@ -55,7 +169,7 @@ pub(crate) struct Dial<'a> {
 /// handshake target, the dial fails, or the peer refuses the handshake. A
 /// refusal keeps its HTTP status.
 pub(crate) async fn connect(dial: Dial<'_>) -> Result<WebSocketSession, PluginError> {
-    if dial.proxy.is_some() {
+    if http_path_uses_proxy(dial.proxy, &dial.env, dial.uri) {
         return Err(PluginError::unsupported(
             "websocket dial does not use this HTTP proxy",
         ));
@@ -391,7 +505,7 @@ mod tests {
     use hofund_plugin_api::kernel::HttpBackend;
     use hofund_plugin_api::{PluginErrorKind, WebSocketRequest};
 
-    use super::{loopback_origin, loopback_uri, websocket_uri};
+    use super::{ProxyEnv, http_path_uses_proxy, loopback_origin, loopback_uri, websocket_uri};
     use crate::pool::{HttpLimits, HttpProfile, PooledHttp};
 
     #[test]
@@ -455,7 +569,8 @@ mod tests {
     async fn an_insecure_profile_dials_without_verifying() {
         let captured = Arc::new(Mutex::new(Vec::new()));
         let port = crate::test_tls::spawn_tls_capture(Vec::new(), Arc::clone(&captured)).await;
-        let http = PooledHttp::new(HttpProfile::direct().insecure());
+        let http =
+            PooledHttp::new(HttpProfile::direct().insecure()).with_proxy_env(ProxyEnv::empty());
         let _ = http
             .open_websocket(
                 WebSocketRequest::get(format!("wss://127.0.0.1:{port}/responses"))
@@ -469,5 +584,150 @@ mod tests {
                 .contains("authorization: bearer secret"),
             "insecure profile should reach the handshake, saw {text:?}"
         );
+    }
+
+    #[test]
+    fn system_proxy_matches_the_http_origin() {
+        let proxy = [("HTTPS_PROXY", "http://127.0.0.1:9")];
+        let env = ProxyEnv::from_pairs(&proxy);
+        assert!(http_path_uses_proxy(
+            None,
+            &env,
+            "wss://api.example.test/responses"
+        ));
+        assert!(!http_path_uses_proxy(
+            None,
+            &ProxyEnv::from_pairs(&[
+                ("HTTPS_PROXY", "http://127.0.0.1:9"),
+                ("NO_PROXY", "api.example.test"),
+            ]),
+            "wss://api.example.test/responses"
+        ));
+        assert!(!http_path_uses_proxy(
+            None,
+            &ProxyEnv::from_pairs(&[
+                ("HTTPS_PROXY", "http://127.0.0.1:9"),
+                ("REQUEST_METHOD", "GET"),
+            ]),
+            "wss://api.example.test/responses"
+        ));
+        assert!(!http_path_uses_proxy(
+            None,
+            &ProxyEnv::from_pairs(&[("HTTP_PROXY", "http://127.0.0.1:9")]),
+            "wss://api.example.test/responses"
+        ));
+        assert!(http_path_uses_proxy(
+            None,
+            &ProxyEnv::from_pairs(&[("HTTP_PROXY", "http://127.0.0.1:9")]),
+            "ws://api.example.test/responses"
+        ));
+        assert!(http_path_uses_proxy(
+            None,
+            &ProxyEnv::from_pairs(&[("ALL_PROXY", "http://127.0.0.1:9")]),
+            "wss://api.example.test/responses"
+        ));
+        assert!(http_path_uses_proxy(
+            Some("http://127.0.0.1:9"),
+            &ProxyEnv::from_pairs(&[("REQUEST_METHOD", "GET"), ("NO_PROXY", "*")]),
+            "wss://api.example.test/responses"
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_environment_proxy_does_not_dial() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("addr");
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let accepted = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&accepted);
+        let bytes = Arc::clone(&captured);
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                flag.store(true, Ordering::SeqCst);
+                let mut buf = vec![0_u8; 2048];
+                if let Ok(n) = tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await {
+                    bytes.lock().expect("capture").extend_from_slice(&buf[..n]);
+                }
+            }
+        });
+        let http = PooledHttp::direct().with_proxy_env(ProxyEnv::from_pairs(&[(
+            "HTTPS_PROXY",
+            "http://127.0.0.1:9",
+        )]));
+        let error = http
+            .open_websocket(
+                WebSocketRequest::get(format!("wss://{address}/responses"))
+                    .sensitive_header("Authorization", "Bearer secret"),
+            )
+            .await
+            .expect_err("an environment proxy refuses the socket");
+        assert_eq!(error.kind(), PluginErrorKind::Unsupported);
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !accepted.load(Ordering::SeqCst),
+            "the upstream accepted a direct socket"
+        );
+        let wire = captured.lock().expect("capture").clone();
+        assert!(
+            !String::from_utf8_lossy(&wire)
+                .to_ascii_lowercase()
+                .contains("bearer"),
+            "the bearer left on the wire: {wire:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_proxy_and_cgi_still_dial() {
+        let direct = dial_cleartext(ProxyEnv::from_pairs(&[
+            ("HTTP_PROXY", "http://127.0.0.1:9"),
+            ("NO_PROXY", "127.0.0.1"),
+        ]))
+        .await;
+        assert!(
+            direct.contains("authorization: bearer secret"),
+            "NO_PROXY should dial directly, saw {direct:?}"
+        );
+        let cgi = dial_cleartext(ProxyEnv::from_pairs(&[
+            ("HTTP_PROXY", "http://127.0.0.1:9"),
+            ("REQUEST_METHOD", "GET"),
+        ]))
+        .await;
+        assert!(
+            cgi.contains("authorization: bearer secret"),
+            "the CGI exception should dial directly, saw {cgi:?}"
+        );
+    }
+
+    async fn dial_cleartext(env: ProxyEnv) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("addr");
+        let captured = Arc::new(Mutex::new(String::new()));
+        let bytes = Arc::clone(&captured);
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = vec![0_u8; 2048];
+                if let Ok(n) = tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await {
+                    *bytes.lock().expect("capture") =
+                        String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+                }
+            }
+        });
+        let http = PooledHttp::direct().with_proxy_env(env);
+        let _ = http
+            .open_websocket(
+                WebSocketRequest::get(format!("ws://{address}/responses"))
+                    .sensitive_header("Authorization", "Bearer secret"),
+            )
+            .await;
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        captured.lock().expect("capture").clone()
     }
 }

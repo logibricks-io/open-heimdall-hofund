@@ -711,6 +711,144 @@ fn d235_status_error_is_classified_like_http() {
     });
 }
 
+#[test]
+fn d235_used_is_stamped_when_the_turn_finishes() {
+    block_on_paused(async {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = TestHost::open_for_with_tokio_monotonic(
+            PluginKind::Subscription,
+            PluginId::from_static("copilot"),
+            dir.path(),
+        );
+        let server = LoopbackSocket::start(replies(|turn| match turn {
+            0 => "resp-0",
+            _ => "resp-1",
+        }))
+        .await;
+        let world = world_with(host, dir).await;
+        world.host.http().serve_websockets_at(server.base_url());
+        world.prime("sess");
+        let upstream = world.upstream();
+        let mut first = request("gpt-5.5", vec![say(Role::User, "ping")]);
+        first.conversation = Some(Conversation::new("used", ""));
+        let started = world.host.context().clock().monotonic();
+        ask_paused(&upstream, first).await;
+        let finished = world.host.context().clock().monotonic();
+        assert!(finished.saturating_sub(started) >= Duration::from_secs(1));
+        assert_eq!(world.book.sockets.held(&world.account), 1);
+        advance_time(Duration::from_secs(10 * 60) - Duration::from_secs(1)).await;
+        let mut second = request(
+            "gpt-5.5",
+            vec![
+                say(Role::User, "ping"),
+                say(Role::Assistant, "pong"),
+                say(Role::User, "next"),
+            ],
+        );
+        second.conversation = Some(Conversation::new("used", ""));
+        ask_paused(&upstream, second).await;
+        assert_eq!(server.opened(), 1);
+        assert_eq!(posts(&world.host), 0);
+        assert_eq!(world.book.sockets.held(&world.account), 1);
+    });
+}
+
+#[test]
+fn d235_skipped_frames_count_toward_the_cap() {
+    let world = world();
+    block_on(async {
+        let chunk = "a".repeat(5_000_000);
+        let timing = format!(r#"{{"type":"responsesapi.websocket_timing","payload":"{chunk}"}}"#);
+        let item = assistant("pong");
+        let server = LoopbackSocket::start(SocketScript::replies(move |_, _| {
+            let mut frames = vec![timing.clone(), timing.clone()];
+            frames.extend(completed("resp-1", &item, &[]));
+            frames
+        }))
+        .await;
+        world.host.http().serve_websockets_at(server.base_url());
+        world.prime("sess");
+        world.host.http().enqueue(http_reply());
+        ask(
+            &world.upstream(),
+            request("gpt-5.5", vec![say(Role::User, "ping")]),
+        )
+        .await;
+        assert_eq!(posts(&world.host), 1);
+        assert_eq!(world.book.sockets.held(&world.account), 0);
+    });
+}
+
+#[test]
+fn d235_event_type_is_counted_once_in_the_cap() {
+    let world = world();
+    block_on(async {
+        let kind = "t".repeat(4_500_000);
+        let wide = format!(r#"{{"type":"{kind}"}}"#);
+        let item = assistant("pong");
+        let server = LoopbackSocket::start(SocketScript::replies(move |_, _| {
+            let mut frames = vec![wide.clone()];
+            frames.extend(completed("resp-1", &item, &[]));
+            frames
+        }))
+        .await;
+        world.host.http().serve_websockets_at(server.base_url());
+        world.prime("sess");
+        world.host.http().enqueue(http_reply());
+        ask(
+            &world.upstream(),
+            request("gpt-5.5", vec![say(Role::User, "ping")]),
+        )
+        .await;
+        assert_eq!(posts(&world.host), 1);
+        assert_eq!(world.book.sockets.held(&world.account), 0);
+    });
+}
+
+#[test]
+fn d235_timing_frames_do_not_refresh_the_read_budget() {
+    block_on_paused(async {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = TestHost::open_for_with_tokio_monotonic(
+            PluginKind::Subscription,
+            PluginId::from_static("copilot"),
+            dir.path(),
+        );
+        let item = assistant("pong");
+        let server = LoopbackSocket::start(
+            SocketScript::replies(move |_, _| {
+                let mut frames = vec![
+                    r#"{"type":"responsesapi.websocket_timing"}"#.to_owned(),
+                    r#"{"type":"responsesapi.websocket_timing"}"#.to_owned(),
+                ];
+                frames.extend(completed("resp-1", &item, &[]));
+                frames
+            })
+            .gap(Duration::from_secs(31)),
+        )
+        .await;
+        let world = world_with(host, dir).await;
+        world.host.http().serve_websockets_at(server.base_url());
+        world.prime("sess");
+        world.host.http().enqueue(http_reply());
+        let upstream = world.upstream();
+        let started = world.host.context().clock().monotonic();
+        ask_paused(&upstream, request("gpt-5.5", vec![say(Role::User, "ping")])).await;
+        let elapsed = world
+            .host
+            .context()
+            .clock()
+            .monotonic()
+            .saturating_sub(started);
+        assert!(
+            elapsed >= Duration::from_secs(61) && elapsed < Duration::from_secs(80),
+            "{elapsed:?}"
+        );
+        assert_eq!(posts(&world.host), 1);
+        assert_eq!(world.book.sockets.held(&world.account), 0);
+    });
+}
+
 async fn ask_paused(upstream: &CopilotUpstream, request: Request) {
     let turned = advance_until(
         upstream.execute(request, ProtocolId::OPENAI_RESPONSES),

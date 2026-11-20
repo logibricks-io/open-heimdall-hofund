@@ -1087,6 +1087,7 @@ impl HttpBackend for RecordingHttp {
             idle: request.kernel_idle(),
             age: request.kernel_age(),
             proxy: proxy.as_deref(),
+            env: crate::websocket::ProxyEnv::empty(),
             insecure: false,
         })
         .await

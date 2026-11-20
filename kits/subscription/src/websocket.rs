@@ -1,6 +1,7 @@
 //! Loopback WebSocket server for subscription plugin tests.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
@@ -17,6 +18,7 @@ pub struct SocketScript {
     refuse: Option<u16>,
     frames: Frames,
     then_close: bool,
+    gap: Duration,
 }
 
 impl SocketScript {
@@ -28,7 +30,15 @@ impl SocketScript {
             refuse: None,
             frames: Arc::new(frames),
             then_close: false,
+            gap: Duration::ZERO,
         }
+    }
+
+    /// Waits `gap` before each frame. A paused clock advances without sleeping.
+    #[must_use]
+    pub fn gap(mut self, gap: Duration) -> Self {
+        self.gap = gap;
+        self
     }
 
     /// Closes the socket after the frames for a turn have been sent.
@@ -45,6 +55,7 @@ impl SocketScript {
             refuse: Some(status),
             frames: Arc::new(|_, _| Vec::new()),
             then_close: false,
+            gap: Duration::ZERO,
         }
     }
 }
@@ -242,6 +253,9 @@ async fn serve_connection(
         turn = turn.saturating_add(1);
         let mut failed = false;
         for frame in frames {
+            if !script.gap.is_zero() {
+                tokio::time::sleep(script.gap).await;
+            }
             if socket.send(Message::Text(frame.into())).await.is_err() {
                 failed = true;
                 break;
