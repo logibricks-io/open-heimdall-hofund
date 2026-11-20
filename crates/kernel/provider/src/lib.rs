@@ -17,6 +17,7 @@ mod models;
 mod openai_compat;
 pub mod pass_headers;
 mod probe;
+mod realtime;
 mod stream;
 mod wire;
 
@@ -29,6 +30,7 @@ pub use http::{
 };
 pub use models::{both_auth_applies, both_auth_refused, parse_model_rows};
 pub use openai_compat::{OpenAiCompat, OpenAiProtocol, responses_kept_by_host};
+pub use realtime::{realtime_model_url, realtime_target};
 pub use wire::{ModelPlan, Wire, credential_for};
 
 pub use hofund_plugin_api::{
