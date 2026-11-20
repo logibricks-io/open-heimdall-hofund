@@ -10,7 +10,9 @@
 //!   target, unmapped tools are logged once per name, the billing line is
 //!   removed from system text, and extension bags are dropped. A Chat or
 //!   Responses `service_tier` is put back, then adjusted for the target base
-//!   and codec before the body is posted.
+//!   and codec before the body is posted. A served `service_tier` on the
+//!   reply is kept through a fold, a unary decode, and a cross-protocol
+//!   stream. The word on `response.completed` replaces an earlier word.
 //! - An encode failure is status 400: the client sent something the target
 //!   protocol cannot carry.
 //! - A Messages call carries the protocol version header, which a configured
@@ -463,7 +465,9 @@ impl Sent {
         if events.is_empty() {
             return Err(PluginError::decode("the upstream stream carried no events"));
         }
-        Ok(Completion::Unary(Box::new(hofund_ir::assemble(&events))))
+        let mut response = hofund_ir::assemble(&events);
+        hofund_codec::service_tier::stamp_last_served_tier(&events, &mut response);
+        Ok(Completion::Unary(Box::new(response)))
     }
 
     /// The body with the watch and the unwrap applied, in that order.
@@ -481,8 +485,9 @@ impl Sent {
     }
 }
 
-/// Adds decoded `events` to `into` without extensions, skipping unknown
-/// events; an upstream failure among them is the error.
+/// Adds decoded `events` to `into`, keeping a served `service_tier` and
+/// dropping every other extension. Unknown events are skipped. An upstream
+/// failure among them is the error.
 fn keep_events(
     events: Result<Vec<StreamEvent>, CodecError>,
     into: &mut Vec<StreamEvent>,
@@ -496,7 +501,7 @@ fn keep_events(
         if matches!(event, StreamEvent::Unknown(_)) {
             continue;
         }
-        event.strip_extensions();
+        hofund_codec::service_tier::retain_served_tier(&mut event);
         into.push(event);
     }
     Ok(())
@@ -1439,7 +1444,7 @@ async fn decoded(
     let mut response = codec
         .decode_response(&bytes)
         .map_err(|error| PluginError::decode(error.to_string()))?;
-    response.strip_extensions();
+    hofund_codec::service_tier::retain_response_tier(&mut response);
     Ok(Completion::Unary(Box::new(response)))
 }
 
@@ -1572,7 +1577,7 @@ impl Events {
                 if matches!(event, StreamEvent::Unknown(_)) {
                     continue;
                 }
-                event.strip_extensions();
+                hofund_codec::service_tier::retain_served_tier(event);
             }
             return Some(item);
         }

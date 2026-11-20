@@ -368,12 +368,27 @@ async fn ask(
     model: &str,
     tier: &str,
 ) {
+    send_tier(snapshot, usage, pricer, path, model, tier, true).await;
+}
+
+async fn send_tier(
+    snapshot: &hofund_router::Snapshot,
+    usage: &Arc<Ledger>,
+    pricer: &Arc<EffectivePricer>,
+    path: &str,
+    model: &str,
+    tier: &str,
+    stream: bool,
+) {
+    let stream_word = if stream { "true" } else { "false" };
     let body = if path.ends_with("/chat/completions") {
         format!(
-            r#"{{"model":"{model}","messages":[{{"role":"user","content":"hi"}}],"stream":true,"service_tier":"{tier}"}}"#
+            r#"{{"model":"{model}","messages":[{{"role":"user","content":"hi"}}],"stream":{stream_word},"service_tier":"{tier}"}}"#
         )
     } else {
-        format!(r#"{{"model":"{model}","input":"hi","stream":true,"service_tier":"{tier}"}}"#)
+        format!(
+            r#"{{"model":"{model}","input":"hi","stream":{stream_word},"service_tier":"{tier}"}}"#
+        )
     };
     let response = router_for(snapshot, Arc::clone(usage), Arc::clone(pricer))
         .oneshot(
@@ -613,4 +628,362 @@ async fn d224_chatgpt_api_subscription_uses_the_responses_host_rule() {
         .find(|row| row.model == "gpt-6-sol")
         .expect("plain");
     assert_eq!(plain.tier_sent, "priority");
+}
+
+const SERVED_DEFAULT: &str = concat!(
+    "event: response.created\n",
+    "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-6.2-sol\",\"service_tier\":\"ultrafast\"}}\n\n",
+    "event: response.completed\n",
+    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-6.2-sol\",\"status\":\"completed\",\"service_tier\":\"default\",\"usage\":{\"input_tokens\":1000000,\"output_tokens\":0}}}\n\n",
+);
+
+const CHAT_SERVED_DEFAULT: &str = concat!(
+    "data: {\"id\":\"chat_1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-6.2-sol\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}],\"service_tier\":\"default\"}\n\n",
+    "data: {\"id\":\"chat_1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-6.2-sol\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1000000,\"completion_tokens\":0}}\n\n",
+    "data: [DONE]\n\n",
+);
+
+const UNARY_SERVED_DEFAULT: &str = r#"{"id":"resp_1","model":"gpt-6.2-sol","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"service_tier":"default","usage":{"input_tokens":1000000,"output_tokens":0}}"#;
+
+const CHAT_UNARY_SERVED_DEFAULT: &str = r#"{"id":"chat_1","object":"chat.completion","model":"gpt-6.2-sol","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"service_tier":"default","usage":{"prompt_tokens":1000000,"completion_tokens":0}}"#;
+
+fn assert_list_price(row: &hofund_usage::Row) {
+    assert_eq!(row.tier_asked, "ultrafast");
+    assert_eq!(row.tier_served, "default");
+    let price = row.price.expect("price");
+    assert_eq!(price.input, 1.0);
+    assert!((row.cost_usd.expect("cost") - 1.0).abs() < 1e-9);
+}
+
+#[tokio::test]
+async fn d224_wire_fold_keeps_the_completed_served_tier() {
+    let dir = TempDir::new().expect("tempdir");
+    let host = TestHost::open(PluginId::from_static("openai"), dir.path());
+    host.http().enqueue(SERVED_DEFAULT.as_bytes());
+    let request = OpenAiResponses
+        .decode_request(br#"{"model":"gpt-6.2-sol","input":"hi","stream":true}"#)
+        .expect("request");
+    let target = hofund_plugin_sdk::wire::Target::new(ProtocolId::OPENAI_RESPONSES, PUBLIC_API);
+    let sent = hofund_plugin_sdk::wire::send(
+        host.context().http(),
+        &target,
+        None,
+        request,
+        ProtocolId::OPENAI_RESPONSES,
+    )
+    .await
+    .expect("sent");
+    let Completion::Unary(response) = sent.fold().await.expect("folded") else {
+        panic!("folded reply");
+    };
+    assert_eq!(
+        hofund_codec::service_tier::extension_tier(&response.extensions),
+        "default"
+    );
+}
+
+#[tokio::test]
+async fn d224_chatgpt_api_unary_bills_the_served_default() {
+    let dir = TempDir::new().expect("tempdir");
+    let host = TestHost::open(PluginId::from_static("chatgpt-api"), dir.path());
+    let subscription = hofund_plugin_subscription_chatgpt_api::factory_with_endpoints(
+        hofund_plugin_subscription_chatgpt_api::Endpoints::default(),
+    )
+    .build(
+        &hofund_plugin_subscription_chatgpt_api::ChatgptApiConfig,
+        host.context(),
+    )
+    .expect("subscription");
+    let account = AccountId::from_static("a-0000000000000001");
+    let upstream = subscription
+        .upstream(&account, host.context())
+        .expect("upstream");
+    let member = MemberId::from_parts(PluginId::from_static("chatgpt-api"), account.clone());
+    let (snapshot, _table) = open_calling(
+        "subscription",
+        "chatgpt-api",
+        Some(member),
+        upstream,
+        &["gpt-6.2-sol"],
+    );
+    let accounts = host.context().accounts();
+    let row = accounts
+        .account(account, "me@example.test")
+        .expect("account");
+    accounts
+        .upsert(
+            row,
+            SecretObject::new()
+                .with_secret("access_token", &SecretString::from("token".to_owned()))
+                .with_number("expires_at", 4_000_000_000)
+                .to_secret(),
+        )
+        .await
+        .expect("stored sign-in");
+    let (usage, pricer) = priced(&dir);
+    host.http().enqueue(SERVED_DEFAULT.as_bytes());
+    send_tier(
+        &snapshot,
+        &usage,
+        &pricer,
+        "/v1/responses",
+        "gpt-6.2-sol",
+        "ultrafast",
+        false,
+    )
+    .await;
+    let row = usage.rows().expect("rows").pop().expect("row");
+    assert_eq!(row.tier_sent, "ultrafast");
+    assert_list_price(&row);
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn d224_openai_chat_stream_bills_the_served_default() {
+    let dir = TempDir::new().expect("tempdir");
+    let host = TestHost::open(PluginId::from_static("openai"), dir.path());
+    let upstream = hofund_plugin_registry::openai_compat(
+        OpenAiProtocol::Chat,
+        public_endpoint(),
+        host.context(),
+    )
+    .expect("chat upstream");
+    let (snapshot, _table) =
+        open_calling("openai-chat", "openai", None, upstream, &["gpt-6.2-sol"]);
+    let (usage, pricer) = priced(&dir);
+    host.http().enqueue(CHAT_SERVED_DEFAULT.as_bytes());
+    ask(
+        &snapshot,
+        &usage,
+        &pricer,
+        "/v1/chat/completions",
+        "gpt-6.2-sol",
+        "ultrafast",
+    )
+    .await;
+    let row = usage.rows().expect("rows").pop().expect("row");
+    assert_eq!(row.tier_sent, "priority");
+    assert_list_price(&row);
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn d224_openai_responses_unary_bills_the_served_default() {
+    let dir = TempDir::new().expect("tempdir");
+    let host = TestHost::open(PluginId::from_static("openai"), dir.path());
+    let upstream = hofund_plugin_registry::openai_compat(
+        OpenAiProtocol::Responses,
+        public_endpoint(),
+        host.context(),
+    )
+    .expect("responses upstream");
+    let (snapshot, _table) = open_calling(
+        "openai-responses",
+        "openai",
+        None,
+        upstream,
+        &["gpt-6.2-sol"],
+    );
+    let (usage, pricer) = priced(&dir);
+    host.http().enqueue(UNARY_SERVED_DEFAULT.as_bytes());
+    send_tier(
+        &snapshot,
+        &usage,
+        &pricer,
+        "/v1/responses",
+        "gpt-6.2-sol",
+        "ultrafast",
+        false,
+    )
+    .await;
+    let row = usage.rows().expect("rows").pop().expect("row");
+    assert_eq!(row.tier_sent, "ultrafast");
+    assert_list_price(&row);
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn d224_cross_protocol_stream_bills_the_served_default() {
+    let dir = TempDir::new().expect("tempdir");
+    let host = TestHost::open(PluginId::from_static("openai"), dir.path());
+    let upstream = hofund_plugin_registry::openai_compat(
+        OpenAiProtocol::Responses,
+        public_endpoint(),
+        host.context(),
+    )
+    .expect("responses upstream");
+    let (snapshot, _table) = open_calling(
+        "openai-responses",
+        "openai",
+        None,
+        upstream,
+        &["gpt-6.2-sol"],
+    );
+    let (usage, pricer) = priced(&dir);
+    host.http().enqueue(SERVED_DEFAULT.as_bytes());
+    ask(
+        &snapshot,
+        &usage,
+        &pricer,
+        "/v1/chat/completions",
+        "gpt-6.2-sol",
+        "ultrafast",
+    )
+    .await;
+    let row = usage.rows().expect("rows").pop().expect("row");
+    assert_eq!(row.tier_sent, "ultrafast");
+    assert_list_price(&row);
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn d224_openai_chat_unary_bills_the_served_default() {
+    let dir = TempDir::new().expect("tempdir");
+    let host = TestHost::open(PluginId::from_static("openai"), dir.path());
+    let upstream = hofund_plugin_registry::openai_compat(
+        OpenAiProtocol::Chat,
+        public_endpoint(),
+        host.context(),
+    )
+    .expect("chat upstream");
+    let (snapshot, _table) =
+        open_calling("openai-chat", "openai", None, upstream, &["gpt-6.2-sol"]);
+    let (usage, pricer) = priced(&dir);
+    host.http().enqueue(CHAT_UNARY_SERVED_DEFAULT.as_bytes());
+    send_tier(
+        &snapshot,
+        &usage,
+        &pricer,
+        "/v1/chat/completions",
+        "gpt-6.2-sol",
+        "ultrafast",
+        false,
+    )
+    .await;
+    let row = usage.rows().expect("rows").pop().expect("row");
+    assert_eq!(row.tier_sent, "priority");
+    assert_list_price(&row);
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn d224_openai_responses_stream_bills_the_served_default() {
+    let dir = TempDir::new().expect("tempdir");
+    let host = TestHost::open(PluginId::from_static("openai"), dir.path());
+    let upstream = hofund_plugin_registry::openai_compat(
+        OpenAiProtocol::Responses,
+        public_endpoint(),
+        host.context(),
+    )
+    .expect("responses upstream");
+    let (snapshot, _table) = open_calling(
+        "openai-responses",
+        "openai",
+        None,
+        upstream,
+        &["gpt-6.2-sol"],
+    );
+    let (usage, pricer) = priced(&dir);
+    host.http().enqueue(SERVED_DEFAULT.as_bytes());
+    ask(
+        &snapshot,
+        &usage,
+        &pricer,
+        "/v1/responses",
+        "gpt-6.2-sol",
+        "ultrafast",
+    )
+    .await;
+    let row = usage.rows().expect("rows").pop().expect("row");
+    assert_eq!(row.tier_sent, "ultrafast");
+    assert_list_price(&row);
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn d224_cross_protocol_unary_bills_the_served_default() {
+    let dir = TempDir::new().expect("tempdir");
+    let host = TestHost::open(PluginId::from_static("openai"), dir.path());
+    let upstream = hofund_plugin_registry::openai_compat(
+        OpenAiProtocol::Responses,
+        public_endpoint(),
+        host.context(),
+    )
+    .expect("responses upstream");
+    let (snapshot, _table) = open_calling(
+        "openai-responses",
+        "openai",
+        None,
+        upstream,
+        &["gpt-6.2-sol"],
+    );
+    let (usage, pricer) = priced(&dir);
+    host.http().enqueue(UNARY_SERVED_DEFAULT.as_bytes());
+    send_tier(
+        &snapshot,
+        &usage,
+        &pricer,
+        "/v1/chat/completions",
+        "gpt-6.2-sol",
+        "ultrafast",
+        false,
+    )
+    .await;
+    let row = usage.rows().expect("rows").pop().expect("row");
+    assert_eq!(row.tier_sent, "ultrafast");
+    assert_list_price(&row);
+}
+
+#[tokio::test]
+async fn d224_chatgpt_api_stream_bills_the_served_default() {
+    let dir = TempDir::new().expect("tempdir");
+    let host = TestHost::open(PluginId::from_static("chatgpt-api"), dir.path());
+    let subscription = hofund_plugin_subscription_chatgpt_api::factory_with_endpoints(
+        hofund_plugin_subscription_chatgpt_api::Endpoints::default(),
+    )
+    .build(
+        &hofund_plugin_subscription_chatgpt_api::ChatgptApiConfig,
+        host.context(),
+    )
+    .expect("subscription");
+    let account = AccountId::from_static("a-0000000000000001");
+    let upstream = subscription
+        .upstream(&account, host.context())
+        .expect("upstream");
+    let member = MemberId::from_parts(PluginId::from_static("chatgpt-api"), account.clone());
+    let (snapshot, _table) = open_calling(
+        "subscription",
+        "chatgpt-api",
+        Some(member),
+        upstream,
+        &["gpt-6.2-sol"],
+    );
+    let accounts = host.context().accounts();
+    let row = accounts
+        .account(account, "me@example.test")
+        .expect("account");
+    accounts
+        .upsert(
+            row,
+            SecretObject::new()
+                .with_secret("access_token", &SecretString::from("token".to_owned()))
+                .with_number("expires_at", 4_000_000_000)
+                .to_secret(),
+        )
+        .await
+        .expect("stored sign-in");
+    let (usage, pricer) = priced(&dir);
+    host.http().enqueue(SERVED_DEFAULT.as_bytes());
+    ask(
+        &snapshot,
+        &usage,
+        &pricer,
+        "/v1/responses",
+        "gpt-6.2-sol",
+        "ultrafast",
+    )
+    .await;
+    let row = usage.rows().expect("rows").pop().expect("row");
+    assert_eq!(row.tier_sent, "ultrafast");
+    assert_list_price(&row);
 }

@@ -56,6 +56,7 @@ mod control_settings;
 mod credits_modes;
 #[cfg(test)]
 mod d224_service_tiers;
+#[cfg(test)]
 mod d226_import;
 mod events;
 mod log_tail;

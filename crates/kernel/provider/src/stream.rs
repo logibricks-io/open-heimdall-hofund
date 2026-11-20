@@ -89,7 +89,7 @@ impl SseEvents {
                 if matches!(event, StreamEvent::Unknown(_)) {
                     continue;
                 }
-                event.strip_extensions();
+                hofund_codec::service_tier::retain_served_tier(event);
             }
             return Some(item);
         }
@@ -251,7 +251,8 @@ pub(crate) fn message_from(bytes: &[u8]) -> String {
 mod tests {
     use bytes::Bytes;
     use futures_util::{StreamExt, stream};
-    use hofund_codec::{AnthropicMessages, Codec};
+    use hofund_codec::service_tier::extension_tier;
+    use hofund_codec::{AnthropicMessages, Codec, OpenAiResponses};
     use hofund_ir::StreamEvent;
 
     use super::SseEvents;
@@ -269,6 +270,27 @@ mod tests {
     fn events(bytes: Vec<u8>) -> SseEvents {
         let incoming = stream::iter(vec![Ok::<Bytes, ReqwestError>(Bytes::from(bytes))]);
         SseEvents::new(incoming, AnthropicMessages.stream_decoder(), true)
+    }
+
+    #[tokio::test]
+    async fn d224_legacy_stream_keeps_the_served_tier() {
+        let bytes = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-6.2-sol\",\"service_tier\":\"ultrafast\"}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"service_tier\":\"default\"}}\n\n",
+        );
+        let incoming = stream::iter(vec![Ok::<Bytes, ReqwestError>(Bytes::from(bytes))]);
+        let events = SseEvents::new(incoming, OpenAiResponses.stream_decoder(), true);
+        let events: Vec<_> = events.collect().await;
+        let tiers: Vec<String> = events
+            .iter()
+            .filter_map(|event| event.as_ref().ok())
+            .filter_map(StreamEvent::extensions)
+            .map(extension_tier)
+            .filter(|tier| !tier.is_empty())
+            .collect();
+        assert_eq!(tiers, ["ultrafast", "default"]);
     }
 
     #[tokio::test]

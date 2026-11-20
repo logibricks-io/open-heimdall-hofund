@@ -29,7 +29,10 @@ read that attempt base. When the hop also records the codec its plugin
 speaks, the public Responses rule uses that codec even if the member label
 is `subscription`. The plugin wire path keeps `service_tier` on a Chat or
 Responses target after a cross-protocol strip, then adjusts the encoded body
-for that base and codec. A Responses stream copies a top-level `service_tier`, or
+for that base and codec. A served `service_tier` is kept when a stream is
+folded, a unary body is decoded across protocols, or a cross-protocol stream
+is read. The word on `response.completed` replaces the word on
+`response.created`. A Responses stream copies a top-level `service_tier`, or
 `response.service_tier` on `response.created` and `response.completed`, onto
 the start and delta events.
 

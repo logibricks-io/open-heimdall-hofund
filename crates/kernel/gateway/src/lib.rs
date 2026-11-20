@@ -3737,14 +3737,8 @@ fn note_served_word(tier: &str, meta: &mut UsageMeta) {
 }
 
 fn note_usage(event: &StreamEvent, record: &mut RecordOnEnd) {
-    match event {
-        StreamEvent::MessageStart(start) => {
-            note_served_tier(&start.extensions, &mut record.meta);
-        }
-        StreamEvent::MessageDelta(delta) => {
-            note_served_tier(&delta.extensions, &mut record.meta);
-        }
-        _ => {}
+    if let Some(extensions) = event.extensions() {
+        note_served_tier(extensions, &mut record.meta);
     }
     let saw_reasoning = matches!(event, StreamEvent::ThinkingDelta(_))
         || matches!(

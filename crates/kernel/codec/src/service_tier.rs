@@ -4,7 +4,7 @@
 //! family of GPT Sol, Astra, and Terra models. The public OpenAI API accepts
 //! `ultrafast` only on Responses, and only for a short list of those models.
 
-use hofund_ir::{Extensions, Request};
+use hofund_ir::{Extensions, Request, Response, StreamEvent};
 use serde_json::{Map, Value};
 
 /// Service tiers a Codex catalog names when a model offers Ultrafast.
@@ -197,6 +197,74 @@ pub fn extension_tier(extensions: &Extensions) -> String {
         .to_owned()
 }
 
+/// Drops every extension on `event` except a served `service_tier`.
+pub fn retain_served_tier(event: &mut StreamEvent) {
+    let tier = event
+        .extensions()
+        .map(extension_tier)
+        .filter(|tier| !tier.is_empty());
+    event.strip_extensions();
+    let Some(tier) = tier else {
+        return;
+    };
+    let Some(slot) = event_extensions_mut(event) else {
+        return;
+    };
+    slot.insert("service_tier", Value::String(tier));
+}
+
+/// Drops every extension on `response` except a served `service_tier`.
+pub fn retain_response_tier(response: &mut Response) {
+    let tier = extension_tier(&response.extensions);
+    response.strip_extensions();
+    if tier.is_empty() {
+        return;
+    }
+    response
+        .extensions
+        .insert("service_tier", Value::String(tier));
+}
+
+/// Writes the last served `service_tier` in `events` onto `response`.
+///
+/// [`hofund_ir::assemble`] keeps the first extension, so a
+/// `response.created` word would hide the word on `response.completed`.
+pub fn stamp_last_served_tier(events: &[StreamEvent], response: &mut Response) {
+    let mut last = String::new();
+    for event in events {
+        let Some(extensions) = event.extensions() else {
+            continue;
+        };
+        let tier = extension_tier(extensions);
+        if !tier.is_empty() {
+            last = tier;
+        }
+    }
+    if last.is_empty() {
+        return;
+    }
+    response
+        .extensions
+        .insert("service_tier", Value::String(last));
+}
+
+fn event_extensions_mut(event: &mut StreamEvent) -> Option<&mut Extensions> {
+    Some(match event {
+        StreamEvent::MessageStart(event) => &mut event.extensions,
+        StreamEvent::ContentBlockStart(event) => &mut event.extensions,
+        StreamEvent::TextDelta(event) => &mut event.extensions,
+        StreamEvent::ThinkingDelta(event) => &mut event.extensions,
+        StreamEvent::SignatureDelta(event) => &mut event.extensions,
+        StreamEvent::ToolArgumentsDelta(event) => &mut event.extensions,
+        StreamEvent::ContentBlockStop(event) => &mut event.extensions,
+        StreamEvent::MessageDelta(event) => &mut event.extensions,
+        StreamEvent::MessageStop(event) => &mut event.extensions,
+        StreamEvent::Ping(event) => &mut event.extensions,
+        StreamEvent::StillWorking(event) => &mut event.extensions,
+        StreamEvent::Unknown(_) => return None,
+    })
+}
+
 /// Rewrites `ultrafast` inside an encoded JSON object when the host requires it.
 ///
 /// A body that is not a JSON object is returned unchanged.
@@ -315,11 +383,62 @@ fn host_of(base_url: &str) -> &str {
 mod tests {
     use super::{
         adjust_encoded_body, apply_outbound, chatgpt_backend, clear_placeholder_served,
-        comparable_model, configured_tier, downgrade_openai_ultrafast, offered_tier_ids,
-        offers_ultra_family, openai_responses_ultrafast, rewrite_fast_word, spoken_protocol,
+        comparable_model, configured_tier, downgrade_openai_ultrafast, extension_tier,
+        offered_tier_ids, offers_ultra_family, openai_responses_ultrafast, retain_response_tier,
+        retain_served_tier, rewrite_fast_word, spoken_protocol, stamp_last_served_tier,
     };
-    use hofund_ir::Request;
+    use hofund_ir::{
+        Extensions, Message, MessageDelta, MessageStart, Request, Response, Role, StreamEvent,
+    };
     use serde_json::{Map, Value};
+
+    #[test]
+    fn d224_completed_served_tier_replaces_the_created_word() {
+        let mut created = StreamEvent::MessageStart(MessageStart {
+            id: None,
+            model: None,
+            usage: None,
+            extensions: Extensions::new(),
+        });
+        if let StreamEvent::MessageStart(start) = &mut created {
+            start
+                .extensions
+                .insert("service_tier", Value::String("ultrafast".to_owned()));
+        }
+        retain_served_tier(&mut created);
+        let mut completed = StreamEvent::MessageDelta(MessageDelta {
+            stop: None,
+            usage: None,
+            extensions: Extensions::new(),
+        });
+        if let StreamEvent::MessageDelta(delta) = &mut completed {
+            delta
+                .extensions
+                .insert("service_tier", Value::String("default".to_owned()));
+            delta.extensions.insert("other", Value::from(1));
+        }
+        retain_served_tier(&mut completed);
+        let events = [created, completed];
+        let mut response = hofund_ir::assemble(&events);
+        assert_eq!(extension_tier(&response.extensions), "ultrafast");
+        stamp_last_served_tier(&events, &mut response);
+        assert_eq!(extension_tier(&response.extensions), "default");
+        if let StreamEvent::MessageDelta(delta) = &events[1] {
+            assert!(delta.extensions.get("other").is_none());
+        }
+    }
+
+    #[test]
+    fn d224_unary_response_keeps_only_the_served_tier() {
+        let mut response = Response::new(Message::new(Role::Assistant));
+        response
+            .extensions
+            .insert("service_tier", Value::String("default".to_owned()));
+        response.extensions.insert("other", Value::from(1));
+        retain_response_tier(&mut response);
+        assert_eq!(extension_tier(&response.extensions), "default");
+        assert!(response.extensions.get("other").is_none());
+    }
 
     #[test]
     fn d224_spoken_protocol_wins_over_the_member_label() {

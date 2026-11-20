@@ -644,7 +644,8 @@ impl Sent<'_> {
             )
             .await;
         }
-        // Cross-protocol only. Extensions are stripped on the way back.
+        // Cross-protocol only. Extensions are stripped on the way back,
+        // except a served `service_tier`.
         if self.streaming {
             let events = SseEvents::new(
                 self.response.bytes_stream(),
@@ -663,7 +664,7 @@ impl Sent<'_> {
                 .codec
                 .decode_response(&bytes)
                 .map_err(|error| ProviderError::decode(error.to_string()))?;
-            decoded.strip_extensions();
+            hofund_codec::service_tier::retain_response_tier(&mut decoded);
             Ok(Completion::Unary(Box::new(decoded)))
         }
     }
