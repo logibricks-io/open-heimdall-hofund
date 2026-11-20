@@ -1,8 +1,9 @@
 //! Image caps learned from a Copilot refusal.
 //!
 //! A Gemini model counts every image in the conversation. Past its cap it
-//! answers 400 with "too many images: maximum allowed for model <id> is
-//! <cap>, got <n>". The cap is remembered per account and model, from that
+//! answers 400 with
+//! `too many images: maximum allowed for model <id> is <cap>, got <n>`.
+//! The cap is remembered per account and model, from that
 //! refusal. The model list's image limit is not used.
 //!
 //! The oldest images outside the latest user message are replaced with one
