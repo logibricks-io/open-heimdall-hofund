@@ -15,6 +15,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - D-226: Using a Claude setup-token account writes `CLAUDE_CODE_OAUTH_TOKEN` into Claude Code's `settings.json` `env`, records only a hash of that value, and leaves a value it did not write in place. Switching to a signed-in account or removing the setup-token account takes the recorded value out. A pasted setup-token line in the Claude import is stored as a setup-token account. The settings file is mode `0600` and written atomically. The token is not logged. Other subscriptions return unsupported for that paste and make no token request; when Claude is not configured, import fails without sending the token. Automatic switching does not select a setup-token account. An explicit Use still writes the env token. Clearing it leaves the hash record in place when the home or the value is not the one recorded. A mixed paste stores the setup-token account and then reports the first other line, because import returns one result.
+- D-228: A Messages body whose `tool_use` and `tool_result` blocks do not pair is
+  mended before it is sent to a Messages upstream. An unanswered call gets a
+  synthetic error result, a result with no call becomes the text it said, a
+  second answer is dropped, and a result after other content moves first. A
+  body that already pairs keeps its bytes.
+- D-236: That same mend moves blocks an assistant wrote after its first
+  `tool_use` to before the call (thinking stays, empty text is dropped), moves
+  a system or developer message that sits between a call and its results to
+  after the results, and keeps two calls that share an id as two ids, each
+  answered. Passthrough, `count_tokens`, and translated Messages builds use
+  this one pass. A body that is already in shape is not serialized again.
 - D-232: GPT-6.2 and later send Codex instructions, the client's instructions,
   and a translated system prompt as leading `developer` input items, with no
   top-level `instructions`. Older models stay unchanged. This applies to the
