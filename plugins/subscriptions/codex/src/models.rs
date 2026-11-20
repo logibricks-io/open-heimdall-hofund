@@ -10,9 +10,10 @@ use hofund_plugin_api::{AccountId, HostContext, ModelList, ModelSpec, PluginErro
 use hofund_plugin_sdk::json::{self, Value};
 use hofund_plugin_sdk::oauth::new_state;
 
+use crate::Endpoints;
 use crate::tokens::Access;
 use crate::upstream::account_call;
-use crate::{CODEX_VERSION, Endpoints};
+use crate::version::{self, ClientVersion};
 
 /// The file in the plugin's cache directory that keeps instructions by model.
 pub(crate) const PROMPTS_FILE: &str = "codex-prompts.json";
@@ -36,6 +37,8 @@ struct Kept {
     by_model: HashMap<String, String>,
     /// When each account's list was last asked for a missing model.
     asked: HashMap<AccountId, Duration>,
+    /// The client version that ask used. An older one is asked again.
+    asked_as: HashMap<AccountId, String>,
 }
 
 impl Prompts {
@@ -88,14 +91,24 @@ impl Prompts {
 
     /// Says `account`'s list may be asked for a missing model now, and
     /// notes that it was.
-    pub(crate) fn may_ask(&self, account: &AccountId, now: Duration) -> bool {
+    ///
+    /// A list asked at an older client version than `version` is due again
+    /// even inside [`ASK_AGAIN`]: the backend omits models the older client
+    /// was not allowed to see.
+    pub(crate) fn may_ask(&self, account: &AccountId, now: Duration, version: &str) -> bool {
         let mut kept = self.lock();
+        let same_version = kept
+            .asked_as
+            .get(account)
+            .is_some_and(|asked| !version::is_newer(version, asked));
         if let Some(at) = kept.asked.get(account)
+            && same_version
             && now.saturating_sub(*at) < ASK_AGAIN
         {
             return false;
         }
         kept.asked.insert(account.clone(), now);
+        kept.asked_as.insert(account.clone(), version.to_owned());
         true
     }
 }
@@ -149,8 +162,8 @@ pub(crate) fn prompts(body: &[u8]) -> HashMap<String, String> {
 }
 
 /// The `/codex/models` URL for the Codex version the plugin names.
-pub(crate) fn list_url(endpoints: &Endpoints) -> String {
-    format!("{}/models?client_version={CODEX_VERSION}", endpoints.base)
+pub(crate) fn list_url(endpoints: &Endpoints, version: &str) -> String {
+    format!("{}/models?client_version={version}", endpoints.base)
 }
 
 /// Reads the account's model list, keeping the instructions it carries.
@@ -159,9 +172,11 @@ pub(crate) async fn list(
     endpoints: &Endpoints,
     access: &Access,
     prompts: &Prompts,
+    versions: &ClientVersion,
 ) -> Result<ModelList, PluginError> {
-    let url = list_url(endpoints);
-    let call = account_call(url.clone(), access);
+    let client_version = version::prepare(host, endpoints, versions).await;
+    let url = list_url(endpoints, &client_version);
+    let call = account_call(url.clone(), access, &client_version);
     let reply = call.fetch(host.http()).await?;
     match reply.status() {
         200 => {}
