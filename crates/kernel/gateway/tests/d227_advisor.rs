@@ -22,6 +22,9 @@ struct Fake {
     hits: Arc<Mutex<Vec<String>>>,
     advisor_cache_read: u64,
     hold: Option<Arc<Hold>>,
+    speak: &'static str,
+    /// A unary usage whose input already includes cache reads, and no iterations.
+    plain: bool,
 }
 
 struct Hold {
@@ -40,7 +43,7 @@ impl Member for Fake {
     }
 
     fn protocol(&self) -> &str {
-        "subscription"
+        self.speak
     }
 
     async fn execute(
@@ -63,19 +66,29 @@ impl Member for Fake {
             text: "look there".to_owned(),
             extensions: hofund_ir::Extensions::new(),
         })];
-        let response = Response::new(message).with_usage(Some(Usage {
-            input_tokens: Some(1760),
-            output_tokens: Some(531),
-            cache_read_tokens: Some(412),
-            advisor_calls: vec![AdvisorCall {
-                model: "reviewer-5-5".to_owned(),
-                input_tokens: 823,
-                output_tokens: 1612,
-                cache_read_tokens: self.advisor_cache_read,
-                ..AdvisorCall::default()
-            }],
-            ..Usage::default()
-        }));
+        let usage = if self.plain {
+            Usage {
+                input_tokens: Some(100),
+                output_tokens: Some(8),
+                cache_read_tokens: Some(40),
+                ..Usage::default()
+            }
+        } else {
+            Usage {
+                input_tokens: Some(1760),
+                output_tokens: Some(531),
+                cache_read_tokens: Some(412),
+                advisor_calls: vec![AdvisorCall {
+                    model: "reviewer-5-5".to_owned(),
+                    input_tokens: 823,
+                    output_tokens: 1612,
+                    cache_read_tokens: self.advisor_cache_read,
+                    ..AdvisorCall::default()
+                }],
+                ..Usage::default()
+            }
+        };
+        let response = Response::new(message).with_usage(Some(usage));
         Ok(Completion::Unary(Box::new(response)))
     }
 }
@@ -129,6 +142,16 @@ fn fixture() -> Fixture {
 }
 
 fn fixture_with(advisor_cache_read: u64, hold: Option<Arc<Hold>>) -> Fixture {
+    fixture_member(advisor_cache_read, hold, "subscription", false, false)
+}
+
+fn fixture_member(
+    advisor_cache_read: u64,
+    hold: Option<Arc<Hold>>,
+    speak: &'static str,
+    plain: bool,
+    price_route: bool,
+) -> Fixture {
     let dir = tempfile::tempdir().expect("dir");
     let store = Arc::new(KeyStore::beside_token(dir.path().join("hofund.token")));
     store.list().expect("migration");
@@ -142,6 +165,8 @@ fn fixture_with(advisor_cache_read: u64, hold: Option<Arc<Hold>>) -> Fixture {
         hits: Arc::clone(&hits),
         advisor_cache_read,
         hold,
+        speak,
+        plain,
     });
     let routes = BTreeMap::from([
         (
@@ -162,6 +187,11 @@ fn fixture_with(advisor_cache_read: u64, hold: Option<Arc<Hold>>) -> Fixture {
     settings
         .prices
         .insert("*/reviewer-5.5".into(), price(10.0, 20.0));
+    if price_route {
+        settings
+            .prices
+            .insert("*/relay/reviewer-5.5".into(), price(10.0, 20.0));
+    }
     let pricer = Arc::new(EffectivePricer::new(settings, catalog, Arc::new(List)));
     let token = store.token_file().read().expect("token");
     let gateway = Gateway::new(
@@ -241,7 +271,10 @@ async fn d227_advisor_ask_keeps_the_callers_model_list() {
         models: vec!["relay/worker-5.5".into()],
         ..CallerStamp::default()
     };
-    assert!(!fixture.ask.serves(&held, "relay/reviewer-5.5"));
+    assert!(
+        fixture.ask.serves(&held, "relay/reviewer-5.5"),
+        "a model this gateway routes stays offered"
+    );
     let mut request = ModelRequest::new("relay/reviewer-5.5");
     request.messages = vec![Message::new(Role::User)];
     let error = match fixture.ask.ask(&held, request).await {
@@ -337,4 +370,28 @@ async fn d227_advisor_ask_holds_a_prompt_estimate() {
     assert_eq!(error.status(), Some(429));
     let _ = release_tx.send(());
     assert!(first.await.expect("join").is_ok());
+}
+
+#[tokio::test]
+async fn d227_nested_ask_records_usage_with_the_hop_protocol() {
+    let speak = hofund_plugin_api::ProtocolId::OPENAI_CHAT.as_str();
+    let fixture = fixture_member(0, None, speak, true, true);
+    let caller = CallerStamp {
+        key_id: "open".into(),
+        ..CallerStamp::default()
+    };
+    let mut request = ModelRequest::new("relay/reviewer-5.5");
+    request.messages = vec![Message::new(Role::User)];
+    fixture.ask.ask(&caller, request).await.expect("ask");
+    let rows = fixture.usage.rows().expect("rows");
+    let row = rows
+        .iter()
+        .find(|row| row.kind.is_empty())
+        .expect("nested row");
+    assert_eq!(row.input_tokens, Some(100));
+    assert_eq!(row.cache_read_tokens, Some(40));
+    assert_eq!(row.output_tokens, Some(8));
+    let cost = row.cost_usd.expect("priced");
+    let expected = (60.0 * 10.0 + 40.0 * 4.0 + 8.0 * 20.0) / 1_000_000.0;
+    assert!((cost - expected).abs() < 1e-9, "{cost} != {expected}");
 }

@@ -60,31 +60,37 @@ pub fn trim_marks(model: &str) -> &str {
 
 /// The served model `raw` names, with the provider's own spelling.
 ///
-/// An id that is served as written wins. A dashed Claude version matches the
-/// one served id whose dotted form dashes to it. Two such ids match neither.
+/// An id that is served as written wins when every such entry is the same
+/// route and provider. A dashed Claude version matches the served entries
+/// whose dotted form dashes to it. Two entries on different routes or
+/// providers match neither, including the same bare id listed twice.
 #[must_use]
 pub fn advisor_wire(raw: &str, served: &[ServedModel]) -> Option<AdvisorWire> {
     let model = trim_marks(raw);
     if model.is_empty() {
         return None;
     }
-    if let Some(found) = served.iter().find(|entry| entry.id == model) {
-        return Some(wire_of(found));
+    let exact: Vec<&ServedModel> = served.iter().filter(|entry| entry.id == model).collect();
+    if !exact.is_empty() {
+        return agreed(&exact);
     }
     if !dashedish(model) {
         return None;
     }
-    let mut found: Option<&ServedModel> = None;
-    for entry in served {
-        if !dash_claude_versions(&entry.id).eq_ignore_ascii_case(model) {
-            continue;
-        }
-        if found.is_some_and(|previous| previous.id != entry.id) {
-            return None;
-        }
-        found = Some(entry);
-    }
-    found.map(wire_of)
+    let dashed: Vec<&ServedModel> = served
+        .iter()
+        .filter(|entry| dash_claude_versions(&entry.id).eq_ignore_ascii_case(model))
+        .collect();
+    agreed(&dashed)
+}
+
+/// One wire when every entry is the same route and provider.
+fn agreed(entries: &[&ServedModel]) -> Option<AdvisorWire> {
+    let first = *entries.first()?;
+    let same = entries
+        .iter()
+        .all(|entry| entry.route == first.route && entry.provider == first.provider);
+    same.then(|| wire_of(first))
 }
 
 fn wire_of(entry: &ServedModel) -> AdvisorWire {
@@ -468,6 +474,29 @@ mod tests {
             },
         ];
         assert!(advisor_wire("relay/claude-fable-5-2", &served).is_none());
+    }
+
+    #[test]
+    fn d227_same_bare_id_on_two_providers_matches_neither() {
+        let bare = |provider: &str| ServedModel {
+            id: "claude-opus-5.5".to_owned(),
+            route: format!("{provider}/claude-opus-5.5"),
+            bare: "claude-opus-5.5".to_owned(),
+            wire: "claude-opus-5.5".to_owned(),
+            provider: provider.to_owned(),
+        };
+        let served = vec![bare("alpha"), bare("beta")];
+        assert!(advisor_wire("claude-opus-5-5", &served).is_none());
+        assert!(advisor_wire("claude-opus-5.5", &served).is_none());
+        let one = vec![bare("alpha"), bare("alpha")];
+        let wire = advisor_wire("claude-opus-5-5", &one).expect("one provider");
+        assert_eq!(wire.route, "alpha/claude-opus-5.5");
+        assert_eq!(wire.provider, "alpha");
+        let mut spelled = bare("alpha");
+        spelled.id = spelled.route.clone();
+        let mixed = vec![spelled, bare("beta")];
+        let exact = advisor_wire("alpha/claude-opus-5.5", &mixed).expect("exact route");
+        assert_eq!(exact.provider, "alpha");
     }
 
     #[test]

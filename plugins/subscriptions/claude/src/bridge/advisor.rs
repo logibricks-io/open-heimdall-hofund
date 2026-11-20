@@ -399,6 +399,8 @@ mod tests {
 
     struct Gate {
         serves: bool,
+        /// When set, `ask` refuses with 403 and does not record a provider hit.
+        refuse: bool,
         seen: Mutex<Vec<(CallerStamp, Request)>>,
     }
 
@@ -413,6 +415,9 @@ mod tests {
             caller: &CallerStamp,
             request: Request,
         ) -> Result<Completion, PluginError> {
+            if self.refuse {
+                return Err(PluginError::status_error(403, "model not allowed"));
+            }
             self.seen
                 .lock()
                 .expect("seen")
@@ -461,6 +466,7 @@ mod tests {
     fn d227_served_advisor_keeps_instructions_and_offers_the_tool() {
         let ask = AskHandle::from_backend(Arc::new(Gate {
             serves: true,
+            refuse: false,
             seen: Mutex::new(Vec::new()),
         }));
         let mut request = instructed();
@@ -482,9 +488,50 @@ mod tests {
     }
 
     #[test]
+    fn d227_caller_list_does_not_drop_a_served_advisor() {
+        let gate = Arc::new(Gate {
+            serves: true,
+            refuse: true,
+            seen: Mutex::new(Vec::new()),
+        });
+        let ask = AskHandle::from_backend(Arc::clone(&gate) as Arc<dyn AskBackend>);
+        let mut request = instructed();
+        request.caller = Some(CallerStamp {
+            key_id: "held".to_owned(),
+            models: vec!["claude-sonnet".to_owned()],
+            ..CallerStamp::default()
+        });
+        let model = prepare(&mut request, &ask).expect("the gateway serves the model");
+        assert_eq!(model, "relay/claude-opus-5-5");
+        assert!(request.tools.iter().any(|tool| tool.name == "advisor"));
+        let text = match &request.messages[0].content[0] {
+            hofund_plugin_api::ContentPart::Text(text) => text.text.as_str(),
+            _ => "",
+        };
+        assert!(text.contains(NOTE));
+        assert!(!text.contains("no longer available"));
+
+        let bridge = Bridge::new();
+        bridge.use_ask(ask);
+        let run = bridge.park_run(
+            AccountId::from_static("a-00000000000000aa"),
+            vec!["advisor".into()],
+        );
+        bridge.begin_reply(run, &request, Some(model));
+        let handler = bridge.callback_handler(run, request);
+        let body = json!({"tool_call_id":"toolu_1","name":"advisor","arguments":{}}).to_string();
+        let reply = block_on(handler.handle(bytes::Bytes::from(body)));
+        let text = String::from_utf8(reply.body().to_vec()).expect("utf8");
+        assert!(text.contains("unavailable"), "{text}");
+        assert!(!text.contains("check the boundary"), "{text}");
+        assert!(gate.seen.lock().expect("seen").is_empty());
+    }
+
+    #[test]
     fn d227_unserved_advisor_is_left_out() {
         let ask = AskHandle::from_backend(Arc::new(Gate {
             serves: false,
+            refuse: false,
             seen: Mutex::new(Vec::new()),
         }));
         let mut request = instructed();
@@ -502,6 +549,7 @@ mod tests {
     fn d227_advisor_callback_uses_the_caller_and_stops_at_three() {
         let gate = Arc::new(Gate {
             serves: true,
+            refuse: false,
             seen: Mutex::new(Vec::new()),
         });
         let bridge = Bridge::new();
@@ -541,6 +589,7 @@ mod tests {
     fn d227_each_reply_resets_uses_said_caller_and_conversation() {
         let gate = Arc::new(Gate {
             serves: true,
+            refuse: false,
             seen: Mutex::new(Vec::new()),
         });
         let bridge = Bridge::new();
@@ -599,6 +648,7 @@ mod tests {
     fn d227_unarmed_advisor_name_stays_a_client_tool() {
         let ask = AskHandle::from_backend(Arc::new(Gate {
             serves: true,
+            refuse: false,
             seen: Mutex::new(Vec::new()),
         }));
         let mut request = instructed();

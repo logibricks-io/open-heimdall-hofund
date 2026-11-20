@@ -1776,6 +1776,10 @@ impl DispatchState {
                             .unwrap_or("stand-in");
                         trace.set_moved(&answered.upstream_model, why);
                     }
+                    let protocol = self.resolved.hops[answered.index]
+                        .member
+                        .protocol()
+                        .to_owned();
                     if has_continuation {
                         if let Some(trace) = self.trace.as_mut() {
                             trace.sync_open();
@@ -1785,6 +1789,7 @@ impl DispatchState {
                             upstream_id: answered.upstream_id,
                             provider_key_id: answered.provider_key_id,
                             upstream_model: answered.upstream_model,
+                            protocol,
                             completion: answered.completion,
                             affinity_reason,
                             continuation: Some(continuation),
@@ -1805,6 +1810,7 @@ impl DispatchState {
                         upstream_id: answered.upstream_id,
                         provider_key_id: answered.provider_key_id,
                         upstream_model: answered.upstream_model,
+                        protocol,
                         completion: answered.completion,
                         affinity_reason,
                         continuation: None,
@@ -2261,6 +2267,9 @@ pub struct Routed {
     /// Model name sent to that provider. The gateway compares it with the
     /// name the client asked for before touching a raw body.
     pub upstream_model: String,
+    /// Codec id the answering member speaks. Usage recording uses it to tell
+    /// an input total that already includes cache reads from one that does not.
+    pub protocol: String,
     /// Why conversation affinity kept or released the previous answerer.
     pub affinity_reason: Option<String>,
     /// The completion. A stream has produced its first content event, a raw

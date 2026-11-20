@@ -31,15 +31,14 @@ struct GatewayAsk {
 
 #[async_trait]
 impl AskBackend for GatewayAsk {
-    fn serves(&self, caller: &CallerStamp, model: &str) -> bool {
+    fn serves(&self, _caller: &CallerStamp, model: &str) -> bool {
         let Some(app) = self.app.upgrade() else {
             return false;
         };
         let router = app.snapshot.load();
-        let Some(wire) = hofund_codec::advisor_wire(model, &router.served_models()) else {
-            return false;
-        };
-        router.admits(&wire.route, Some(&route_scope(&identity_from(caller))))
+        // Serving means this gateway routes the model. The caller's list,
+        // accounts, and spend limit are enforced when `ask` dispatches.
+        hofund_codec::advisor_wire(model, &router.served_models()).is_some()
     }
 
     async fn ask(
@@ -94,15 +93,16 @@ impl AskBackend for GatewayAsk {
             Ok(Err(error)) => return Err(plugin_error(&error, &identity)),
             Ok(Ok(routed)) => routed,
         };
-        let upstream = routed.upstream_id.clone();
-        let served = routed.upstream_model.clone();
+        let hop = AnsweredHop {
+            upstream: routed.upstream_id.clone(),
+            served: routed.upstream_model.clone(),
+            protocol: routed.protocol.clone(),
+        };
         let (text, usage) = take_text(routed.completion).await;
         if text.is_empty() {
             return Err(PluginError::status_error(502, "the advisor said nothing"));
         }
-        record(
-            &app, &request, &identity, &upstream, &served, &usage, started,
-        );
+        record(&app, &request, &identity, &hop, &usage, started);
         let mut message = Message::new(Role::Assistant);
         message.content = vec![ContentPart::Text(hofund_ir::TextPart {
             text: text.clone(),
@@ -176,25 +176,30 @@ fn text_of(parts: &[ContentPart]) -> String {
     text
 }
 
+struct AnsweredHop {
+    upstream: String,
+    served: String,
+    protocol: String,
+}
+
 fn record(
     app: &Inner,
     request: &ModelRequest,
     identity: &Identity,
-    upstream: &str,
-    served: &str,
+    hop: &AnsweredHop,
     usage: &Usage,
     started: Instant,
 ) {
     let mut meta = UsageMeta::new(
         request,
-        upstream,
+        &hop.upstream,
         &request.model,
         started,
         identity,
         "advisor",
     );
-    meta.served_model = served.to_owned();
-    crate::limits::observe_usage(&mut meta, usage, "", false);
+    meta.served_model = hop.served.clone();
+    crate::limits::observe_usage(&mut meta, usage, &hop.protocol, false);
     write_usage(
         &app.usage,
         &meta,
