@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- D-234 follow-up: A restricted rest is never armed for a background model-list probe, and a probe cannot lift it, so the two-hour rest stands. Unserved-model wording does not narrow that rest to one model. Protection wording on a restricted account does not skip that provider's other keys. A token-count failure passes the response headers to the target classifier.
 - D-229: A Copilot turn refused with "too many images" learns that model's cap, replaces the oldest images outside the latest user message with a placeholder, and sends the turn once more. Later turns for that account and model are fitted before they are sent. A turn already within the cap is unchanged. When the latest user message alone is over the cap, the refusal is returned unchanged. The cap comes from the refusal, not from the model list.
 - D-234: A Claude subscription account, or an Anthropic API key whose upstream is
   `api.anthropic.com`, that the vendor has turned off rests for two hours and

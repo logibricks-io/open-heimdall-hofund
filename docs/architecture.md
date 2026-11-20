@@ -459,8 +459,10 @@ Other subscription accounts stay at 30 minutes. Named credit resets cap at 35
 days, generic/rate/quota header hints cap at one hour, and passive window resets
 cap at eight days. New events never shorten a longer active rest. A vendor-restricted account,
 signaled by a plugin flag rather than by words in the router, rests the whole
-member for two hours and does not climb a ladder. The group still asks the
-next member, including that provider's other accounts. A 400 carries that
+member for two hours and does not climb a ladder. Unserved-model wording does
+not narrow that rest, and a background model-list probe neither arms nor lifts
+it. The group still asks the next member, including that provider's other
+accounts. A 400 carries that
 flag only when the plugin that knows the account set it. The same sentences
 from any other host are a separate ordinary-failure mark: the group moves on
 and the member takes the generic failure rest.
@@ -517,7 +519,9 @@ the next member is asked. The order is fixed:
    sentences itself.
 4. A response-protection refusal skips every member of the same provider, and
    a request-shape refusal asks the next member, whatever the status list
-   says. Neither rests the member, nor does a refusal of the prompt.
+   says. Neither rests the member, nor does a refusal of the prompt. A
+   plugin-marked account restriction does not skip the provider, even when
+   the text also matches the protection words.
 5. A 400, 413, 422, or 5xx with no clear cause, on a member whose known window
    is below the estimated input times 1.2, is told to the client as a prompt
    too long, and the overflow rule above applies.

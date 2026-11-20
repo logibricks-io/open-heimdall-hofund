@@ -12,7 +12,7 @@
 //! | Windowed-account credit refusal | Uses a named body or header reset, the latest full-window reset, a retry hint longer than 5 hours, then 5 hours, capped at 35 days. A renewed window lifts a rest whose deadline was not vendor-named; a vendor-timed rest lifts only when a matching window's reset elapsed or moved to a later cycle. Failed and empty readings lift nothing. Other subscription accounts stay flat at 30 minutes. |
 //! | Passive observation | Zero remaining uses the window reset capped at 8 days, the retry hint capped at 1 hour, or 15 minutes without either. Positive remaining at least 98% used with a known positive limit rests only for a positive window reset capped at 8 days. Accounts spending credits and all other observations record nothing. Observations do not advance either failure ladder. |
 //! | Contained panic | Uses the generic failure ladder with [`CooldownCause::Panic`]. |
-//! | Vendor account restriction | Rests the whole member for 2 hours, flat, and does not climb a ladder or count a generic failure. A plugin sets the mark when it knows the account. The next member, including that provider's other accounts, is still asked. |
+//! | Vendor account restriction | Rests the whole member for 2 hours, flat, and does not climb a ladder or count a generic failure. Unserved-model wording does not narrow it. A background model-list probe is not armed and cannot lift the rest. A plugin sets the mark when it knows the account. The next member, including that provider's other accounts, is still asked. |
 //! | Ordinary failure mark | A plugin may mark a status the group should leave, including a 400, as an ordinary failure. It takes the generic failure ladder and is not a restricted rest. |
 //!
 //! Cancelled, unsupported, configuration, internal, unknown future, and other
@@ -585,7 +585,10 @@ impl Cooldowns {
             }
             failure = Failure::Generic(CooldownCause::Failure);
         }
+        // Restricted stays member-wide. `&&` binds tighter than `||`, so the
+        // failure-kind guard has to cover `model_unserved` as well.
         let model_only = model.is_some()
+            && !matches!(failure, Failure::Restricted)
             && (matches!(
                 failure,
                 Failure::RateLimit | Failure::Quota | Failure::Credit
@@ -601,8 +604,10 @@ impl Cooldowns {
             return Some(applied);
         }
         let key = CooldownKey::new(id, model_only.then_some(model).flatten());
-        let background_probe =
-            key.model.is_none() && id.subscription().is_none() && probe_error(error);
+        let background_probe = !matches!(failure, Failure::Restricted)
+            && key.model.is_none()
+            && id.subscription().is_none()
+            && probe_error(error);
         let credit = credit_context(&book, id, now);
         let revision = next_revision(&mut book);
         if matches!(failure, Failure::Quota | Failure::Credit) {
@@ -674,16 +679,18 @@ impl Cooldowns {
     ///
     /// A later rest with another deadline wins. This is not a real request
     /// success, so it starts the 30-minute miss guard instead of clearing it.
+    /// A restricted rest is never lifted.
     pub fn lift_probe(&self, id: &MemberId, until: Instant) -> bool {
         let now = (self.clock)();
         let mut book = self.lock();
         self.maintain_locked(&mut book, now);
         let key = CooldownKey::new(id, None);
         let matches = book.states.get(&key).is_some_and(|state| {
-            state
-                .cooling
-                .as_ref()
-                .is_some_and(|cooling| cooling.until == until && cooling.background_probe)
+            state.cooling.as_ref().is_some_and(|cooling| {
+                cooling.until == until
+                    && cooling.background_probe
+                    && !matches!(cooling.cause, CooldownCause::Restricted)
+            })
         });
         if !matches {
             return false;

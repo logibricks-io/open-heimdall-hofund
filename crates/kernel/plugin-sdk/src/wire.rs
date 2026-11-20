@@ -801,7 +801,8 @@ pub async fn count_input(
         .open_raw(http, ATTEMPTS)
         .await?;
     let status = response.status().as_u16();
-    let retry_after = parse_retry_after_headers(response.headers(), std::time::SystemTime::now());
+    let headers = response.headers().clone();
+    let retry_after = parse_retry_after_headers(&headers, std::time::SystemTime::now());
     let success = response.status().is_success();
     let mut bytes = Vec::new();
     while let Some(chunk) = response.body_mut().next_chunk().await {
@@ -817,7 +818,7 @@ pub async fn count_input(
     }
     classify_count(status, retry_after, &bytes, field).map_err(|error| {
         match target.classify.as_ref() {
-            Some(classify) => classify(status, &http::HeaderMap::new(), &bytes, error),
+            Some(classify) => classify(status, &headers, &bytes, error),
             None => error,
         }
     })

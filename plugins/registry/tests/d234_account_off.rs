@@ -5,10 +5,12 @@
 //! from a relay is an ordinary failure.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use hofund_kit_upstream::TestHost;
-use hofund_plugin_api::{PluginId, ProtocolId, Request, UpstreamProvider};
+use hofund_plugin_api::{PluginId, ProtocolId, Request, SecretString, UpstreamProvider};
 use hofund_plugin_registry::anthropic;
+use hofund_plugin_sdk::wire::{self, Target};
 use hofund_provider::Endpoint;
 
 const ORG: &str = r#"{"type":"error","error":{"type":"invalid_request_error","message":"This organization has been disabled."}}"#;
@@ -227,4 +229,37 @@ async fn d234_unary_200_error_body_follows_the_host() {
         assert_eq!(error.status(), Some(400), "{base}");
         assert!(host.http().calls()[0].uri().starts_with(base), "{base}");
     }
+}
+
+#[tokio::test]
+async fn d234_count_failure_classify_sees_response_headers() {
+    let (_root, host) = scripted();
+    host.http().enqueue_response(
+        403,
+        &[("content-type", "application/json"), ("x-d234-mark", "1")],
+        br#"{"error":{"message":"no"}}"#,
+    );
+    let saw = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&saw);
+    let target = Target::new(ProtocolId::ANTHROPIC_MESSAGES, "https://api.anthropic.com")
+        .classify_status(Arc::new(move |status, headers, body, error| {
+            assert_eq!(status, 403);
+            assert!(!body.is_empty());
+            flag.store(headers.get("x-d234-mark").is_some(), Ordering::SeqCst);
+            error
+        }));
+    let secret = SecretString::from("test-key".to_owned());
+    let Err(error) = wire::count_input(
+        host.context().http(),
+        &target,
+        Some(&secret),
+        request(false),
+        ProtocolId::ANTHROPIC_MESSAGES,
+    )
+    .await
+    else {
+        panic!("count should fail");
+    };
+    assert_eq!(error.status(), Some(403));
+    assert!(saw.load(Ordering::SeqCst));
 }
