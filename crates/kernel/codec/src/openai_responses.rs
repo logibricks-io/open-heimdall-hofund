@@ -1876,6 +1876,7 @@ fn decode_usage(mut object: Object) -> Result<Usage, CodecError> {
         cache_write_5m_tokens,
         cache_write_1h_tokens,
         reasoning_tokens,
+        advisor_calls: Vec::new(),
         extensions: Extensions::from_map(object),
     })
 }

@@ -82,6 +82,7 @@ fn r54f_build_qoder_cn_subscription_entry() {
         Some(0),
         &registry,
         None,
+        None,
     )
     .expect("build qoder-cn");
     let state = built.get("qoder-cn").expect("qoder-cn state");
@@ -100,6 +101,7 @@ async fn r54f_qoder_hop_expands_global_accounts_only() {
         &dir.path().join("hofund.toml"),
         Some(0),
         &registry,
+        None,
         None,
     )
     .expect("subscriptions");
@@ -135,6 +137,7 @@ async fn r54f_qoder_cn_hop_expands_china_accounts_only() {
         Some(0),
         &registry,
         None,
+        None,
     )
     .expect("subscriptions");
     subs.get("qoder-cn")
@@ -168,6 +171,7 @@ async fn r54f_route_expansion_uses_routing_label_on_member_ids() {
         &dir.path().join("hofund.toml"),
         Some(0),
         &registry,
+        None,
         None,
     )
     .expect("subscriptions");

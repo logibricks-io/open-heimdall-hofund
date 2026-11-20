@@ -1398,6 +1398,7 @@ fn usage_from(
         cache_write_5m_tokens: None,
         cache_write_1h_tokens: None,
         reasoning_tokens,
+        advisor_calls: Vec::new(),
         extensions: combine_extensions(details, object),
     })
 }
