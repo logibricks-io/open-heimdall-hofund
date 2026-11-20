@@ -135,8 +135,11 @@ api_key = "replace-me-too"
 # api_key = "env:AZURE_OPENAI_API_KEY"
 
 # Routing defaults to smart. order, rotate, usage, pace, weight, free, fast,
-# and cheap are also implemented. cheap is valid only on a multi-upstream,
-# subscription, or nested group. Weights are integers of at least 1; omitted
+# cheap, drain, and fit are also implemented. cheap and fit are valid only on
+# a multi-upstream, subscription, or nested group. fit is small context first:
+# Smart's order, then the smallest known context window. small-first and
+# small-context-first are names for fit. Weights are integers
+# of at least 1; omitted
 # and 1 are the default. Provider free = true marks every model free; cached
 # catalog free flags and all-zero prices are used otherwise and re-read on
 # each free-routed request. Account weights go in

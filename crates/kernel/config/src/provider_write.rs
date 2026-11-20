@@ -2,7 +2,7 @@
 
 use toml_edit::{Array, DocumentMut, Formatted, InlineTable, Item, Table, Value, value};
 
-use crate::{ConfigError, load, parse_fallback, provider_id_valid};
+use crate::{ConfigError, canonical_routing, load, parse_fallback, provider_id_valid};
 
 const FORBIDDEN_OPTION_KEYS: &[&str] = &["id", "preset", "api_key", "protocol", "base_url"];
 
@@ -256,14 +256,16 @@ fn normalize_invalid_routing(document: &mut DocumentMut) -> Result<(), ConfigErr
         return Ok(());
     };
     for route in routes.iter_mut() {
-        let routing = route
-            .get("routing")
-            .and_then(Item::as_str)
-            .unwrap_or("smart");
-        if routing != "cheap" {
+        let routing = canonical_routing(
+            route
+                .get("routing")
+                .and_then(Item::as_str)
+                .unwrap_or("smart"),
+        );
+        if !matches!(routing, "cheap" | "fit") {
             continue;
         }
-        if route_is_cheap_group(route) {
+        if route_is_group(route) {
             continue;
         }
         route.insert("routing", value("smart"));
@@ -271,7 +273,7 @@ fn normalize_invalid_routing(document: &mut DocumentMut) -> Result<(), ConfigErr
     Ok(())
 }
 
-fn route_is_cheap_group(route: &Table) -> bool {
+fn route_is_group(route: &Table) -> bool {
     let Some(upstreams) = route.get("upstreams").and_then(Item::as_array) else {
         return false;
     };
@@ -460,5 +462,47 @@ upstreams = [{ provider = \"a\" }, { provider = \"b\" }]\n";
             .find(|route| route.model == "group/pair")
             .expect("group route");
         assert_eq!(group.routing, "smart");
+    }
+
+    #[test]
+    fn d239_provider_delete_demotes_fit_when_one_member_remains() {
+        let text = "\
+[[providers]]\nid = \"a\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1/v1\"\napi_key = \"k\"\n\
+[[providers]]\nid = \"b\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1/v1\"\napi_key = \"k\"\n\
+[[routes]]\nmodel = \"group/pair\"\nrouting = \"fit\"\n\
+upstreams = [{ provider = \"a\" }, { provider = \"b\" }]\n";
+        let edited = edit_provider_delete(text, "b").expect("delete");
+        load(&edited).expect("edited config loads");
+        let config = load(&edited).expect("reload");
+        let group = config
+            .routes
+            .iter()
+            .find(|route| route.model == "group/pair")
+            .expect("group route");
+        assert_eq!(group.routing, "smart");
+    }
+
+    #[test]
+    fn d239_provider_delete_demotes_fit_aliases_when_one_member_remains() {
+        for name in ["small-first", "small-context-first"] {
+            let text = format!(
+                "[[providers]]\nid = \"a\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1/v1\"\napi_key = \"k\"\n\
+[[providers]]\nid = \"b\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1/v1\"\napi_key = \"k\"\n\
+[[routes]]\nmodel = \"group/pair\"\nrouting = \"{name}\"\n\
+upstreams = [{{ provider = \"a\" }}, {{ provider = \"b\" }}]\n"
+            );
+            let edited = edit_provider_delete(&text, "b").expect("delete");
+            let config = load(&edited).expect("edited config loads");
+            let group = config
+                .routes
+                .iter()
+                .find(|route| route.model == "group/pair")
+                .expect("group route");
+            assert_eq!(group.routing, "smart", "{name}");
+            assert!(
+                edited.contains("routing = \"smart\"") || edited.contains("routing = 'smart'"),
+                "{name} stayed on disk: {edited}"
+            );
+        }
     }
 }
