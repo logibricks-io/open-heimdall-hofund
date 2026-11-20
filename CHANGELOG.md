@@ -10,9 +10,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - D-224: an inbound Chat or Responses `service_tier` of `fast` is sent upstream as `priority`. Ultrafast is offered for GPT Sol, Astra, and Terra models. Responses to `api.openai.com` send `ultrafast` only for the models that host accepts; Chat Completions to that host send `priority` instead. Usage prices Fast and `priority` at 2x, Ultrafast at 6x, and Flex at 0.5x. GPT-6.2 Astra and Sol Ultrafast is 3x through 2027-02-28 Pacific and 6x from 2027-03-01, using the call's day. `/v1/models` and the written Codex catalog list Ultrafast where the route or a group member supports it. A member sent Ultrafast is labelled Ultrafast.
+### Changed
+- D-221: Antigravity sign-in, import, and add are refused for new accounts because Google suspends accounts it sees on Code Assist through Antigravity's own client. Saved accounts keep working and show a risk line. The message points at the agy CLI route. Gemini CLI is unchanged.
+- D-225: Generative Language and Vertex model paths escape each slash-separated segment and keep the slashes. An id with an empty, `.`, or `..` segment is escaped as one segment.
 
 ### Fixed
 
+- D-232: GPT-6.2 and later send Codex instructions, the client's instructions,
+  and a translated system prompt as leading `developer` input items, with no
+  top-level `instructions`. Older models stay unchanged. This applies to the
+  Codex subscription, the ChatGPT API subscription, and translated Chat and
+  Anthropic Responses encodes. When Codex's instructions are unknown or blank,
+  the client's text still moves to the front of `input` on those models.
+- D-223: A Codex Responses Lite turn (an `additional_tools` input item, or
+  `reasoning.context` of `all_turns`, and no client instructions) is sent
+  without added instructions and without `reasoning.summary`. A Lite turn on
+  GPT-6.2 keeps those Lite rules. A socket replay removes `x-codex-turn-state`
+  from `client_metadata` once it is a header, and that socket keeps the last
+  reply's state for the same turn id. A per-account store for pooled turns is
+  not implemented.
+- D-231: ChatGPT model-list asks, the `version` header, the User-Agent, and
+  device sign-in name the newest plain `x.y.z` among a `0.169.1` floor, npm's
+  latest `@openai/codex` release (read at most every six hours on the host
+  monotonic clock), and a newer
+  Codex client already seen on a routed request. A model list asked at an
+  older client version is fetched again. Refs the reference.
 - D-233: Claude bridge plans set `CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS=0` and `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT=0` unless the process environment already sets that name, and a WSL plan lists both on `WSLENV`, so a client tool is waited on instead of being moved to the background or aborted at the idle limit. One-off runs are unchanged.
 
 ## [0.2.0-rc.2] - 2026-11-18

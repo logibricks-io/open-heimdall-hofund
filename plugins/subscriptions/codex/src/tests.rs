@@ -19,6 +19,7 @@ use hofund_plugin_sdk::oauth::{Pkce, SecretObject, account_id_from, same_secret}
 
 use crate::tokens::{self, Need};
 use crate::upstream::{self, CodexUpstream};
+use crate::version::{self, ClientVersion};
 use crate::{Endpoints, factory_with_endpoints, sign_in};
 use crate::{device_sign_in, models, shape};
 use hofund_plugin_sdk::json::{self, Value, json};
@@ -34,6 +35,7 @@ fn endpoints() -> Endpoints {
         device_issuer: "https://auth.test".to_owned(),
         base: BASE.to_owned(),
         port: None,
+        npm_latest: None,
     }
 }
 
@@ -566,6 +568,7 @@ fn upstream_for(host: &TestHost, id: &AccountId) -> CodexUpstream {
         host.context().clone(),
         Arc::new(endpoints()),
         Arc::default(),
+        Arc::default(),
     )
 }
 
@@ -854,7 +857,8 @@ fn expired_words_match_like_codex() {
 
 #[test]
 fn headers_carry_account_id_and_originator() {
-    let headers = upstream::headers(Some("acct-1"));
+    let floor = version::CODEX_VERSION_FLOOR;
+    let headers = upstream::headers(Some("acct-1"), floor);
     let get = |name: &str| {
         headers
             .iter()
@@ -864,26 +868,29 @@ fn headers_carry_account_id_and_originator() {
     assert_eq!(get("chatgpt-account-id"), Some("acct-1"));
     assert_eq!(get("originator"), Some("codex_cli_rs"));
     assert_eq!(get("OpenAI-Beta"), Some("responses=experimental"));
-    assert_eq!(get("version"), Some(crate::CODEX_VERSION));
+    assert_eq!(get("version"), Some(floor));
     assert_eq!(get("Accept"), Some("text/event-stream"));
-    assert!(get("User-Agent").is_some_and(|agent| agent.starts_with("codex_cli_rs/0.159.0 (")));
     assert!(
-        upstream::user_agent("linux", "x86_64")
-            .starts_with("codex_cli_rs/0.159.0 (Linux; x86_64) ")
+        get("User-Agent")
+            .is_some_and(|agent| agent.starts_with(&format!("codex_cli_rs/{floor} (")))
     );
     assert!(
-        upstream::headers(Some(""))
+        upstream::user_agent("linux", "x86_64", floor)
+            .starts_with(&format!("codex_cli_rs/{floor} (Linux; x86_64) "))
+    );
+    assert!(
+        upstream::headers(Some(""), floor)
             .iter()
             .all(|(key, _)| key != "chatgpt-account-id")
     );
     assert!(
-        upstream::headers(None)
+        upstream::headers(None, floor)
             .iter()
             .all(|(key, _)| key != "chatgpt-account-id")
     );
     assert!(
-        upstream::user_agent("macos", "aarch64")
-            .starts_with("codex_cli_rs/0.159.0 (Mac OS; arm64) ")
+        upstream::user_agent("macos", "aarch64", floor)
+            .starts_with(&format!("codex_cli_rs/{floor} (Mac OS; arm64) "))
     );
 
     let dir = tempfile::tempdir().expect("dir");
@@ -1205,6 +1212,232 @@ fn instructions_ride_first_unless_they_are_codex() {
     assert_eq!(out["input"].as_array().map(Vec::len), Some(1));
 }
 
+fn developer_text(item: &Value) -> &str {
+    item["content"][0]["text"].as_str().unwrap_or("")
+}
+
+#[test]
+fn d232_gpt_6_2_puts_instructions_first_in_input() {
+    let codex = "You are Codex, based on GPT-6.2.\nMore.";
+    let user = json!([{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}]);
+    let cases = [
+        (
+            "gpt-6.2-sol",
+            Some("You are Pi."),
+            vec![codex, "You are Pi."],
+        ),
+        ("gpt-6.2-sol", Some(codex), vec![codex]),
+        ("gpt-6.10", None::<&str>, vec![codex]),
+        ("gpt-7", Some("You are Pi."), vec![codex, "You are Pi."]),
+        (
+            "openai/gpt-6.2-sol",
+            Some("You are Pi."),
+            vec![codex, "You are Pi."],
+        ),
+    ];
+    for (model, own, want) in cases {
+        let mut body = json!({"model": model, "input": user.clone()});
+        if let Some(own) = own {
+            body["instructions"] = json!(own);
+        }
+        let (out, _) = shaped(body, Some(codex));
+        assert!(
+            out.get("instructions").is_none(),
+            "{model}: instructions stayed on top: {out}"
+        );
+        let input = out["input"].as_array().expect("input");
+        assert_eq!(input.len(), want.len() + 1, "{model}: {out}");
+        for (index, text) in want.iter().enumerate() {
+            assert_eq!(
+                input[index]["role"],
+                json!("developer"),
+                "{model} [{index}]"
+            );
+            assert_eq!(input[index]["type"], json!("message"), "{model} [{index}]");
+            assert_eq!(developer_text(&input[index]), *text, "{model} [{index}]");
+        }
+        assert_eq!(input[want.len()]["role"], json!("user"), "{model}");
+    }
+
+    for model in ["gpt-6.1", "gpt-6.1-sol", "gpt-5.5", "gpt-6-sol", "o3"] {
+        let (out, _) = shaped(
+            json!({"model": model, "instructions": "You are Pi.", "input": user.clone()}),
+            Some(codex),
+        );
+        assert_eq!(out["instructions"], json!(codex), "{model}");
+        assert_eq!(out["input"].as_array().map(Vec::len), Some(2), "{model}");
+        assert_eq!(developer_text(&out["input"][0]), "You are Pi.", "{model}");
+        assert_eq!(out["input"][1]["role"], json!("user"), "{model}");
+    }
+
+    let (out, _) = shaped(
+        json!({"model": "gpt-6.2", "reasoning": {"effort": "high"}, "input": "hi"}),
+        Some(codex),
+    );
+    assert!(out.get("instructions").is_none());
+    assert_eq!(out["reasoning"]["summary"], json!("auto"));
+    assert_eq!(developer_text(&out["input"][0]), codex);
+}
+
+#[test]
+fn d223_lite_omits_instructions_and_summary() {
+    let tools = json!({
+        "model": "gpt-6-astra",
+        "reasoning": {"effort": "high"},
+        "input": [
+            {"type": "additional_tools", "tools": [{"type": "function", "name": "exec_command"}]},
+            {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "You are Codex, a coding agent."}]},
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}
+        ]
+    });
+    let (out, _) = shaped(tools, Some(CODEX_PROMPT));
+    assert!(out.get("instructions").is_none(), "{out}");
+    assert!(out["reasoning"].get("summary").is_none(), "{out}");
+    assert_eq!(out["input"].as_array().map(Vec::len), Some(3));
+
+    let turns = json!({
+        "model": "gpt-6-astra",
+        "reasoning": {"effort": "high", "context": "all_turns"},
+        "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
+    });
+    let (out, _) = shaped(turns, Some(CODEX_PROMPT));
+    assert!(out.get("instructions").is_none(), "{out}");
+    assert!(out["reasoning"].get("summary").is_none(), "{out}");
+    assert!(out["include"].as_array().is_some_and(|include| {
+        include
+            .iter()
+            .any(|entry| entry == "reasoning.encrypted_content")
+    }));
+
+    let (out, _) = shaped(
+        json!({"model": "gpt-6-astra", "reasoning": {"effort": "high"}, "input": "hi"}),
+        Some(CODEX_PROMPT),
+    );
+    assert_eq!(out["instructions"], json!(CODEX_PROMPT));
+    assert_eq!(out["reasoning"]["summary"], json!("auto"));
+
+    let codex = "You are Codex, based on GPT-6.2.\nMore.";
+    let (out, _) = shaped(
+        json!({
+            "model": "gpt-6.2-sol",
+            "reasoning": {"effort": "high", "context": "all_turns"},
+            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
+        }),
+        Some(codex),
+    );
+    assert!(out.get("instructions").is_none(), "{out}");
+    assert!(out["reasoning"].get("summary").is_none(), "{out}");
+    assert_eq!(out["input"].as_array().map(Vec::len), Some(1));
+    assert_eq!(out["input"][0]["role"], json!("user"));
+
+    let (out, _) = shaped(
+        json!({
+            "model": "gpt-6-astra",
+            "instructions": "Be a pirate.",
+            "reasoning": {"effort": "high"},
+            "input": [
+                {"type": "additional_tools", "tools": [{"type": "function", "name": "exec"}]},
+                {"type": "message", "role": "user", "content": "hi"}
+            ]
+        }),
+        Some(CODEX_PROMPT),
+    );
+    assert_eq!(out["instructions"], json!(CODEX_PROMPT));
+    assert_eq!(out["reasoning"]["summary"], json!("auto"));
+    assert_eq!(out["input"][0]["role"], json!("developer"));
+    assert_eq!(developer_text(&out["input"][0]), "Be a pirate.");
+}
+
+#[test]
+fn d223_lite_keeps_a_client_summary() {
+    let (out, _) = shaped(
+        json!({
+            "model": "gpt-6-astra",
+            "reasoning": {"effort": "high", "summary": "detailed", "context": "all_turns"},
+            "input": "hi"
+        }),
+        Some(CODEX_PROMPT),
+    );
+    assert!(out.get("instructions").is_none(), "{out}");
+    assert_eq!(out["reasoning"]["summary"], json!("detailed"));
+}
+
+#[test]
+fn d223_lite_whitespace_instructions_stay_bare() {
+    let (out, _) = shaped(
+        json!({
+            "model": "gpt-6.2-sol",
+            "instructions": " \n",
+            "reasoning": {"effort": "high"},
+            "input": [
+                {"type": "additional_tools", "tools": []},
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}
+            ]
+        }),
+        Some(CODEX_PROMPT),
+    );
+    assert_eq!(out["instructions"], json!(" \n"));
+    assert!(out["reasoning"].get("summary").is_none(), "{out}");
+    assert_eq!(out["input"].as_array().map(Vec::len), Some(2));
+    assert_eq!(out["input"][0]["type"], json!("additional_tools"));
+}
+
+#[test]
+fn d232_unknown_or_blank_codex_prompt_moves_client_instructions() {
+    let user = json!([{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}]);
+    for codex in [None, Some(""), Some("  ")] {
+        let (out, _) = shaped(
+            json!({"model": "gpt-6.2-sol", "instructions": "You are Pi.", "input": user.clone()}),
+            codex,
+        );
+        assert!(out.get("instructions").is_none(), "{codex:?}: {out}");
+        assert_eq!(out["input"].as_array().map(Vec::len), Some(2), "{out}");
+        assert_eq!(developer_text(&out["input"][0]), "You are Pi.");
+        assert_eq!(out["input"][1]["role"], json!("user"));
+    }
+    let (out, _) = shaped(
+        json!({"model": "gpt-6.1", "instructions": "You are Pi.", "input": user}),
+        None,
+    );
+    assert_eq!(out["instructions"], json!("You are Pi."));
+    assert_eq!(out["input"].as_array().map(Vec::len), Some(1));
+}
+
+#[test]
+fn d232_translated_then_codex_body_orders_developer_messages() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    let codex = "You are Codex, based on GPT-6.2.\nMore.";
+    seed_prompts(&host, &[("gpt-6.2-sol", codex)]);
+    let mut request = ProbeQuery::new(ProtocolId::OPENAI_CHAT, "gpt-6.2-sol")
+        .expect("query")
+        .minimal_request();
+    request.stream = true;
+    request.messages = vec![
+        Message {
+            role: Role::System,
+            content: vec![ContentPart::text("You are Pi.")],
+            extensions: Extensions::new(),
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentPart::text("hi")],
+            extensions: Extensions::new(),
+        },
+    ];
+    host.http()
+        .enqueue(b"event: response.completed\ndata: {}\n\n".to_vec());
+    block_on(upstream_for(&host, &id).execute(request, ProtocolId::OPENAI_CHAT)).expect("execute");
+    let body: Value = json::from_slice(host.http().calls()[0].body()).expect("recorded JSON");
+    assert!(body.get("instructions").is_none(), "{body}");
+    let input = body["input"].as_array().expect("input");
+    assert_eq!(input.len(), 3, "{body}");
+    assert_eq!(developer_text(&input[0]), codex);
+    assert_eq!(developer_text(&input[1]), "You are Pi.");
+    assert_eq!(input[2]["role"], json!("user"));
+}
+
 #[test]
 fn long_call_id_hashed_to_64() {
     let fits = "c".repeat(64);
@@ -1455,7 +1688,7 @@ fn missing_prompt_asks_the_model_list_once() {
     let calls = host.http().calls();
     assert_eq!(
         calls[0].uri(),
-        format!("{BASE}/models?client_version={}", crate::CODEX_VERSION)
+        format!("{BASE}/models?client_version=0.169.1")
     );
     assert!(
         calls[0]
@@ -1540,12 +1773,16 @@ fn a_missing_prompt_is_asked_for_once_per_ten_minutes_per_account() {
     let one = AccountId::from_static("a-0000000000000001");
     let two = AccountId::from_static("a-0000000000000002");
     let at = Duration::from_secs(1_000);
-    assert!(prompts.may_ask(&one, at));
-    assert!(!prompts.may_ask(&one, at));
-    assert!(prompts.may_ask(&two, at));
-    assert!(!prompts.may_ask(&one, at + models::ASK_AGAIN - Duration::from_secs(1)));
-    assert!(prompts.may_ask(&one, at + models::ASK_AGAIN));
-    assert!(!prompts.may_ask(&one, at + models::ASK_AGAIN));
+    let floor = version::CODEX_VERSION_FLOOR;
+    assert!(prompts.may_ask(&one, at, floor));
+    assert!(!prompts.may_ask(&one, at, floor));
+    assert!(prompts.may_ask(&two, at, floor));
+    assert!(!prompts.may_ask(&one, at + models::ASK_AGAIN - Duration::from_secs(1), floor));
+    assert!(prompts.may_ask(&one, at + models::ASK_AGAIN, floor));
+    assert!(!prompts.may_ask(&one, at + models::ASK_AGAIN, floor));
+    assert!(prompts.may_ask(&one, at + models::ASK_AGAIN, "0.200.0"));
+    assert!(!prompts.may_ask(&one, at + models::ASK_AGAIN, "0.200.0"));
+    assert!(!prompts.may_ask(&one, at + models::ASK_AGAIN, floor));
     assert_eq!(models::ASK_AGAIN, Duration::from_secs(600));
 }
 
@@ -1842,6 +2079,7 @@ fn a3a_9_codex_warmup_posts_one_minimal_responses_call() {
     block_on(crate::warmup::run(
         &Arc::new(endpoints()),
         &Arc::new(models::Prompts::default()),
+        &Arc::<ClientVersion>::default(),
         &id,
         host.context(),
     ))
@@ -1901,7 +2139,13 @@ fn d58_1_device_sign_in_polls_then_trades_the_callback_code() {
         start.uri(),
         "https://auth.test/api/accounts/deviceauth/usercode"
     );
-    assert_eq!(start.sensitive_headers(), ["user-agent".to_owned()]);
+    assert!(start.sensitive_headers().is_empty());
+    assert_eq!(start.header("version"), Some("0.169.1"));
+    assert!(
+        start
+            .header("user-agent")
+            .is_some_and(|agent| agent.starts_with("codex_cli_rs/0.169.1 ("))
+    );
 
     host.http().enqueue_response(403, &[], device_forbidden());
     host.http().enqueue_response(403, &[], device_forbidden());
@@ -2370,5 +2614,182 @@ fn r47a_k3_consume_rejected_is_status_error_on_wham_url() {
     assert_eq!(
         post.uri(),
         "https://codex.test/backend-api/wham/rate-limit-reset-credits/consume"
+    );
+}
+
+fn subscription_with(host: &TestHost, endpoints: Endpoints) -> Arc<dyn Subscription> {
+    let factory = factory_with_endpoints(endpoints);
+    let cfg = factory.validate(&RawTable::new()).expect("config");
+    factory.build(&cfg, host.context()).expect("build")
+}
+
+#[test]
+fn headers_user_agent_model_list_and_device_sign_in_carry_the_effective_version() {
+    let version = "0.200.0";
+    let sent = upstream::headers(Some("acct-1"), version);
+    let value = |name: &str| {
+        sent.iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    };
+    let agent = upstream::user_agent(std::env::consts::OS, std::env::consts::ARCH, version);
+    assert_eq!(value("version"), Some(version));
+    assert_eq!(value("User-Agent"), Some(agent.as_str()));
+    assert!(agent.starts_with(&format!("codex_cli_rs/{version} (")));
+
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    let mut endpoints = endpoints();
+    let npm = "https://npm.test/@openai/codex/latest";
+    endpoints.npm_latest = Some(npm.to_owned());
+    let sub = subscription_with(&host, endpoints);
+    host.http()
+        .enqueue(format!(r#"{{"version":"{version}"}}"#).into_bytes());
+    host.http().enqueue(MODELS.to_vec());
+    block_on(sub.list_models(&id, host.context())).expect("list");
+    let calls = host.http().calls();
+    assert_eq!(calls[0].uri(), npm);
+    assert_eq!(
+        calls[1].uri(),
+        format!("{BASE}/models?client_version={version}")
+    );
+
+    host.http().enqueue(device_usercode());
+    block_on(sub.start_sign_in(&device_ctx(), host.context())).expect("device");
+    let start = host
+        .http()
+        .calls()
+        .into_iter()
+        .find(|call| call.uri().ends_with("/deviceauth/usercode"))
+        .expect("user code");
+    let agent = upstream::user_agent(std::env::consts::OS, std::env::consts::ARCH, version);
+    assert_eq!(start.header("version"), Some(version));
+    assert_eq!(start.header("user-agent"), Some(agent.as_str()));
+    assert!(agent.starts_with(&format!("codex_cli_rs/{version} (")));
+}
+
+fn signed_value<'a>(pairs: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    pairs
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
+fn assert_responses_signed(upstream: &CodexUpstream, host: &TestHost) {
+    let version = "0.200.0";
+    let calls = host.http().calls();
+    let sent = calls
+        .iter()
+        .find(|call| call.uri().ends_with("/responses"))
+        .expect("routed responses call");
+    assert!(
+        sent.sensitive_headers()
+            .iter()
+            .any(|name| name == "version")
+    );
+    assert!(
+        sent.sensitive_headers()
+            .iter()
+            .any(|name| name == "user-agent")
+    );
+    let pairs = upstream.signed_headers();
+    assert_eq!(signed_value(&pairs, "version"), Some(version));
+    assert!(
+        signed_value(&pairs, "User-Agent")
+            .is_some_and(|agent| agent.starts_with(&format!("codex_cli_rs/{version} (")))
+    );
+}
+
+#[test]
+fn routed_responses_carry_a_seen_client_version() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    let upstream = upstream_for(&host, &id);
+    host.http()
+        .enqueue(b"event: response.completed\ndata: {}\n\n".to_vec());
+    let mut request = streaming_request();
+    request.extensions.insert(
+        version::CLIENT_HEADERS,
+        json!({
+            "originator": "codex_cli_rs",
+            "version": "0.200.0",
+            "user-agent": "codex_cli_rs/0.200.0 (Linux; x86_64) unknown",
+        }),
+    );
+    block_on(upstream.execute(request, ProtocolId::OPENAI_RESPONSES)).expect("execute");
+    assert_responses_signed(&upstream, &host);
+}
+
+#[test]
+fn routed_responses_carry_an_npm_release() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    let mut endpoints = endpoints();
+    let npm = "https://npm.test/@openai/codex/latest";
+    endpoints.npm_latest = Some(npm.to_owned());
+    let upstream = CodexUpstream::new(
+        id,
+        host.context().clone(),
+        Arc::new(endpoints),
+        Arc::default(),
+        Arc::default(),
+    );
+    host.http().enqueue(br#"{"version":"0.200.0"}"#.to_vec());
+    host.http()
+        .enqueue(b"event: response.completed\ndata: {}\n\n".to_vec());
+    block_on(upstream.execute(streaming_request(), ProtocolId::OPENAI_RESPONSES)).expect("execute");
+    assert_eq!(host.http().calls()[0].uri(), npm);
+    assert_responses_signed(&upstream, &host);
+}
+
+#[test]
+fn stale_model_list_is_fetched_again_when_the_client_version_is_newer() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    std::fs::remove_file(prompts_file(&host)).expect("drop seeded prompts");
+    let upstream = upstream_for(&host, &id);
+    let sse = b"event: response.completed\ndata: {}\n\n".to_vec();
+    host.http().enqueue(MODELS.to_vec());
+    host.http().enqueue(sse.clone());
+    block_on(upstream.execute(streaming_request(), ProtocolId::OPENAI_RESPONSES)).expect("first");
+
+    host.http().enqueue(sse.clone());
+    let mut missing = streaming_request();
+    missing.model = "gpt-unknown".to_owned();
+    block_on(upstream.execute(missing.clone(), ProtocolId::OPENAI_RESPONSES)).expect("throttled");
+
+    host.http().enqueue(MODELS.to_vec());
+    host.http().enqueue(sse);
+    missing.extensions.insert(
+        version::CLIENT_HEADERS,
+        json!({
+            "originator": "codex_cli_rs",
+            "version": "0.200.0",
+            "user-agent": "codex_cli_rs/0.200.0 (Linux; x86_64) unknown",
+        }),
+    );
+    block_on(upstream.execute(missing, ProtocolId::OPENAI_RESPONSES)).expect("refetch");
+
+    let listed: Vec<String> = host
+        .http()
+        .calls()
+        .iter()
+        .filter(|call| call.uri().contains("/models"))
+        .map(|call| call.uri().to_owned())
+        .collect();
+    assert_eq!(
+        listed,
+        vec![
+            format!(
+                "{BASE}/models?client_version={}",
+                version::CODEX_VERSION_FLOOR
+            ),
+            format!("{BASE}/models?client_version=0.200.0"),
+        ],
+        "a list asked at the floor is fetched again at the newer client version"
     );
 }

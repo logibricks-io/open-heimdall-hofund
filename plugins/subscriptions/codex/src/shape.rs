@@ -2,6 +2,10 @@
 //! encoded: it streams only, keeps nothing (so its items carry no ids),
 //! carries Codex's instructions with the client's own first in the input,
 //! and names its conversation in the session headers the backend caches by.
+//! GPT-6.2 and later keep both instruction texts as leading developer input
+//! items and omit top-level `instructions`. A Lite turn already carries its
+//! prompt in `input`, so this layer adds neither instructions nor a default
+//! `reasoning.summary`.
 
 use hofund_plugin_sdk::json::{self, Map, Value};
 use hofund_plugin_sdk::sigv4::payload_hash;
@@ -80,9 +84,19 @@ pub(crate) fn body(body: &mut Map<String, Value>, codex: Option<&str>) -> Vec<(S
         body.insert("prompt_cache_key".to_owned(), Value::String(key));
     }
     // The client's instructions go first as a developer message and Codex's
-    // in their place, unless they are Codex's. Without Codex's, the
-    // client's stay where they are.
-    if let Some(codex) = codex {
+    // in their place, unless they are Codex's. A Lite turn already carries
+    // its prompt in the input and is left without instructions. GPT-6.2 and
+    // later read top-level instructions after the input, so both texts go
+    // first in the input, Codex's ahead of the client's, and the field is
+    // omitted. When Codex's instructions are unknown or blank on those
+    // models, the client's text still moves to the front of the input.
+    let lite = own.trim().is_empty() && codex_lite(body, &input);
+    let after_input = body
+        .get("model")
+        .and_then(Value::as_str)
+        .is_some_and(hofund_plugin_sdk::instructions_after_input);
+    let known = codex.filter(|text| !text.trim().is_empty());
+    if let Some(codex) = known.filter(|_| !lite) {
         let mut instructions = codex.to_owned();
         if !own.trim().is_empty() {
             if first_line(&own) == first_line(codex) {
@@ -91,7 +105,15 @@ pub(crate) fn body(body: &mut Map<String, Value>, codex: Option<&str>) -> Vec<(S
                 input.insert(0, message("developer", &own));
             }
         }
-        body.insert("instructions".to_owned(), Value::String(instructions));
+        if after_input && !instructions.is_empty() {
+            input.insert(0, message("developer", &instructions));
+            body.remove("instructions");
+        } else if !after_input {
+            body.insert("instructions".to_owned(), Value::String(instructions));
+        }
+    } else if after_input && !lite && !own.trim().is_empty() {
+        input.insert(0, message("developer", &own));
+        body.remove("instructions");
     }
     body.insert("input".to_owned(), Value::Array(input));
     body.insert("store".to_owned(), Value::Bool(false));
@@ -102,7 +124,7 @@ pub(crate) fn body(body: &mut Map<String, Value>, codex: Option<&str>) -> Vec<(S
         .or_insert(Value::Bool(true));
     body.entry("text")
         .or_insert_with(|| json::json!({"verbosity": "medium"}));
-    reasoning(body);
+    reasoning(body, lite);
     hofund_plugin_sdk::codex_tool_names::codex_tool_names_object(body);
     session_headers(body)
 }
@@ -117,8 +139,9 @@ fn message(role: &str, text: &str) -> Value {
 }
 
 /// Reasoning and its encrypted content to carry across turns, unless it is
-/// turned off; `ultra` is Codex CLI's name for sending `max`.
-fn reasoning(body: &mut Map<String, Value>) {
+/// turned off; `ultra` is Codex CLI's name for sending `max`. A Lite turn
+/// keeps a summary the client set and does not gain `summary: auto`.
+fn reasoning(body: &mut Map<String, Value>, lite: bool) {
     let mut effort = String::new();
     if let Some(Value::Object(reasoning)) = body.get_mut("reasoning") {
         effort = reasoning
@@ -129,7 +152,7 @@ fn reasoning(body: &mut Map<String, Value>) {
         if effort == "ultra" {
             reasoning.insert("effort".to_owned(), Value::String("max".to_owned()));
         }
-        if effort != "none" {
+        if effort != "none" && !lite {
             reasoning
                 .entry("summary")
                 .or_insert_with(|| Value::String("auto".to_owned()));
@@ -409,6 +432,23 @@ fn canonical(value: &Value, out: &mut String) {
         }
         other => out.push_str(&other.to_string()),
     }
+}
+
+/// A Responses Lite turn: an `additional_tools` input item, or
+/// `reasoning.context` of `all_turns`. The caller also requires the client
+/// to have sent no instructions; Codex already put its prompt in the input.
+fn codex_lite(body: &Map<String, Value>, input: &[Value]) -> bool {
+    if body
+        .get("reasoning")
+        .and_then(|reasoning| reasoning.get("context"))
+        .and_then(Value::as_str)
+        == Some("all_turns")
+    {
+        return true;
+    }
+    input
+        .iter()
+        .any(|item| item.get("type").and_then(Value::as_str) == Some("additional_tools"))
 }
 
 /// The first non-blank line of `text`, trimmed.

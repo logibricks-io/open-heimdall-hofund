@@ -11,6 +11,7 @@ use crate::Endpoints;
 use crate::models::{self, Prompts};
 use crate::tokens::{self, Need};
 use crate::upstream::CodexUpstream;
+use crate::version::ClientVersion;
 
 /// Chooses a model for warm-up from the account's own list.
 pub(crate) fn pick_warmup_model(list: &ModelList) -> Result<String, PluginError> {
@@ -51,17 +52,19 @@ fn cheapest_model(models: &[ModelSpec]) -> Option<&ModelSpec> {
 pub(crate) async fn run(
     endpoints: &Arc<Endpoints>,
     prompts: &Arc<Prompts>,
+    versions: &Arc<ClientVersion>,
     account: &AccountId,
     host: &HostContext,
 ) -> Result<(), PluginError> {
     let access = tokens::access(host, endpoints, account, Need::IfExpiring).await?;
-    let list = models::list(host, endpoints, &access, prompts).await?;
+    let list = models::list(host, endpoints, &access, prompts, versions).await?;
     let model = pick_warmup_model(&list)?;
     let upstream = CodexUpstream::new(
         account.clone(),
         host.clone(),
         Arc::clone(endpoints),
         Arc::clone(prompts),
+        Arc::clone(versions),
     );
     let query = ProbeQuery::new(ProtocolId::OPENAI_RESPONSES, &model)?;
     let request = query.minimal_request();

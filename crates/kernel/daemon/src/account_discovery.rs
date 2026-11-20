@@ -129,6 +129,9 @@ pub(crate) async fn discover_opened(
                 already_stored,
             });
             if import && !already_stored {
+                if let Some(refusal) = entry.instance.account_enrollment().refusal() {
+                    return Err(DaemonError::new(refusal));
+                }
                 let imported = entry
                     .instance
                     .import_agent_sign_in(&home, row.reference(), &entry.host)

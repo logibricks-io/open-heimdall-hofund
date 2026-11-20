@@ -334,12 +334,12 @@ Remaining verification is live-account acceptance; all evidence here is determin
 | i | images | via Responses content parts (gateway codex) | `tests.rs` `r47a_i_*`: Responses `input_image` in upstream POST body | Done | — |
 | j | reasoning / thinking | Codex model instructions / reasoning items in gateway; native compaction items and triggers pass through; content-bearing or unsealed reasoning is dropped before replay; unreadable sealed items removed and the turn retried on 400/404 | `shape.rs` keeps only sealed reasoning without content parts (with ids on sealed replay), restores codec-carried native compaction items, and preserves triggers; `refusal.rs` and `upstream.rs` trim the posted Responses JSON after unreadable-item refusals up to three tries; recorded fixtures `r47c_*` and `r47j_*` | Done | — |
 | k | quota / usage | Headers + `codex.rate_limits` event; `/wham/usage`; credit resets (`codex_resets.go:180+`) | `limits.rs`, `usage.rs` headers, event, `/wham/usage`; `resets.rs` + `Subscription::quota_reset_credits` / `consume_quota_reset` on `/wham/rate-limit-reset-credits` (consume only on explicit calls); tests `r47a_k_*` | Partial | UI cards and daemon CLI for reset consume (R-47 later slice) |
-| l | model list | `codex_models.go` backend list + instructions | `models.rs` `/codex/models`, cached prompts | Done | — |
+| l | model list | `codex_models.go` backend list + instructions | `models.rs` `/codex/models?client_version=` at the effective version (`version.rs`); a list asked at an older version is asked again; cached prompts | Done | — |
 | m | multi-account | Multiple logins; routing in provider | Multiple accounts via daemon subscription members | Done | — |
 | n | error classification | Expired → refresh; spent windows; credits (`codex_credits.go`); gateway remote reset and week/expiring autoreset (`codex_autoreset.go`, `codex_expiring.go`, `codex_resets_used.go`) | `tokens.rs` lapsed; `limits.rs` observe blocking vs credits; `resets.rs` vendor refusal outcomes on HTTP 200 and in-flight `redeem_request_id` reuse for explicit `consume_quota_reset` only (`r47n_*`) | Partial | Automatic consume on 429 or expiring windows, `CodexAutoReset` settings, reset-lead tuning, remote-gateway `POST /v1/.../codex-reset`, and resets-used history cards remain unported by policy |
 | o | daily warmup | `warmup_daily.go` + provider warmup | `lib.rs:372-377` `daily_warmup` → `warmup.rs` | Done | — |
 | p | agent sign-in switch | Writes Codex auth (`codex_switch.go`, store) | `write_agent_sign_in` → `agent_sign_in.rs` | Partial | Keychain mode + lock interaction with live Codex unverified |
-| q | extras | `chatgpt-account-id`, Codex version headers, plan in ID token | `upstream.rs:172+` headers, `CODEX_VERSION`, `sign_in.rs:13` auth claim; zstd on Codex turns (row **e**) | Done | — |
+| q | extras | `chatgpt-account-id`, Codex version headers, plan in ID token | `upstream.rs` headers and User-Agent, `version.rs` effective version (floor `0.169.1`, npm release, seen client), `sign_in.rs` auth claim; zstd on Codex turns (row **e**) | Done | — |
 
 **Gaps**
 
@@ -450,7 +450,7 @@ Remaining verification is live-account acceptance; all evidence here is determin
 | n | error classification | 429 “turned away” prompts (`codeassist.go:51-66`) | `upstream.rs` distinguishes prompt refusal from real quota and returns a non-cooling 400 with the reference hint | Done | — |
 | o | check-in / warmup | N/A | N/A | N/A | — |
 | p | agent sign-in | Antigravity desktop agent separate | Desktop `agent.toml` only; no subscription sign-in switch | Missing | No safe reference writer; switching remains out of scope |
-| q | extras | Ban-risk warning in UI; version manifest URL (`google.go:68`) | Full account-suspension warning prints before CLI sign-in; `version.rs` fetches the manifest through `host.http()` with a six-hour cache, `2.9.1` cold fallback, and `r49e_*` offline fixtures | Done | — |
+| q | extras | Ban-risk warning in UI; version manifest URL (`google.go:68`) | D-221 refuses new sign-in, import, and add. Saved accounts keep working and show a risk line that points at the agy CLI route. Gemini CLI is unchanged. `version.rs` fetches the manifest through `host.http()` with a six-hour cache, `2.9.1` cold fallback, and `r49e_*` offline fixtures | Done | — |
 
 **Gaps**
 

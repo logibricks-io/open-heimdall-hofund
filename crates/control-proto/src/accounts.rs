@@ -49,6 +49,10 @@ pub struct SubscriptionEntry {
     pub flow: SubscriptionFlow,
     /// Stored accounts ordered by label and id.
     pub accounts: Vec<SubscriptionAccount>,
+    /// Risk line when this subscription already has a saved account and new
+    /// enrollment is withdrawn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
 }
 
 /// Subscription list response.

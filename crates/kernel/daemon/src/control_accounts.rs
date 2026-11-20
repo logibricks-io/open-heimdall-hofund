@@ -128,6 +128,7 @@ impl AccountOps {
                         row
                     })
                     .collect();
+                entry.notice = listing.notice;
                 entry
             })
             .collect();
@@ -141,6 +142,9 @@ impl AccountOps {
     ) -> Result<SignInStartResponse, ControlFailure> {
         let opened = self.opened();
         let entry = sign_in::find(&opened, &id).map_err(|_| not_found("subscription"))?;
+        if let Some(message) = entry.instance.account_enrollment().refusal() {
+            return Err(invalid(message));
+        }
         let flow = flow(entry.instance.flow().kind());
         let options = SignInOptions {
             host: request.host,
@@ -364,9 +368,10 @@ impl AccountOps {
     ) -> Result<AccountImportResponse, ControlFailure> {
         let text = std::fs::read_to_string(Path::new(&path))
             .map_err(|_| invalid("the account export could not be read"))?;
-        let imported = agent_login::accounts_import(&self.opened(), &text)
+        let opened = self.opened();
+        let imported = agent_login::accounts_import(&opened, &text)
             .await
-            .map_err(account_failure)?;
+            .map_err(|error| visible_account_failure(&opened, error))?;
         self.runtime.refresh_subscriptions().await;
         let mut response = AccountImportResponse::default();
         response.imported = imported;
@@ -378,14 +383,11 @@ impl AccountOps {
             return Err(invalid("account discovery is disabled for this run"));
         }
         let config = self.runtime.config_updates().borrow().clone();
-        let report = account_discovery::discover_opened(
-            &self.opened(),
-            self.registry.as_ref(),
-            &config,
-            add,
-        )
-        .await
-        .map_err(account_failure)?;
+        let opened = self.opened();
+        let report =
+            account_discovery::discover_opened(&opened, self.registry.as_ref(), &config, add)
+                .await
+                .map_err(|error| visible_account_failure(&opened, error))?;
         if add {
             self.runtime.refresh_subscriptions().await;
         }
@@ -545,4 +547,20 @@ fn invalid(message: &str) -> ControlFailure {
 
 fn account_failure(_error: DaemonError) -> ControlFailure {
     invalid("the account operation failed")
+}
+
+fn visible_account_failure(opened: &[Opened], error: DaemonError) -> ControlFailure {
+    let message = error.to_string();
+    let refused = opened.iter().any(|entry| {
+        entry
+            .instance
+            .account_enrollment()
+            .refusal()
+            .is_some_and(|refusal| refusal == message)
+    });
+    if refused {
+        invalid(&message)
+    } else {
+        account_failure(error)
+    }
 }

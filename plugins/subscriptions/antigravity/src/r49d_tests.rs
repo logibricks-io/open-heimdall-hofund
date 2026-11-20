@@ -39,7 +39,7 @@ fn host(dir: &tempfile::TempDir) -> TestHost {
 }
 
 fn subscription(host: &TestHost) -> std::sync::Arc<dyn hofund_plugin_api::Subscription> {
-    let factory = factory_with_endpoints(endpoints());
+    let factory = factory_with_endpoints(endpoints()).with_new_accounts_for_test();
     let mut raw = RawTable::new();
     raw.insert(client::ID_KEY, RawValue::String(TEST_CLIENT_ID.to_owned()));
     raw.insert(

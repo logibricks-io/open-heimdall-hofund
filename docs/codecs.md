@@ -606,9 +606,20 @@ is masked identically to text sent in the current request.
 `instructions` becomes a leading system message. Encode hoists that message
 back to `instructions` only when the request came from the Responses wire
 (`hofund_responses_wire`). Translated encodes fold every leading system and
-developer message into `instructions`; a system message after an assistant
-turn becomes a user `<system-reminder>` item. Native developer input items
-and Codex-marked developer items stay in `input`.
+developer message into `instructions`, except on GPT-6.2 and later. That is
+`gpt-N.M` with N.M >= 6.2, and `gpt-7` and later, after a provider prefix
+such as `openai/`. Those models read top-level instructions after `input`
+and bill them uncached, so the folded text is the first `input` item, a
+`developer` message, and the request has no `instructions` field (D-232).
+The model id alone decides this, on every host that receives the translated
+body. A system message after an assistant turn becomes a user
+`<system-reminder>` item. Native developer input items and Codex-marked
+developer items stay in `input`. A Responses wire encode keeps top-level
+`instructions`; the Codex and ChatGPT API subscriptions move them for those
+models when they shape the body. A Codex Lite turn (an `additional_tools`
+input item, or `reasoning.context` of `all_turns`, and no client
+instructions) is sent without added instructions and without
+`reasoning.summary` (D-223), including on GPT-6.2.
 
 `input` may be a string (one user text message) or an array. Item types:
 

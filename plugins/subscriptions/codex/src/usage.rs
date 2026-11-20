@@ -9,6 +9,7 @@ use crate::Endpoints;
 use crate::limits::{self, BASIS};
 use crate::tokens::Access;
 use crate::upstream::account_call;
+use crate::version::{self, ClientVersion};
 
 /// The usage page beside the Codex backend: `{base}/wham/usage`, where the
 /// base drops the trailing `/codex`.
@@ -23,8 +24,10 @@ pub(crate) async fn read(
     host: &HostContext,
     endpoints: &Endpoints,
     access: &Access,
+    versions: &ClientVersion,
 ) -> Result<Vec<QuotaWindow>, PluginError> {
-    let reply = account_call(url(endpoints), access)
+    let client_version = version::prepare(host, endpoints, versions).await;
+    let reply = account_call(url(endpoints), access, &client_version)
         .fetch(host.http())
         .await?;
     match reply.status() {

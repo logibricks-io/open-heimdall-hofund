@@ -1113,11 +1113,78 @@ fn encode_wire_request(request: &Request) -> Result<Vec<u8>, CodecError> {
 fn encode_translated_request(request: &Request) -> Result<Vec<u8>, CodecError> {
     let mut object = Object::new();
     object.insert("model".to_owned(), Value::String(request.model.clone()));
-    let (instructions, messages) = fold_translated_messages(&request.messages)?;
+    let (instructions, mut messages) = fold_translated_messages(&request.messages)?;
     if let Some(text) = instructions {
-        object.insert("instructions".to_owned(), Value::String(text));
+        if instructions_after_input(&request.model) {
+            // These models read top-level instructions after `input` and bill
+            // them uncached on every turn. The folded prompt is the first
+            // developer item instead.
+            messages.insert(0, developer_message(&text));
+        } else {
+            object.insert("instructions".to_owned(), Value::String(text));
+        }
     }
     fill_responses_request(request, &mut object, &messages)
+}
+
+/// Whether `model` reads top-level Responses `instructions` after `input`.
+///
+/// GPT-6.2 and later append top-level instructions after the input and bill
+/// those tokens at the uncached input rate. The id is the text after the last
+/// `/`, matched as `gpt-<major>` or `gpt-<major>.<minor>` and then the end or
+/// a `-`, ignoring ASCII case. A missing minor is zero, so `gpt-7` qualifies
+/// and `gpt-6` does not. `gpt-6.1`, `gpt-5`, and any id that is not that
+/// shape keep top-level instructions.
+#[must_use]
+pub fn instructions_after_input(model: &str) -> bool {
+    let Some((major, minor)) = gpt_major_minor(model) else {
+        return false;
+    };
+    major > 6 || major == 6 && minor >= 2
+}
+
+/// `(major, minor)` of a `gpt-N` or `gpt-N.M` id, after the last `/`.
+fn gpt_major_minor(model: &str) -> Option<(i64, i64)> {
+    let model = model.rsplit_once('/').map_or(model, |(_, tail)| tail);
+    let model = model.to_ascii_lowercase();
+    let rest = model.strip_prefix("gpt-")?;
+    let (major_digits, rest) = leading_digits(rest);
+    if major_digits.is_empty() {
+        return None;
+    }
+    let major = parse_version(major_digits);
+    if let Some(rest) = rest.strip_prefix('.') {
+        let (minor_digits, rest) = leading_digits(rest);
+        if minor_digits.is_empty() || !(rest.is_empty() || rest.starts_with('-')) {
+            return None;
+        }
+        Some((major, parse_version(minor_digits)))
+    } else if rest.is_empty() || rest.starts_with('-') {
+        Some((major, 0))
+    } else {
+        None
+    }
+}
+
+fn leading_digits(text: &str) -> (&str, &str) {
+    let end = text
+        .bytes()
+        .position(|byte| !byte.is_ascii_digit())
+        .unwrap_or(text.len());
+    text.split_at(end)
+}
+
+/// Decimal `digits` as an integer. A value that does not fit is zero, so an
+/// absurd id does not qualify as GPT-6.2 or later. The reference parser
+/// clamps that overflow to the maximum integer, which would qualify.
+fn parse_version(digits: &str) -> i64 {
+    digits.parse().unwrap_or(0)
+}
+
+fn developer_message(text: &str) -> Message {
+    let mut message = Message::new(Role::Developer);
+    message.content.push(ContentPart::text(text));
+    message
 }
 
 fn fill_responses_request(
