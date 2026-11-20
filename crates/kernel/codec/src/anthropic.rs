@@ -520,10 +520,12 @@ fn leading_channel(messages: &[Message]) -> usize {
 
 /// Places system and developer messages where a Messages upstream can accept them.
 ///
-/// A Messages client keeps a later system message in `messages`. Any other
-/// request follows the reference's `responseInstructions` and `mergeTurns`:
-/// text before a reply joins the system channel, and text after a reply
-/// becomes a user `<system-reminder>`. `developer` is never left for
+/// A Messages client keeps a later system message in `messages`, and keeps
+/// consecutive user and assistant messages apart so each keeps its members.
+/// A folded developer reminder joins only an adjacent tool-result user.
+/// Any other request follows the reference's `responseInstructions` and
+/// `mergeTurns`: text before a reply joins the system channel, and text after
+/// a reply becomes a user `<system-reminder>`. `developer` is never left for
 /// `encode_messages` to write as that role.
 fn arrange_messages(messages: &[Message], messages_form: bool) -> Vec<Message> {
     if messages_form {
@@ -536,15 +538,30 @@ fn arrange_messages(messages: &[Message], messages_form: bool) -> Vec<Message> {
 fn arrange_messages_client(messages: &[Message]) -> Vec<Message> {
     let lead = leading_channel(messages);
     let mut out = messages[..lead].to_vec();
-    let mut rest = Vec::with_capacity(messages.len() - lead);
+    let mut pending = Vec::new();
     for message in &messages[lead..] {
         if message.role == Role::Developer {
-            rest.push(fold_developer(message));
-        } else {
-            rest.push(message.clone());
+            let folded = fold_developer(message);
+            if folded.role == Role::User {
+                if pending.is_empty() && attach_reminder(&mut out, &folded) {
+                    continue;
+                }
+                pending.push(folded);
+            } else {
+                out.append(&mut pending);
+                out.push(folded);
+            }
+            continue;
         }
+        if is_tool_result_user(message) && !pending.is_empty() {
+            out.push(prepend_reminders(message, &pending));
+            pending.clear();
+            continue;
+        }
+        out.append(&mut pending);
+        out.push(message.clone());
     }
-    out.extend(merge_turns(rest));
+    out.extend(pending);
     out
 }
 
@@ -574,13 +591,52 @@ fn arrange_translated(messages: &[Message]) -> Vec<Message> {
 }
 
 fn fold_developer(message: &Message) -> Message {
-    let text = joined_text(message);
+    let text = joined_parts(message, "\n");
     if text.is_empty() {
         let mut kept = message.clone();
         kept.role = Role::System;
         return kept;
     }
-    reminder_user(&text)
+    let mut reminder = reminder_user(&text);
+    reminder.extensions = message.extensions.clone();
+    reminder
+}
+
+fn is_tool_result_user(message: &Message) -> bool {
+    message.role == Role::User
+        && message
+            .content
+            .iter()
+            .any(|part| matches!(part, ContentPart::ToolResult(_)))
+}
+
+/// Appends a folded reminder to the previous tool-result user.
+fn attach_reminder(out: &mut [Message], reminder: &Message) -> bool {
+    let Some(last) = out.last_mut() else {
+        return false;
+    };
+    if !is_tool_result_user(last) {
+        return false;
+    }
+    last.content.extend(reminder.content.clone());
+    last.extensions.absorb(&reminder.extensions);
+    true
+}
+
+/// Puts folded reminders in front of a tool-result user's own blocks.
+///
+/// The tool-result message keeps its members. Reminder members fill only the
+/// keys that message does not already have.
+fn prepend_reminders(tool_user: &Message, reminders: &[Message]) -> Message {
+    let mut combined = tool_user.clone();
+    let mut content = Vec::new();
+    for reminder in reminders {
+        content.extend(reminder.content.clone());
+        combined.extensions.absorb(&reminder.extensions);
+    }
+    content.append(&mut combined.content);
+    combined.content = content;
+    combined
 }
 
 fn sets_replied(message: &Message) -> bool {
@@ -594,9 +650,18 @@ fn sets_replied(message: &Message) -> bool {
 }
 
 fn joined_text(message: &Message) -> String {
+    joined_parts(message, "")
+}
+
+fn joined_parts(message: &Message, separator: &str) -> String {
     let mut text = String::new();
+    let mut started = false;
     for part in &message.content {
         if let ContentPart::Text(part) = part {
+            if started {
+                text.push_str(separator);
+            }
+            started = true;
             text.push_str(&part.text);
         }
     }
@@ -611,9 +676,9 @@ fn reminder_user(text: &str) -> Message {
     message
 }
 
-/// Joins consecutive user or assistant turns, and a user turn with an
-/// adjacent tool-result turn, so a reminder does not split a call from its
-/// result.
+/// Joins consecutive user or assistant turns on a translated request, and a
+/// user turn with an adjacent tool-result turn, so a reminder does not split
+/// a call from its result. A Messages client does not use this pass.
 fn merge_turns(messages: Vec<Message>) -> Vec<Message> {
     let mut out: Vec<Message> = Vec::new();
     for message in messages {
@@ -702,11 +767,11 @@ fn encode_messages(messages: &[Message]) -> Result<Vec<Value>, CodecError> {
                 index += 1;
             }
             Role::Developer => {
-                let text = joined_text(&messages[index]);
-                if text.is_empty() {
-                    encoded.push(encode_role_message(&messages[index], "system")?);
+                let folded = fold_developer(&messages[index]);
+                if folded.role == Role::System {
+                    encoded.push(encode_role_message(&folded, "system")?);
                 } else {
-                    encoded.push(encode_chat_message(&reminder_user(&text))?);
+                    encoded.push(encode_chat_message(&folded)?);
                 }
                 index += 1;
             }

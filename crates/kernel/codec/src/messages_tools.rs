@@ -1074,6 +1074,70 @@ mod tests {
     }
 
     #[test]
+    fn d236_messages_form_keeps_consecutive_same_role_cache_marks() {
+        let body = r#"{"model":"m","max_tokens":8,"messages":[{"role":"user","content":"one","cache_control":{"type":"ephemeral"}},{"role":"user","content":"two","cache_control":{"type":"ephemeral","ttl":"1h"}},{"role":"assistant","content":"a","cache_control":{"type":"ephemeral"}},{"role":"assistant","content":"b","cache_control":{"type":"ephemeral","ttl":"5m"}}]}"#;
+        let request = AnthropicMessages
+            .decode_request(body.as_bytes())
+            .expect("decode");
+        let value = json(&AnthropicMessages.encode_request(&request).expect("encode"));
+        let messages = value["messages"].as_array().expect("messages");
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0]["content"][0]["text"], "one");
+        assert_eq!(messages[0]["cache_control"]["type"], "ephemeral");
+        assert!(messages[0]["cache_control"].get("ttl").is_none());
+        assert_eq!(messages[1]["content"][0]["text"], "two");
+        assert_eq!(messages[1]["cache_control"]["ttl"], "1h");
+        assert_eq!(messages[2]["content"][0]["text"], "a");
+        assert_eq!(messages[2]["cache_control"]["type"], "ephemeral");
+        assert!(messages[2]["cache_control"].get("ttl").is_none());
+        assert_eq!(messages[3]["content"][0]["text"], "b");
+        assert_eq!(messages[3]["cache_control"]["ttl"], "5m");
+    }
+
+    #[test]
+    fn d236_messages_form_developer_keeps_members_and_separates_text() {
+        let body = r#"{"model":"m","max_tokens":8,"messages":[{"role":"user","content":"hi"},{"role":"developer","content":[{"type":"text","text":"steer"},{"type":"text","text":"more"}],"output_config":{"effort":"max"}},{"role":"user","content":"bye"}]}"#;
+        let request = AnthropicMessages
+            .decode_request(body.as_bytes())
+            .expect("decode");
+        let value = json(&AnthropicMessages.encode_request(&request).expect("encode"));
+        let messages = value["messages"].as_array().expect("messages");
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["content"][0]["text"], "hi");
+        assert_eq!(messages[2]["content"][0]["text"], "bye");
+        let reminder = &messages[1];
+        assert_eq!(reminder["role"], "user");
+        assert_eq!(
+            reminder["content"][0]["text"],
+            "<system-reminder>\nsteer\nmore\n</system-reminder>"
+        );
+        assert_eq!(reminder["output_config"]["effort"], "max");
+    }
+
+    #[test]
+    fn d236_a_folded_developer_keeps_members_on_the_tool_result() {
+        let body = r#"{"model":"m","max_tokens":8,"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"n","input":{}}]},{"role":"developer","content":[{"type":"text","text":"steer"},{"type":"text","text":"more"}],"output_config":{"effort":"max"}},{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"ok"}],"cache_control":{"type":"ephemeral","ttl":"1h"}}]}"#;
+        let request = AnthropicMessages
+            .decode_request(body.as_bytes())
+            .expect("decode");
+        let value = json(&AnthropicMessages.encode_request(&request).expect("encode"));
+        let messages = value["messages"].as_array().expect("messages");
+        assert!(messages.iter().all(|message| {
+            let role = message["role"].as_str().unwrap_or("");
+            role != "system" && role != "developer"
+        }));
+        let result = &messages[2];
+        assert_eq!(result["content"][0]["type"], "tool_result");
+        assert_eq!(result["content"][0]["tool_use_id"], "t");
+        assert_eq!(
+            result["content"][1]["text"],
+            "<system-reminder>\nsteer\nmore\n</system-reminder>"
+        );
+        assert_eq!(result["output_config"]["effort"], "max");
+        assert_eq!(result["cache_control"]["ttl"], "1h");
+    }
+
+    #[test]
     fn d236_translated_chat_folds_a_mid_system_and_developer_into_reminders() {
         let body = r#"{"model":"m","messages":[{"role":"user","content":"list"},{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"Bash","arguments":"{}"}}]},{"role":"system","content":"note"},{"role":"tool","tool_call_id":"call_1","content":"a.go"},{"role":"developer","content":"steer"}]}"#;
         let mut request = OpenAiChat.decode_request(body.as_bytes()).expect("decode");

@@ -97,8 +97,14 @@ pub fn fill_messages_thinking(body: &[u8]) -> Vec<u8> {
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             match kind {
-                "thinking" => thought = true,
-                "tool_use" => called = true,
+                "thinking" => {
+                    thought = true;
+                    kept.push(block);
+                }
+                "tool_use" => {
+                    called = true;
+                    kept.push(block);
+                }
                 "redacted_thinking" if !thought => {
                     edited = true;
                     thought = true;
@@ -112,11 +118,14 @@ pub fn fill_messages_thinking(body: &[u8]) -> Vec<u8> {
             kept.insert(0, space.clone());
             edited = true;
         }
+        // `drain` already emptied this array. Put every kept block back, including
+        // on an assistant this pass did not edit, so a later rewrite cannot
+        // serialize it as an empty `content`.
+        message
+            .as_object_mut()
+            .expect("object")
+            .insert("content".to_owned(), Value::Array(kept));
         if edited {
-            message
-                .as_object_mut()
-                .expect("object")
-                .insert("content".to_owned(), Value::Array(kept));
             changed = true;
         }
     }
@@ -242,10 +251,36 @@ mod tests {
             let filled = fill_messages_thinking(body.as_bytes());
             let value: serde_json::Value = serde_json::from_slice(&filled).expect("json");
             assert_eq!(
+                value["messages"][0]["content"][0]["type"], "thinking",
+                "{role}"
+            );
+            assert_eq!(
+                value["messages"][0]["content"][1]["type"], "tool_use",
+                "{role}"
+            );
+            assert_eq!(value["messages"][0]["content"][1]["id"], "t", "{role}");
+            assert_eq!(
                 value["messages"][3]["content"][0]["type"], "thinking",
                 "{role}"
             );
+            assert_eq!(value["messages"][3]["content"][1]["text"], "done", "{role}");
         }
+    }
+
+    #[test]
+    fn d65_8_an_earlier_assistant_keeps_signed_thinking_and_its_tool_call() {
+        let body = br#"{"model":"demo","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"planned","signature":"sig"},{"type":"tool_use","id":"t","name":"n","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"ok"}]},{"role":"system","content":"note"},{"role":"assistant","content":[{"type":"text","text":"done"}]}]}"#;
+        let filled = fill_messages_thinking(body);
+        let value: serde_json::Value = serde_json::from_slice(&filled).expect("json");
+        let first = value["messages"][0]["content"].as_array().expect("content");
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0]["type"], "thinking");
+        assert_eq!(first[0]["thinking"], "planned");
+        assert_eq!(first[0]["signature"], "sig");
+        assert_eq!(first[1]["type"], "tool_use");
+        assert_eq!(first[1]["id"], "t");
+        assert_eq!(value["messages"][3]["content"][0]["type"], "thinking");
+        assert_eq!(value["messages"][3]["content"][1]["text"], "done");
     }
 
     #[test]

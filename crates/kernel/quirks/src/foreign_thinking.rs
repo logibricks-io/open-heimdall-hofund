@@ -149,7 +149,7 @@ mod tests {
 
     #[test]
     fn d70_7_empty_content_stays_when_no_block_was_removed() {
-        let body = br#"{"model":"claude-sonnet-4-20250514","messages":[{"role":"system","content":[],"output_config":{"effort":"max"}},{"role":"user","content":"hi"}]}"#;
+        let body = br#"{"model":"claude-sonnet-4-20250514","messages":[{"role":"system","content":[],"output_config":{"effort":"max"},"signature":"550e8400-e29b-41d4-a716-446655440000"},{"role":"user","content":"hi"}]}"#;
         let out = without_foreign_thinking("https://api.anthropic.com", "anthropic-messages", body);
         assert_eq!(out, body);
     }

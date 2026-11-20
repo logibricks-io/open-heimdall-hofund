@@ -139,14 +139,19 @@ the same channel. Several leading messages become one message.
 
 A request that was not decoded from Messages is translated. A system or
 developer message before any assistant, tool, or thinking turn joins that
-channel. One that follows a reply becomes a user message whose text is
-`<system-reminder>\n...\n</system-reminder>`. Consecutive user turns are
-joined, and a user turn is joined with an adjacent tool-result turn, so the
-reminder does not sit between a call and its result. Encode never writes
-`role: "developer"` inside `messages`. A Messages client's own later `system`
-message stays in `messages` with that role. A later `developer` message from
-that client becomes the reminder, or a `system` message when it has no text.
-A message that arrived with no `content` field is encoded without one.
+channel as its own block. The reference joins those texts into one system
+string with a blank line between them. One that follows a reply becomes a
+user message whose text is `<system-reminder>\n...\n</system-reminder>`.
+Consecutive user turns are joined, and a user turn is joined with an
+adjacent tool-result turn, so the reminder does not sit between a call and
+its result. Encode never writes `role: "developer"` inside `messages`. A
+Messages client's own later `system` message stays in `messages` with that
+role. Consecutive user or assistant messages from that client stay separate,
+so each keeps its own members. A later `developer` message becomes the
+reminder, or a `system` message when it has no text. Its other members stay,
+and its text parts are joined with a newline. That reminder joins only an
+adjacent tool-result user, and that user's members stay too. A message that
+arrived with no `content` field is encoded without one.
 
 After encode, `pair_messages_tool_blocks` mends the tool exchange on the
 bytes. A call the next message does not answer gets a synthetic error result
