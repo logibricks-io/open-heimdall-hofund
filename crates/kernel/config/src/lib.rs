@@ -1422,6 +1422,12 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             }
         }
         validated_routing_name("subscription", &subscription.id, &subscription.routing)?;
+        if subscription.routing == "fit" {
+            return Err(ConfigError::Invalid(format!(
+                "subscription `{}` uses fit routing; fit is a group's",
+                subscription.id
+            )));
+        }
         let at_once = validated_at_once("subscription", &subscription.id, subscription.at_once)?;
         subscriptions.push(Subscription {
             id: subscription.id,
@@ -1737,8 +1743,8 @@ fn normalized_account_weights(
     Ok(weights)
 }
 
-pub(crate) const ROUTING_NAMES: [&str; 10] = [
-    "smart", "order", "rotate", "usage", "pace", "weight", "free", "fast", "cheap", "drain",
+pub(crate) const ROUTING_NAMES: [&str; 11] = [
+    "smart", "order", "rotate", "usage", "pace", "weight", "free", "fast", "cheap", "drain", "fit",
 ];
 
 fn validated_routing_name(kind: &str, id: &str, routing: &str) -> Result<(), ConfigError> {
@@ -1757,10 +1763,10 @@ fn validated_routing(route: &RawRoute) -> Result<String, ConfigError> {
         || route.upstreams.iter().any(|upstream| {
             matches!(upstream, RawUpstream::Mapped(mapped) if mapped.subscription.is_some() || mapped.group.is_some())
         });
-    if route.routing == "cheap" && !group {
+    if matches!(route.routing.as_str(), "cheap" | "fit") && !group {
         return Err(ConfigError::Invalid(format!(
-            "route `{}` uses cheap routing outside a group",
-            route.model
+            "route `{}` uses {} routing outside a group",
+            route.model, route.routing
         )));
     }
     Ok(route.routing.clone())
@@ -3049,6 +3055,37 @@ mod tests {
             "[[subscriptions]]\nid = \"codex\"\naccounts = \"*\"\n[[routes]]\nmodel = \"demo\"\nrouting = \"cheap\"\nupstreams = [{ subscription = \"codex\" }]\n",
         )
         .expect("a subscription is an account group");
+    }
+
+    #[test]
+    fn d239_fit_requires_a_group() {
+        let config = load(
+            "[[providers]]\nid = \"one\"\npreset = \"openai\"\n[[providers]]\nid = \"two\"\npreset = \"openai\"\n[[routes]]\nmodel = \"demo\"\nrouting = \"fit\"\nupstreams = [\"one\", \"two\"]\n",
+        )
+        .expect("fit on a group");
+        assert_eq!(config.routes[0].routing, "fit");
+        let error = load(
+            "[[providers]]\nid = \"one\"\npreset = \"openai\"\n[[routes]]\nmodel = \"demo\"\nrouting = \"fit\"\nupstreams = [\"one\"]\n",
+        )
+        .expect_err("fit outside a group");
+        assert!(
+            error
+                .to_string()
+                .contains("uses fit routing outside a group"),
+            "{error}"
+        );
+        load(
+            "[[subscriptions]]\nid = \"codex\"\naccounts = \"*\"\n[[routes]]\nmodel = \"demo\"\nrouting = \"fit\"\nupstreams = [{ subscription = \"codex\" }]\n",
+        )
+        .expect("a subscription is an account group");
+        load(
+            "[[providers]]\nid = \"one\"\npreset = \"openai\"\n[[routes]]\nmodel = \"group/inner\"\nupstreams = [\"one\"]\n[[routes]]\nmodel = \"demo\"\nrouting = \"fit\"\nupstreams = [{ group = \"inner\" }]\n",
+        )
+        .expect("a nested group is a group");
+        let error =
+            load("[[subscriptions]]\nid = \"codex\"\naccounts = \"*\"\nrouting = \"fit\"\n")
+                .expect_err("fit on a subscription");
+        assert!(error.to_string().contains("fit is a group's"), "{error}");
     }
 
     #[test]

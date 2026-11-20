@@ -260,10 +260,10 @@ fn normalize_invalid_routing(document: &mut DocumentMut) -> Result<(), ConfigErr
             .get("routing")
             .and_then(Item::as_str)
             .unwrap_or("smart");
-        if routing != "cheap" {
+        if !matches!(routing, "cheap" | "fit") {
             continue;
         }
-        if route_is_cheap_group(route) {
+        if route_is_group(route) {
             continue;
         }
         route.insert("routing", value("smart"));
@@ -271,7 +271,7 @@ fn normalize_invalid_routing(document: &mut DocumentMut) -> Result<(), ConfigErr
     Ok(())
 }
 
-fn route_is_cheap_group(route: &Table) -> bool {
+fn route_is_group(route: &Table) -> bool {
     let Some(upstreams) = route.get("upstreams").and_then(Item::as_array) else {
         return false;
     };
@@ -453,6 +453,24 @@ upstreams = [{ provider = \"a\" }, { provider = \"b\" }]\n";
             edited.contains("routing = \"smart\"") || edited.contains("routing = 'smart'"),
             "expected cheap routing demoted, got: {edited}"
         );
+        let config = load(&edited).expect("reload");
+        let group = config
+            .routes
+            .iter()
+            .find(|route| route.model == "group/pair")
+            .expect("group route");
+        assert_eq!(group.routing, "smart");
+    }
+
+    #[test]
+    fn d239_provider_delete_demotes_fit_when_one_member_remains() {
+        let text = "\
+[[providers]]\nid = \"a\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1/v1\"\napi_key = \"k\"\n\
+[[providers]]\nid = \"b\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1/v1\"\napi_key = \"k\"\n\
+[[routes]]\nmodel = \"group/pair\"\nrouting = \"fit\"\n\
+upstreams = [{ provider = \"a\" }, { provider = \"b\" }]\n";
+        let edited = edit_provider_delete(text, "b").expect("delete");
+        load(&edited).expect("edited config loads");
         let config = load(&edited).expect("reload");
         let group = config
             .routes

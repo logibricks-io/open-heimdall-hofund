@@ -854,6 +854,10 @@ impl Router {
                 self.overflow
                     .demote_hops(&conversation.key, input_tokens, resolved.hops);
         }
+        // A member whose known window cannot hold the estimate is not asked
+        // until every member that might hold it has been tried. If none can,
+        // the order is left as it was.
+        resolved.hops = defer_over_window(resolved.hops, input_tokens);
         resolved.spent = self.spent(&resolved);
         if let Some(trace) = trace.as_mut() {
             trace.set_routing(&resolved.routing);
@@ -1424,6 +1428,7 @@ impl Router {
         pool: &str,
         routing: &str,
     ) -> Vec<strategy::Seat> {
+        let needs = self.strategies.needs(routing);
         let mut seats = hops
             .iter()
             .map(|hop| {
@@ -1432,6 +1437,9 @@ impl Router {
                 seat.learns = hop.member.learns_allowance();
                 seat.weight = hop.weight;
                 seat.free = hop.free;
+                if needs.window {
+                    seat.window = hop.context_window.filter(|window| *window > 0).unwrap_or(0);
+                }
                 let model = hop.wire_model.as_deref().unwrap_or(&resolved.bare);
                 seat.resting = self.cooldowns.as_ref().is_some_and(|cooldowns| {
                     cooldowns
@@ -1452,13 +1460,7 @@ impl Router {
                         .unwrap_or_else(|| resolved.bare.clone())
                 })
                 .collect::<Vec<_>>();
-            measurements.weigh(
-                &mut seats,
-                &models,
-                pool,
-                self.strategies.needs(routing),
-                SystemTime::now(),
-            );
+            measurements.weigh(&mut seats, &models, pool, needs, SystemTime::now());
         }
         seats
     }
@@ -1743,6 +1745,30 @@ struct Answered {
     completion: Completion,
     tier_sent: String,
     clear_placeholder_served: bool,
+}
+
+/// Moves members whose known context window is no larger than `tokens` to
+/// the end, keeping order inside each part. An unknown window stays with
+/// the members that may hold the request. When every member is too small,
+/// the original order is returned.
+fn defer_over_window(hops: Vec<Hop>, tokens: u64) -> Vec<Hop> {
+    if hops.len() < 2 {
+        return hops;
+    }
+    let mut fitting = Vec::with_capacity(hops.len());
+    let mut small = Vec::new();
+    for hop in hops {
+        if hop
+            .context_window
+            .is_some_and(|window| window > 0 && tokens >= window)
+        {
+            small.push(hop);
+        } else {
+            fitting.push(hop);
+        }
+    }
+    fitting.extend(small);
+    fitting
 }
 
 fn region_key(provider: &str, model: &str) -> String {
