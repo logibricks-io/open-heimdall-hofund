@@ -1,8 +1,10 @@
 //! Anthropic Messages codec.
 //!
-//! System and developer messages are hoisted into the top-level system channel.
-//! Tool results stay on user messages. See `docs/codecs.md` for the field mapping
-//! and the conversions that drop data.
+//! The leading run of system and developer messages is hoisted into the
+//! top-level system channel. A later system or developer message stays in
+//! `messages` so a tool exchange can be mended. Tool results stay on user
+//! messages. See `docs/codecs.md` for the field mapping and the conversions
+//! that drop data.
 
 use std::collections::BTreeSet;
 
@@ -352,7 +354,8 @@ fn encode_request(request: &Request) -> Result<Vec<u8>, CodecError> {
     write_messages_effort(&mut object, request);
     request.extensions.merge_into(&mut object);
     request.params.extensions.merge_into(&mut object);
-    to_bytes(&Value::Object(object))
+    let bytes = to_bytes(&Value::Object(object))?;
+    Ok(crate::messages_tools::pair_messages_tool_blocks(&bytes))
 }
 
 fn messages_effort(object: &Object) -> Option<Effort> {
@@ -471,6 +474,7 @@ fn decode_message(value: Value) -> Result<Message, CodecError> {
         "user" => Role::User,
         "assistant" => Role::Assistant,
         "system" => Role::System,
+        "developer" => Role::Developer,
         other => return Err(CodecError::UnknownRole(other.to_owned())),
     };
     let content = match object.remove("content") {
@@ -484,11 +488,20 @@ fn decode_message(value: Value) -> Result<Message, CodecError> {
     })
 }
 
-fn encode_system(messages: &[Message]) -> Result<Option<Value>, CodecError> {
-    let system: Vec<&Message> = messages
+/// How many leading messages belong in the top-level system channel.
+///
+/// A system or developer message after the conversation has started stays in
+/// `messages`. The tool-exchange mend then moves one that sits between a call
+/// and its results to after those results.
+fn leading_channel(messages: &[Message]) -> usize {
+    messages
         .iter()
-        .filter(|message| matches!(message.role, Role::System | Role::Developer))
-        .collect();
+        .take_while(|message| matches!(message.role, Role::System | Role::Developer))
+        .count()
+}
+
+fn encode_system(messages: &[Message]) -> Result<Option<Value>, CodecError> {
+    let system: Vec<&Message> = messages[..leading_channel(messages)].iter().collect();
     if system.is_empty() {
         return Ok(None);
     }
@@ -528,10 +541,17 @@ fn encode_system(messages: &[Message]) -> Result<Option<Value>, CodecError> {
 
 fn encode_messages(messages: &[Message]) -> Result<Vec<Value>, CodecError> {
     let mut encoded = Vec::new();
-    let mut index = 0;
+    let mut index = leading_channel(messages);
     while index < messages.len() {
         match messages[index].role {
-            Role::System | Role::Developer => index += 1,
+            Role::System => {
+                encoded.push(encode_role_message(&messages[index], "system")?);
+                index += 1;
+            }
+            Role::Developer => {
+                encoded.push(encode_role_message(&messages[index], "developer")?);
+                index += 1;
+            }
             Role::Tool => {
                 let start = index;
                 while index < messages.len() && messages[index].role == Role::Tool {
@@ -559,6 +579,17 @@ fn encode_tool_group(messages: &[Message]) -> Result<Value, CodecError> {
     object.insert("role".to_owned(), Value::String("user".to_owned()));
     object.insert("content".to_owned(), Value::Array(content));
     extensions.merge_into(&mut object);
+    Ok(Value::Object(object))
+}
+
+fn encode_role_message(message: &Message, role: &str) -> Result<Value, CodecError> {
+    let mut object = Object::new();
+    object.insert("role".to_owned(), Value::String(role.to_owned()));
+    object.insert(
+        "content".to_owned(),
+        Value::Array(encode_parts(&message.content)?),
+    );
+    message.extensions.merge_into(&mut object);
     Ok(Value::Object(object))
 }
 
