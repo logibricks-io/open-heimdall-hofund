@@ -136,12 +136,17 @@ pub struct Unit {
 
 /// What a member needs to open one realtime session.
 ///
-/// `headers` carry the upstream credential. Debug output redacts them.
+/// `headers` carry the upstream credential. Debug output redacts them and the
+/// proxy URL, which may contain a password.
 pub struct RealtimeDial {
     /// WebSocket URL, including the model query.
     pub url: String,
     /// Header names and values. Values must not be logged.
     pub headers: Vec<(String, String)>,
+    /// HTTP proxy URL from the member profile. `None` connects directly.
+    /// `Some` must be used; a value that cannot be dialed fails the session
+    /// instead of opening a direct socket.
+    pub proxy: Option<String>,
 }
 
 impl std::fmt::Debug for RealtimeDial {
@@ -154,6 +159,7 @@ impl std::fmt::Debug for RealtimeDial {
             .debug_struct("RealtimeDial")
             .field("url", &url)
             .field("headers", &self.headers.len())
+            .field("proxy", &self.proxy.is_some())
             .finish()
     }
 }

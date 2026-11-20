@@ -351,12 +351,19 @@ uses the same resolution as a chat call. A routing group is refused. A provider
 is eligible only when it declares a realtime endpoint: a path replaces the
 selected base path on the same origin, and an absolute `http`, `https`, `ws`,
 or `wss` URL is used as given. The dial adds `model` as a query and uses
-`wss` or `ws`. Frames relay in both directions, up to 32 MiB. An idle session
-closes after 10 minutes. A `response.done` usage object is recorded as kind
-`realtime`, with cached input stored as a cache read and subtracted from the
-input count. The gateway key's spending reservation is held until the socket
-closes. Shutdown closes the session with 1001. Subprotocols that carry a key,
-an organization, or a project are not sent upstream.
+`wss` or `ws`. A `wss` dial uses rustls and the native root store. When the
+member has an HTTP proxy, the dial connects only through that proxy; an
+unusable proxy fails the session and does not open a direct socket. Frames
+relay in both directions, up to 32 MiB. An idle session closes after 10
+minutes. A `response.done` usage object is recorded as kind `realtime`. Cached
+input is clamped to the input count, stored as a cache read, and subtracted
+from the input count. The price uses the hop's wire id. A `response.done`
+with status `failed` is stored as HTTP 500. The gateway key's spending
+reservation is held until the socket closes. While it is open, a key that is
+turned off, a spent caller or issuer limit, or a key-store or ledger error
+closes the session with 1008. Shutdown closes the session with 1001.
+Subprotocols that carry a key, an organization, or a project are not sent
+upstream.
 
 ## Client-facing ids and Chat usage chunks
 

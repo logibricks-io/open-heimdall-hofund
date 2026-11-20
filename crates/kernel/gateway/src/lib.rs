@@ -3825,22 +3825,34 @@ fn write_usage_stopped_waiting(usage: &Ledger, meta: &UsageMeta) {
     );
 }
 
+struct RealtimeUsage {
+    input: Option<i64>,
+    output: Option<i64>,
+    cache_read: Option<i64>,
+    status: StatusCode,
+}
+
 fn record_realtime_usage(
     app: &Inner,
     identity: &Identity,
     model: &str,
+    wire_model: &str,
     upstream: &str,
-    input: Option<i64>,
-    output: Option<i64>,
-    cache_read: Option<i64>,
+    usage: RealtimeUsage,
 ) {
+    let RealtimeUsage {
+        input,
+        output,
+        cache_read,
+        status,
+    } = usage;
     let started = Instant::now();
     let uncached = input.map(|input| input.saturating_sub(cache_read.unwrap_or(0)));
     let meta = UsageMeta {
         model: model.to_owned(),
         upstream: upstream.to_owned(),
         provider_key_id: String::new(),
-        wire_model: model.to_owned(),
+        wire_model: wire_model.to_owned(),
         served_model: String::new(),
         started,
         identity: identity.clone(),
@@ -3864,7 +3876,7 @@ fn record_realtime_usage(
         tier_served: String::new(),
         clear_placeholder_served: false,
     };
-    write_usage_app(app, &meta, Some((uncached, output)), StatusCode::OK);
+    write_usage_app(app, &meta, Some((uncached, output)), status);
 }
 
 fn write_usage_app(

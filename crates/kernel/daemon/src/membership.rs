@@ -772,7 +772,11 @@ impl Member for LiveMember {
                 self.realtime_authorization.clone(),
             ));
         }
-        Some(hofund_router::RealtimeDial { url, headers })
+        Some(hofund_router::RealtimeDial {
+            url,
+            headers,
+            proxy: self.http_profile.proxy().map(str::to_owned),
+        })
     }
 
     fn attempt(&self) -> MemberAttempt {
