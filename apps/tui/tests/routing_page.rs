@@ -522,6 +522,7 @@ fn response_for(method: &http::Method, path: &str, target: &str, body: &Value) -
                     let mut member = member(value["ref"].as_str().unwrap_or("chat/a"));
                     member.effort = value["effort"].as_str().unwrap_or("").to_owned();
                     member.fast = value["fast"].as_bool().unwrap_or(false);
+                    member.ultra = value["ultra"].as_bool().unwrap_or(false);
                     member.enabled = value["enabled"].as_bool().unwrap_or(true);
                     member
                 })

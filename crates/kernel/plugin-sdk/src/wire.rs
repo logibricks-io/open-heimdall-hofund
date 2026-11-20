@@ -8,7 +8,11 @@
 //!
 //! - Quirks are applied first. When the inbound protocol differs from the
 //!   target, unmapped tools are logged once per name, the billing line is
-//!   removed from system text, and extension bags are dropped.
+//!   removed from system text, and extension bags are dropped. A Chat or
+//!   Responses `service_tier` is put back, then adjusted for the target base
+//!   and codec before the body is posted. A served `service_tier` on the
+//!   reply is kept through a fold, a unary decode, and a cross-protocol
+//!   stream. The word on `response.completed` replaces an earlier word.
 //! - An encode failure is status 400: the client sent something the target
 //!   protocol cannot carry.
 //! - A Messages call carries the protocol version header, which a configured
@@ -167,6 +171,18 @@ impl Target {
             chatgpt_codex_zstd: false,
             request_body_gzip: false,
         }
+    }
+
+    /// The base URL this target posts to.
+    #[must_use]
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// The codec this target speaks.
+    #[must_use]
+    pub const fn protocol(&self) -> ProtocolId {
+        self.protocol
     }
 
     /// Zstd-compresses POST bodies to `{base_url}/responses` on Codex backend turns.
@@ -450,7 +466,9 @@ impl Sent {
         if events.is_empty() {
             return Err(PluginError::decode("the upstream stream carried no events"));
         }
-        Ok(Completion::Unary(Box::new(hofund_ir::assemble(&events))))
+        let mut response = hofund_ir::assemble(&events);
+        hofund_codec::service_tier::stamp_last_served_tier(&events, &mut response);
+        Ok(Completion::Unary(Box::new(response)))
     }
 
     /// The body with the watch and the unwrap applied, in that order.
@@ -468,8 +486,9 @@ impl Sent {
     }
 }
 
-/// Adds decoded `events` to `into` without extensions, skipping unknown
-/// events; an upstream failure among them is the error.
+/// Adds decoded `events` to `into`, keeping a served `service_tier` and
+/// dropping every other extension. Unknown events are skipped. An upstream
+/// failure among them is the error.
 fn keep_events(
     events: Result<Vec<StreamEvent>, CodecError>,
     into: &mut Vec<StreamEvent>,
@@ -483,7 +502,7 @@ fn keep_events(
         if matches!(event, StreamEvent::Unknown(_)) {
             continue;
         }
-        event.strip_extensions();
+        hofund_codec::service_tier::retain_served_tier(&mut event);
         into.push(event);
     }
     Ok(())
@@ -1093,11 +1112,23 @@ fn prepare_body(
         },
         &mut request,
     );
+    let saved_tier = request
+        .extensions
+        .get("service_tier")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
     let cross_protocol = codec.id() != inbound.as_str();
     if cross_protocol {
         warn_unmapped(&request);
         strip_billing_header(&mut request);
         request.strip_extensions();
+        if matches!(codec.id(), "openai-chat" | "openai-responses")
+            && let Some(tier) = saved_tier.filter(|tier| !tier.is_empty())
+        {
+            request
+                .extensions
+                .insert("service_tier", serde_json::Value::String(tier));
+        }
     }
     let body = codec
         .encode_request(&request)
@@ -1106,6 +1137,7 @@ fn prepare_body(
         Some(prepare) => prepare(&body).map_err(|error| PluginError::decode(error.to_string()))?,
         None => body,
     };
+    let body = hofund_codec::service_tier::adjust_encoded_body(&target.base_url, codec.id(), &body);
     Ok(hofund_quirks::apply_encoded_with_state(
         hofund_quirks::EncodedContext {
             base_url: &target.base_url,
@@ -1425,7 +1457,7 @@ async fn decoded(
     let mut response = codec
         .decode_response(&bytes)
         .map_err(|error| PluginError::decode(error.to_string()))?;
-    response.strip_extensions();
+    hofund_codec::service_tier::retain_response_tier(&mut response);
     Ok(Completion::Unary(Box::new(response)))
 }
 
@@ -1558,7 +1590,7 @@ impl Events {
                 if matches!(event, StreamEvent::Unknown(_)) {
                     continue;
                 }
-                event.strip_extensions();
+                hofund_codec::service_tier::retain_served_tier(event);
             }
             return Some(item);
         }
@@ -1818,7 +1850,7 @@ pub async fn decode_upstream_response(
 
 #[cfg(test)]
 mod tests {
-    use hofund_codec::{AnthropicMessages, Codec, GenerativeLanguage, OpenAiChat};
+    use hofund_codec::{AnthropicMessages, Codec, GenerativeLanguage, OpenAiChat, OpenAiResponses};
     use hofund_plugin_api::{
         BilledUsage, CredentialStyle, PluginErrorKind, ProtocolId, Request, StreamEvent,
     };
@@ -1844,6 +1876,55 @@ mod tests {
         AnthropicMessages
             .decode_request(body.to_string().as_bytes())
             .expect("messages request")
+    }
+
+    #[test]
+    fn d224_wire_path_adjusts_ultrafast_for_the_target() {
+        let chat = |model: &str| {
+            OpenAiChat
+                .decode_request(
+                    format!(
+                        r#"{{"model":"{model}","messages":[{{"role":"user","content":"hi"}}],"service_tier":"ultrafast"}}"#
+                    )
+                    .as_bytes(),
+                )
+                .expect("chat request")
+        };
+        let public_api = "https://api.openai.com/v1";
+        let responses = Target::new(ProtocolId::OPENAI_RESPONSES, public_api);
+        let kept = super::prepare_body(
+            &responses,
+            &OpenAiResponses,
+            chat("gpt-6.2-sol"),
+            None,
+            ProtocolId::OPENAI_CHAT,
+        )
+        .expect("responses body");
+        let kept: serde_json::Value = serde_json::from_slice(&kept).expect("json");
+        assert_eq!(kept["service_tier"], "ultrafast");
+
+        let downgraded = super::prepare_body(
+            &responses,
+            &OpenAiResponses,
+            chat("gpt-6-sol"),
+            None,
+            ProtocolId::OPENAI_CHAT,
+        )
+        .expect("responses body");
+        let downgraded: serde_json::Value = serde_json::from_slice(&downgraded).expect("json");
+        assert_eq!(downgraded["service_tier"], "priority");
+
+        let chat_target = Target::new(ProtocolId::OPENAI_CHAT, public_api);
+        let onto_chat = super::prepare_body(
+            &chat_target,
+            &OpenAiChat,
+            chat("gpt-6.2-sol"),
+            None,
+            ProtocolId::OPENAI_CHAT,
+        )
+        .expect("chat body");
+        let onto_chat: serde_json::Value = serde_json::from_slice(&onto_chat).expect("json");
+        assert_eq!(onto_chat["service_tier"], "priority");
     }
 
     #[test]

@@ -1342,6 +1342,8 @@ UpstreamProvider::async fn list_models (& self , query : & ListQuery) -> Result 
 UpstreamProvider::async fn probe (& self , query : & ProbeQuery) -> Result < ProbeReport , PluginError >
 UpstreamProvider::async fn quota (& self , query : & QuotaQuery) -> Result < Vec < QuotaWindow > , PluginError >
 UpstreamProvider::async fn shutdown (& self , deadline : Duration) -> Result < () , PluginError >
+UpstreamProvider::fn attempt_base (& self) -> String
+UpstreamProvider::fn attempt_protocol (& self) -> String
 UpstreamProvider::fn close_idle_connections (& self)
 UpstreamSpec
 UpstreamSpec #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)

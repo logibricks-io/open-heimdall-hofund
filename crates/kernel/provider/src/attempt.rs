@@ -5,6 +5,8 @@
 pub struct AttemptRoute {
     /// Configured Responses base URL, when the adapter has one.
     pub base_url: String,
+    /// Codec id this adapter speaks. Empty when the member label is that codec.
+    pub protocol: String,
     /// Provider id and a one-way credential fingerprint. Never the credential.
     pub route: String,
     /// Whether this adapter can retain Responses and continue them by id.

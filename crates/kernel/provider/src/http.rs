@@ -469,11 +469,23 @@ pub(crate) fn prepare_body(
         },
         &mut request,
     );
+    let saved_tier = request
+        .extensions
+        .get("service_tier")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
     let cross_protocol = codec.id() != inbound_protocol;
     if cross_protocol {
         warn_unmapped(&request);
         crate::billing::strip_billing_header(&mut request);
         request.strip_extensions();
+        if matches!(codec.id(), "openai-chat" | "openai-responses")
+            && let Some(tier) = saved_tier.filter(|tier| !tier.is_empty())
+        {
+            request
+                .extensions
+                .insert("service_tier", serde_json::Value::String(tier));
+        }
     }
     let mut body = codec.encode_request(&request).map_err(|error| {
         // The client omitted or sent something this protocol cannot encode.
@@ -483,6 +495,7 @@ pub(crate) fn prepare_body(
     if let Some(prepare) = prepare {
         body = prepare(&body).map_err(|error| ProviderError::decode(error.to_string()))?;
     }
+    body = hofund_codec::service_tier::adjust_encoded_body(&upstream.base_url, codec.id(), &body);
     Ok(hofund_quirks::apply_encoded_with_state(
         hofund_quirks::EncodedContext {
             base_url: &upstream.base_url,
@@ -631,7 +644,8 @@ impl Sent<'_> {
             )
             .await;
         }
-        // Cross-protocol only. Extensions are stripped on the way back.
+        // Cross-protocol only. Extensions are stripped on the way back,
+        // except a served `service_tier`.
         if self.streaming {
             let events = SseEvents::new(
                 self.response.bytes_stream(),
@@ -650,7 +664,7 @@ impl Sent<'_> {
                 .codec
                 .decode_response(&bytes)
                 .map_err(|error| ProviderError::decode(error.to_string()))?;
-            decoded.strip_extensions();
+            hofund_codec::service_tier::retain_response_tier(&mut decoded);
             Ok(Completion::Unary(Box::new(decoded)))
         }
     }
@@ -1467,5 +1481,38 @@ mod tests {
             "request line was {:?}",
             String::from_utf8_lossy(first_line)
         );
+    }
+
+    #[test]
+    fn d224_prepare_body_downgrades_public_chat_ultrafast() {
+        use super::{Credential, Endpoint, Upstream, prepare_body};
+        use hofund_codec::{Codec, OpenAiChat};
+        use hofund_ir::Request;
+        use reqwest::header::HeaderMap;
+
+        let endpoint = Endpoint {
+            id: "public".to_owned(),
+            base_url: "https://api.openai.com/v1".to_owned(),
+            preset: None,
+            api_key: String::new(),
+            credential: Credential::Default,
+            headers: Vec::new(),
+            pass_headers: Vec::new(),
+            quirks: None,
+            timeout: Duration::from_secs(1),
+            client: None,
+            client_slot: None,
+            client_refresh: None,
+        };
+        let upstream =
+            Upstream::open(endpoint, "chat/completions", HeaderMap::new()).expect("upstream");
+        let mut request = Request::new("gpt-6.2-sol");
+        request
+            .extensions
+            .insert("service_tier", serde_json::json!("ultrafast"));
+        let body =
+            prepare_body(&upstream, &OpenAiChat, request, None, OpenAiChat.id()).expect("body");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(value["service_tier"], "priority");
     }
 }

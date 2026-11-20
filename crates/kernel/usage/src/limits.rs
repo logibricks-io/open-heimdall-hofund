@@ -90,8 +90,8 @@ impl Ledger {
                     priced, cost_usd, price_input, price_output, price_cache_read, price_cache_write,
                     price_cache_write_1h, outcome, provider_key_id, client_agent, session_id,
                     native_session_id, endpoint, kind, first_text_ms, first_reasoning_ms, flow_ms,
-                    served_model
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36)",
+                    served_model, tier_asked, tier_sent, tier_served
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39)",
                 params![
                     row.created_unix,
                     row.model,
@@ -131,6 +131,9 @@ impl Ledger {
                     details.first_reasoning_ms,
                     details.flow_ms,
                     row.served_model,
+                    row.tier_asked,
+                    row.tier_sent,
+                    row.tier_served,
                 ],
             )
             .map(|_| ())

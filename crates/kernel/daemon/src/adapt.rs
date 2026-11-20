@@ -12,7 +12,7 @@ use hofund_plugin_api::{
     Completion as PluginCompletion, CountOutcome as PluginCount, PluginError, PluginErrorKind,
     ProtocolId, RawAnswer, RawBody, Request, UpstreamProvider,
 };
-use hofund_provider::{Completion, CountOutcome, Provider, ProviderError};
+use hofund_provider::{AttemptRoute, Completion, CountOutcome, Provider, ProviderError};
 
 /// One plugin provider behind the existing member trait.
 pub(crate) struct ProviderAdapter {
@@ -42,6 +42,14 @@ impl Provider for ProviderAdapter {
 
     fn close_idle_connections(&self) {
         self.inner.close_idle_connections();
+    }
+
+    fn attempt_route(&self) -> AttemptRoute {
+        AttemptRoute {
+            base_url: self.inner.attempt_base(),
+            protocol: self.inner.attempt_protocol(),
+            ..AttemptRoute::default()
+        }
     }
 
     async fn count_input(

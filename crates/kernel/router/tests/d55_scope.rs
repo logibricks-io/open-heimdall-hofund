@@ -56,6 +56,7 @@ fn hop(provider: &'static str, wire: &str) -> Hop {
         fallback: false,
         effort: String::new(),
         cold_after: affinity::CACHE_COLD,
+        service_tier: String::new(),
         units: Vec::new(),
     }
 }
@@ -188,6 +189,7 @@ async fn d55_7_bare_name_resolves_model_route_before_group() {
             fallback: false,
             effort: String::new(),
             cold_after: affinity::CACHE_COLD,
+            service_tier: String::new(),
             units: Vec::new(),
         }
     }

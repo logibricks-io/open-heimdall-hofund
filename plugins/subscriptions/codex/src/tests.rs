@@ -572,6 +572,26 @@ fn upstream_for(host: &TestHost, id: &AccountId) -> CodexUpstream {
     )
 }
 
+#[test]
+fn d224_attempt_base_is_the_backend_the_upstream_calls() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = AccountId::from_static("a-0000000000000001");
+    let production = CodexUpstream::new(
+        id.clone(),
+        host.context().clone(),
+        Arc::new(Endpoints::default()),
+        Arc::default(),
+        Arc::default(),
+    );
+    assert_eq!(production.attempt_base(), Endpoints::default().base);
+    assert_eq!(
+        production.attempt_base(),
+        "https://chatgpt.com/backend-api/codex"
+    );
+    assert_eq!(upstream_for(&host, &id).attempt_base(), BASE);
+}
+
 const EXPIRED_401: &[u8] = br#"{"error":{"message":"Provided authentication token is expired. Please try signing in again.","type":"invalid_request_error","code":"token_expired"}}"#;
 
 #[test]
@@ -1026,6 +1046,10 @@ fn body_drops_sampling_and_forces_store_false() {
         out["input"],
         json!([{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}])
     );
+    let (fast, _) = shaped(json!({"service_tier": "fast"}), None);
+    assert_eq!(fast["service_tier"], json!("priority"));
+    let (capital, _) = shaped(json!({"service_tier": "Fast"}), None);
+    assert_eq!(capital["service_tier"], json!("priority"));
     for tier in ["priority", "ultrafast"] {
         let (out, _) = shaped(
             json!({"service_tier": tier, "parallel_tool_calls": false, "text": {"verbosity": "low"}}),
@@ -1037,6 +1061,21 @@ fn body_drops_sampling_and_forces_store_false() {
         assert_eq!(out["input"], json!([]));
         assert!(out.get("prompt_cache_key").is_none());
     }
+}
+
+#[test]
+fn d224_codex_body_sends_fast_as_priority() {
+    let (out, _) = shaped(
+        json!({"service_tier": "fast", "model": "gpt-6.2-sol"}),
+        None,
+    );
+    assert_eq!(out["service_tier"], json!("priority"));
+    let (capital, _) = shaped(json!({"service_tier": "Fast"}), None);
+    assert_eq!(capital["service_tier"], json!("priority"));
+    let (kept, _) = shaped(json!({"service_tier": "ultrafast"}), None);
+    assert_eq!(kept["service_tier"], json!("ultrafast"));
+    let (dropped, _) = shaped(json!({"service_tier": "flex"}), None);
+    assert!(dropped.get("service_tier").is_none());
 }
 
 #[test]
@@ -1924,6 +1963,41 @@ fn rate_limits_event_observed_and_unary_folded() {
     assert_eq!(seen[0].remaining(), Some(50));
     assert_eq!(seen[0].window_reset(), Some(Duration::from_secs(600)));
     assert!(!seen[0].spending_credits());
+}
+
+#[test]
+fn d224_codex_unary_fold_keeps_the_completed_served_tier() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    let body = concat!(
+        "event: response.created\n",
+        r#"data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5","status":"in_progress","service_tier":"ultrafast","output":[]}}"#,
+        "\n\n",
+        "event: response.completed\n",
+        r#"data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5","status":"completed","service_tier":"default","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"Hi there"}]}],"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}"#,
+        "\n\n",
+    );
+    host.http().enqueue_response(
+        200,
+        &[("content-type", "text/event-stream")],
+        body.as_bytes().to_vec(),
+    );
+    let mut unary = streaming_request();
+    unary.stream = false;
+    let completion =
+        block_on(upstream_for(&host, &id).execute(unary, ProtocolId::OPENAI_RESPONSES))
+            .expect("execute");
+    let Completion::Unary(response) = completion else {
+        panic!("a unary request gets one reply");
+    };
+    assert_eq!(
+        response
+            .extensions
+            .get("service_tier")
+            .and_then(Value::as_str),
+        Some("default")
+    );
 }
 
 #[test]
