@@ -134,6 +134,9 @@ pub fn next_in_order(
     policy: &LoginPolicy,
     include_off: bool,
 ) -> Result<(String, bool), String> {
+    if rows.iter().any(|row| row.active && !row.switchable) {
+        return Err("the account in use stays until you name another one".to_owned());
+    }
     let start = rows
         .iter()
         .position(|row| row.active)
@@ -188,9 +191,14 @@ pub fn next_login(
     return_key: Option<&str>,
 ) -> Option<(String, String, bool)> {
     let active = rows.iter().find(|row| row.active)?;
+    // An account that is not an automatic destination stays in use. This
+    // runs before keep_login, returning to the first account, and the spent
+    // spare, so a setup-token Use is not cleared on the next tick.
+    if !active.switchable {
+        return None;
+    }
     if policy.keep_login {
-        if let Some(first) = rows.first()
-            && first.switchable
+        if let Some(first) = rows.iter().find(|row| row.switchable)
             && active.key != first.key
         {
             return Some((active.key.clone(), first.key.clone(), true));
@@ -203,6 +211,7 @@ pub fn next_login(
         .collect();
     if policy.returns_to_first()
         && let Some(back) = return_key
+        && rows.iter().any(|row| row.key == back && row.switchable)
         && let Some(quota) = quotas.iter().find(|(id, _)| id == back).map(|(_, q)| q)
         && quota.readable
         && !quota.error
@@ -538,5 +547,116 @@ mod tests {
         assert_eq!(jump.1, "first");
         let on_first = vec![row("first", true, true), row("second", true, false)];
         assert!(next_login(&on_first, &quotas, &policy, None).is_none());
+    }
+
+    #[test]
+    fn d226_next_login_stays_when_the_active_account_is_not_switchable() {
+        let rows = vec![
+            row("alice@x.com", true, false),
+            row_switch("setup-token", true, true, false),
+        ];
+        let fresh = vec![
+            ("alice@x.com".to_owned(), quota(10.0)),
+            ("setup-token".to_owned(), quota(10.0)),
+        ];
+        let spent = vec![
+            ("alice@x.com".to_owned(), quota(10.0)),
+            ("setup-token".to_owned(), quota(99.0)),
+        ];
+        let keep = LoginPolicy {
+            routing: "smart".to_owned(),
+            keep_login: true,
+            switch_only: false,
+            sign_in_spends: true,
+        };
+        assert!(next_login(&rows, &fresh, &keep, None).is_none());
+        let back = LoginPolicy {
+            routing: "order".to_owned(),
+            keep_login: false,
+            switch_only: false,
+            sign_in_spends: false,
+        };
+        assert!(back.returns_to_first());
+        assert!(next_login(&rows, &fresh, &back, Some("alice@x.com")).is_none());
+        let smart = LoginPolicy {
+            routing: "smart".to_owned(),
+            keep_login: false,
+            switch_only: false,
+            sign_in_spends: true,
+        };
+        assert!(next_login(&rows, &spent, &smart, None).is_none());
+        assert_eq!(
+            next_on_forget(&rows, "setup-token").as_deref(),
+            Some("alice@x.com")
+        );
+    }
+
+    #[test]
+    fn d226_next_in_order_stays_on_an_unswitchable_account() {
+        let rows = vec![
+            row_switch("setup-token", true, true, false),
+            row("alice@x.com", true, false),
+        ];
+        let quotas = vec![
+            ("setup-token".to_owned(), quota(99.0)),
+            ("alice@x.com".to_owned(), quota(10.0)),
+        ];
+        let policy = LoginPolicy {
+            routing: "smart".to_owned(),
+            keep_login: false,
+            switch_only: false,
+            sign_in_spends: true,
+        };
+        let error = next_in_order(&rows, &quotas, &policy, true).expect_err("stay");
+        assert!(error.contains("name another"), "{error}");
+    }
+
+    #[test]
+    fn d226_keep_login_skips_a_non_switchable_first_row() {
+        let rows = vec![
+            row_switch("setup-token", true, false, false),
+            row("alice@x.com", true, false),
+            row("bob@x.com", true, true),
+        ];
+        let quotas = vec![
+            ("setup-token".to_owned(), quota(10.0)),
+            ("alice@x.com".to_owned(), quota(10.0)),
+            ("bob@x.com".to_owned(), quota(10.0)),
+        ];
+        let policy = LoginPolicy {
+            routing: "smart".to_owned(),
+            keep_login: true,
+            switch_only: false,
+            sign_in_spends: true,
+        };
+        let jump = next_login(&rows, &quotas, &policy, None).expect("first switchable");
+        assert_eq!(jump.0, "bob@x.com");
+        assert_eq!(jump.1, "alice@x.com");
+        assert!(jump.2);
+    }
+
+    #[test]
+    fn d226_returns_to_first_ignores_a_non_switchable_key() {
+        let rows = vec![
+            row_switch("setup-token", true, false, false),
+            row("alice@x.com", true, true),
+            row("carol@x.com", true, false),
+        ];
+        let quotas = vec![
+            ("setup-token".to_owned(), quota(10.0)),
+            ("alice@x.com".to_owned(), quota(100.0)),
+            ("carol@x.com".to_owned(), quota(20.0)),
+        ];
+        let policy = LoginPolicy {
+            routing: "order".to_owned(),
+            keep_login: false,
+            switch_only: false,
+            sign_in_spends: false,
+        };
+        assert!(policy.returns_to_first());
+        let jump =
+            next_login(&rows, &quotas, &policy, Some("setup-token")).expect("switchable spare");
+        assert_eq!(jump.1, "carol@x.com");
+        assert!(!jump.2);
     }
 }

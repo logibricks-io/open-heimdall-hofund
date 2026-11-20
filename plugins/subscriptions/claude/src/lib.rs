@@ -38,6 +38,7 @@ mod models;
 mod proxy;
 mod run_lock;
 mod setup_token;
+mod token_env;
 mod upstream;
 mod usage;
 mod usage_cadence;
@@ -790,6 +791,7 @@ impl Subscription for Claude {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<(), PluginError> {
+        token_env::clear_removed(host, account).await?;
         remove_tree(host, account)
     }
 }
