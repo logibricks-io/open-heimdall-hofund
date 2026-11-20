@@ -140,3 +140,25 @@ async fn d226_setup_token_import_without_claude_makes_no_request() {
         }
     }
 }
+
+#[tokio::test]
+async fn d226_long_or_non_ascii_setup_token_line_is_not_sent_to_gemini() {
+    let dir = tempfile::tempdir().expect("dir");
+    let long = format!("sk-ant-oat{}", "a".repeat(600));
+    assert!(long.len() > 512);
+    let non_ascii = "sk-ant-oat01-café";
+    for paste in [long.as_str(), non_ascii] {
+        let built = build(dir.path(), &["gemini"]);
+        let error = accounts_import(&built.opened, paste)
+            .await
+            .expect_err("no claude");
+        let message = error.to_string();
+        assert!(message.contains("Claude setup-token"), "{message}");
+        assert!(
+            message.contains("configure the Claude subscription"),
+            "{message}"
+        );
+        assert!(!message.contains("sk-ant-oat"), "{message}");
+        assert_no_http(&built);
+    }
+}

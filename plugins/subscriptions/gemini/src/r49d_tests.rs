@@ -182,6 +182,14 @@ fn d226_setup_token_paste_is_unsupported_and_makes_no_request() {
     assert!(host.http().calls().is_empty());
     let listed = block_on(host.context().accounts().list()).expect("list");
     assert!(listed.is_empty());
+    let long = format!("sk-ant-oat{}", "a".repeat(600));
+    let non_ascii = "sk-ant-oat01-café";
+    for text in [long.as_str(), non_ascii] {
+        let error = block_on(sub.import_accounts(text, host.context())).expect_err("shape");
+        assert_eq!(error.kind(), PluginErrorKind::Unsupported);
+        assert!(!error.to_string().contains("sk-ant-oat"), "{error}");
+    }
+    assert!(host.http().calls().is_empty());
 }
 
 const UNARY_REPLY: &str = r#"{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":1,"totalTokenCount":4}}}"#;

@@ -198,11 +198,12 @@ fn read_object(object: &Map<String, Value>, agent: &str, app_name: &str) -> Goog
 
 /// Whether `text` is a Claude setup-token paste.
 ///
-/// That is a bare `sk-ant-oat` line, a `CLAUDE_CODE_OAUTH_TOKEN` assignment,
-/// an `export` of that assignment, a JSON string of one of those, or a JSON
-/// array of such strings. A paste that also contains another line still
-/// matches, so another importer does not send the token to its own endpoint.
-/// The token is not copied into an error.
+/// A line matches when, after one optional `export ` prefix, a
+/// `CLAUDE_CODE_OAUTH_TOKEN=` prefix, and surrounding quotes, it starts with
+/// `sk-ant-oat`. Any length and any following bytes still match, so another
+/// importer does not send the line to a token endpoint. A JSON string and a
+/// JSON array of strings match the same way. A paste that also contains
+/// another line still matches. The token is not copied into an error.
 #[must_use]
 pub fn is_claude_setup_token_paste(text: &str) -> bool {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text).trim();
@@ -240,10 +241,6 @@ fn is_setup_token_line(line: &str) -> bool {
         .trim()
         .trim_matches(|character| character == '"' || character == '\'');
     token.starts_with("sk-ant-oat")
-        && token.len() <= 512
-        && token
-            .bytes()
-            .all(|byte| !byte.is_ascii_whitespace() && byte < 128)
 }
 
 fn invalid(reason: &str) -> GoogleImport {
@@ -385,5 +382,14 @@ mod tests {
         let parsed =
             parse_google_import("gemini", "Gemini CLI", "1//refresh-token").expect("refresh");
         assert!(parsed[0].error().is_none());
+        let long = format!("sk-ant-oat{}", "a".repeat(600));
+        assert!(long.len() > 512);
+        let non_ascii = "sk-ant-oat01-café";
+        for text in [long.as_str(), non_ascii] {
+            let error = parse_google_import("gemini", "Gemini CLI", text).expect_err("shape");
+            assert_eq!(error.kind(), PluginErrorKind::Unsupported);
+            assert!(!error.to_string().contains("café"), "{error}");
+            assert!(!error.to_string().contains(&"a".repeat(40)), "{error}");
+        }
     }
 }

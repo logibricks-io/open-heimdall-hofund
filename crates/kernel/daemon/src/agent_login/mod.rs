@@ -247,7 +247,8 @@ async fn login_rows(
 }
 
 /// A setup-token account is chosen only by an explicit Use. Automatic
-/// switching, including `keep_login` and sign-out, skips it.
+/// switching does not move onto it or off it. Signing that account out can
+/// still write another account.
 async fn automatic_switch_allowed(
     host: &hofund_plugin_api::HostContext,
     id: &AccountId,
@@ -467,6 +468,7 @@ mod tests {
         id: PluginId,
         flow: SignInFlow,
         wrote: Arc<Wrote>,
+        spent_ids: Vec<String>,
     }
 
     #[async_trait]
@@ -517,7 +519,13 @@ mod tests {
             account: &AccountId,
             _host: &HostContext,
         ) -> Result<Vec<QuotaWindow>, PluginError> {
-            let used = if account.as_str() == "spent" { 99 } else { 10 };
+            let used = if account.as_str() == "spent"
+                || self.spent_ids.iter().any(|id| id == account.as_str())
+            {
+                99
+            } else {
+                10
+            };
             Ok(vec![
                 QuotaWindow::new("window", used, Some(100), None).expect("window"),
             ])
@@ -648,6 +656,7 @@ mod tests {
             id: plugin,
             flow: SignInFlow::Pkce,
             wrote: Arc::clone(&wrote),
+            spent_ids: Vec::new(),
         };
         let policy = LoginPolicy {
             routing: "smart".to_owned(),
@@ -733,6 +742,7 @@ mod tests {
             id: plugin,
             flow: SignInFlow::Pkce,
             wrote: Arc::clone(&wrote),
+            spent_ids: Vec::new(),
         };
         let home = dir.path().join("agent-home");
         let moved = tick_one(
@@ -771,6 +781,7 @@ mod tests {
             id: plugin,
             flow: SignInFlow::Pkce,
             wrote: Arc::clone(&wrote),
+            spent_ids: Vec::new(),
         });
         let home = dir.path().join("agent-home");
         let moved = tick_one(
@@ -832,6 +843,7 @@ mod tests {
             id: plugin,
             flow: SignInFlow::Pkce,
             wrote: Arc::clone(&wrote),
+            spent_ids: Vec::new(),
         });
         let opened = vec![crate::sign_in::Opened {
             id: "tick-sub".to_owned(),
@@ -856,6 +868,136 @@ mod tests {
         .expect("explicit use");
         assert_eq!(target, "setup");
         assert_eq!(wrote.0.lock().expect("wrote").as_slice(), ["a-setup"]);
+    }
+
+    #[tokio::test]
+    async fn d226_active_setup_token_is_not_moved_off() {
+        let dir = tempfile::tempdir().expect("dir");
+        let plugin = PluginId::from_static("tick-sub");
+        let host = TestHost::open_for(PluginKind::Subscription, plugin.clone(), dir.path());
+        // `alice@x.com` is stored first, and that label sorts before
+        // `setup-token`, so both list order and label order put it first.
+        store_account(&host, "a-oauth", "alice@x.com", false).await;
+        store_account(&host, "b-setup", "setup-token", true).await;
+        let state_root = host.context().dirs().state_dir().expect("state");
+        let home = dir.path().join("agent-home");
+        let _guard = push_test_agent_homes(std::collections::BTreeMap::from([(
+            "TICK_HOME".to_owned(),
+            home.clone(),
+        )]));
+        let wrote = Arc::new(Wrote(Mutex::new(Vec::new())));
+        let sub = Arc::new(TickSub {
+            id: plugin.clone(),
+            flow: SignInFlow::Pkce,
+            wrote: Arc::clone(&wrote),
+            spent_ids: Vec::new(),
+        });
+        let cloned = Arc::clone(&sub);
+        let instance: Arc<dyn hofund_plugin_api::Subscription> = cloned;
+        let opened = vec![crate::sign_in::Opened {
+            id: "tick-sub".to_owned(),
+            name: "Tick".to_owned(),
+            instance,
+            host: host.context().clone(),
+            config_dir: dir.path().to_path_buf(),
+        }];
+        let registry = Names {
+            id: "tick-sub",
+            sign_in: AgentSignIn::new(&["tick-agent"], "TICK_HOME", "tick-home"),
+        };
+        let target = accounts_switch(
+            &tick_config(),
+            &registry,
+            &state_root,
+            &opened,
+            "tick-agent",
+            "setup-token",
+        )
+        .await
+        .expect("explicit use");
+        assert_eq!(target, "setup-token");
+        wrote.0.lock().expect("wrote").clear();
+
+        let stayed = tick_one(
+            "tick-sub",
+            &tick_policy(true),
+            sub.as_ref(),
+            host.context(),
+            &state_root,
+            &home,
+        )
+        .await
+        .expect("keep_login");
+        assert!(stayed.is_none());
+        assert!(wrote.0.lock().expect("wrote").is_empty());
+
+        let spent = TickSub {
+            id: plugin,
+            flow: SignInFlow::Pkce,
+            wrote: Arc::clone(&wrote),
+            spent_ids: vec!["b-setup".to_owned()],
+        };
+        let stayed = tick_one(
+            "tick-sub",
+            &tick_policy(false),
+            &spent,
+            host.context(),
+            &state_root,
+            &home,
+        )
+        .await
+        .expect("spent");
+        assert!(stayed.is_none());
+        assert!(wrote.0.lock().expect("wrote").is_empty());
+
+        let error = accounts_switch(
+            &tick_config(),
+            &registry,
+            &state_root,
+            &opened,
+            "tick-agent",
+            "next",
+        )
+        .await
+        .expect_err("next stays");
+        assert!(error.to_string().contains("name another"), "{error}");
+        assert!(wrote.0.lock().expect("wrote").is_empty());
+
+        let target = accounts_switch(
+            &tick_config(),
+            &registry,
+            &state_root,
+            &opened,
+            "tick-agent",
+            "alice@x.com",
+        )
+        .await
+        .expect("named other");
+        assert_eq!(target, "alice@x.com");
+        assert_eq!(wrote.0.lock().expect("wrote").as_slice(), ["a-oauth"]);
+        wrote.0.lock().expect("wrote").clear();
+        accounts_switch(
+            &tick_config(),
+            &registry,
+            &state_root,
+            &opened,
+            "tick-agent",
+            "setup-token",
+        )
+        .await
+        .expect("back to setup");
+        wrote.0.lock().expect("wrote").clear();
+        switch_before_forget(
+            &opened,
+            &registry,
+            &tick_config(),
+            &state_root,
+            "tick-sub",
+            "setup-token",
+        )
+        .await
+        .expect("sign-out");
+        assert_eq!(wrote.0.lock().expect("wrote").as_slice(), ["a-oauth"]);
     }
 
     fn tick_config() -> hofund_config::Config {

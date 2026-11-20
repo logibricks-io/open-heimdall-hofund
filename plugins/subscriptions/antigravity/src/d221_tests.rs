@@ -128,6 +128,14 @@ fn d226_setup_token_paste_is_unsupported_even_when_new_accounts_are_allowed() {
     assert!(host.http().calls().is_empty());
     let listed = block_on(host.context().accounts().list()).expect("list");
     assert!(listed.is_empty());
+    let long = format!("sk-ant-oat{}", "a".repeat(600));
+    let non_ascii = "sk-ant-oat01-café";
+    for text in [long.as_str(), non_ascii] {
+        let error = block_on(sub.import_accounts(text, host.context())).expect_err("shape");
+        assert_eq!(error.kind(), PluginErrorKind::Unsupported);
+        assert!(!error.to_string().contains("sk-ant-oat"), "{error}");
+    }
+    assert!(host.http().calls().is_empty());
 }
 
 #[test]

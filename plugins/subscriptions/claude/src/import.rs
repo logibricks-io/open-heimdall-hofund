@@ -131,6 +131,12 @@ fn collect_import_rows(value: &Value) -> Result<Vec<Imported>, PluginError> {
         for item in items {
             walk_import_lenient(item, &mut out);
         }
+        // A setup-token in the array keeps the other entries so the caller
+        // sees the first failure after that account is stored. An array with
+        // no setup-token stays unrecognized when its strings are not logins.
+        if !out.iter().any(|row| matches!(row, Imported::Setup(_))) {
+            out.retain(|row| !matches!(row, Imported::Other | Imported::Reject(_)));
+        }
         return Ok(out);
     }
     walk_import_strict(value, &mut out)?;
@@ -138,17 +144,25 @@ fn collect_import_rows(value: &Value) -> Result<Vec<Imported>, PluginError> {
 }
 
 fn walk_import_lenient(value: &Value, out: &mut Vec<Imported>) {
-    let _ = walk_import_strict(value, out);
+    let _ = walk_import(value, out, true);
 }
 
 fn walk_import_strict(value: &Value, out: &mut Vec<Imported>) -> Result<(), PluginError> {
+    walk_import(value, out, false)
+}
+
+fn walk_import(value: &Value, out: &mut Vec<Imported>, lenient: bool) -> Result<(), PluginError> {
     match value {
         Value::Array(items) => {
             for item in items {
-                walk_import_lenient(item, out);
+                if lenient {
+                    let _ = walk_import(item, out, true);
+                } else {
+                    walk_import(item, out, false)?;
+                }
             }
         }
-        Value::String(text) => push_setup_text(text, out)?,
+        Value::String(text) => push_setup_text(text, out, lenient)?,
         Value::Object(map) => {
             if map.get("credentials").and_then(Value::as_object).is_some()
                 && !json_str(map, &["platform"]).is_empty()
@@ -181,15 +195,24 @@ enum Imported {
 }
 
 /// A pasted line, or a JSON string, that is a setup-token rather than a sign-in.
-fn push_setup_text(text: &str, out: &mut Vec<Imported>) -> Result<(), PluginError> {
+///
+/// `lenient` records a refusal or an unrecognized string so a JSON array can
+/// store the setup-token and then report the first other entry. A single JSON
+/// string still fails immediately on a refusal and ignores an unrecognized value.
+fn push_setup_text(text: &str, out: &mut Vec<Imported>, lenient: bool) -> Result<(), PluginError> {
     match classify_token(text) {
-        Classified::Setup(token) => {
-            out.push(Imported::Setup(token));
-            Ok(())
+        Classified::Setup(token) => out.push(Imported::Setup(token)),
+        Classified::Reject(message) => {
+            if lenient {
+                out.push(Imported::Reject(message));
+            } else {
+                return Err(PluginError::config(message));
+            }
         }
-        Classified::Reject(message) => Err(PluginError::config(message)),
-        Classified::Other => Ok(()),
+        Classified::Other if lenient => out.push(Imported::Other),
+        Classified::Other => {}
     }
+    Ok(())
 }
 
 enum Classified {
@@ -1112,6 +1135,26 @@ mod tests {
             message.contains("doesn't say which Claude account"),
             "{message}"
         );
+        assert!(!message.contains(token), "{message}");
+        assert!(!message.contains("sk-ant-api03-key"), "{message}");
+        let listed = block_on(host.context().accounts().list()).expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(setup_secret(&host, listed[0].id()), token);
+    }
+
+    #[test]
+    fn d226_import_json_array_keeps_the_setup_token_and_refuses_the_rest() {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let token = "sk-ant-oat01-json-array-mixed";
+        let text = format!(r#"["{token}","sk-ant-ort01-bare","sk-ant-api03-key"]"#);
+        let error = block_on(store(host.context(), &text)).expect_err("mixed array");
+        let message = error.to_string();
+        assert!(
+            message.contains("doesn't say which Claude account"),
+            "{message}"
+        );
+        assert!(!message.contains("API key"), "{message}");
         assert!(!message.contains(token), "{message}");
         assert!(!message.contains("sk-ant-api03-key"), "{message}");
         let listed = block_on(host.context().accounts().list()).expect("list");
