@@ -169,6 +169,7 @@ fn fixture(members: &[(&'static str, Option<&str>, Answer)]) -> Fixture {
             fallback: false,
             effort: String::new(),
             cold_after: hofund_router::affinity::CACHE_COLD,
+            service_tier: String::new(),
             units: Vec::new(),
         })
         .collect();

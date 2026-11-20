@@ -2264,6 +2264,7 @@ name = "hofund-daemon"
 version = "0.2.0-rc.2"
 dependencies = [
  "async-trait",
+ "axum",
  "bytes",
  "chrono",
  "futures-util",
@@ -2283,6 +2284,7 @@ dependencies = [
  "hofund-plugin-registry",
  "hofund-plugin-sdk",
  "hofund-plugin-subscription-antigravity",
+ "hofund-plugin-subscription-chatgpt-api",
  "hofund-plugin-subscription-qoder",
  "hofund-provider",
  "hofund-quirks",

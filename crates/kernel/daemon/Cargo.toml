@@ -63,8 +63,10 @@ path = "tests/control_group_rename_keys.rs"
 required-features = ["test-util"]
 
 [dev-dependencies]
+axum = "0.8.9"
 hofund-kit-subscription = { workspace = true }
 hofund-plugin-subscription-antigravity = { workspace = true }
+hofund-plugin-subscription-chatgpt-api = { workspace = true }
 hofund-plugin-subscription-qoder = { workspace = true }
 hofund-agent = { workspace = true, features = ["test-fixtures"] }
 hofund-control-client = { workspace = true }

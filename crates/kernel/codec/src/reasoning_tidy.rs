@@ -67,6 +67,10 @@ impl RawTap for ReasoningTap {
     fn tokens(&self) -> (Option<i64>, Option<i64>) {
         self.inner.tokens()
     }
+
+    fn served_tier(&self) -> String {
+        self.inner.served_tier()
+    }
 }
 
 /// SSE lines with each `data:` line's reasoning items made over, line ends

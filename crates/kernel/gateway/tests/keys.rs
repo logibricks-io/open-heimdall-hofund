@@ -195,6 +195,7 @@ fn fixture() -> Fixture {
         nearly_spent: false,
         fallback: false,
         effort: String::new(),
+        service_tier: String::new(),
         units: Vec::new(),
     };
     let routes = BTreeMap::from([

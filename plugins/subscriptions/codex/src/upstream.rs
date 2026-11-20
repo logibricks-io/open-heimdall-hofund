@@ -245,6 +245,10 @@ fn unreadable_refusal(status: Option<u16>) -> bool {
 
 #[hofund_plugin_sdk::async_trait]
 impl UpstreamProvider for CodexUpstream {
+    fn attempt_base(&self) -> String {
+        self.endpoints.base.clone()
+    }
+
     async fn execute(
         &self,
         mut request: Request,

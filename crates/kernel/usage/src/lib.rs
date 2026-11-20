@@ -30,7 +30,10 @@ pub use fx::{CnyRate, DisplayCurrency, Fx, RateFetcher};
 pub use gateway_sessions::{GatewayModelTotals, GatewaySession, gateway_sessions, local_date};
 pub use key::{CallerModel, CallerTotals};
 pub use limits::{KeyUsage, UsageDetails};
-pub use price::{RowPricing, TokenPrice, token_bearing};
+pub use price::{
+    GPT62_ULTRAFAST_FULL_RATE_UNIX, RowPricing, TokenPrice, billed_tier, meaningful_served_tier,
+    price_at_tier, tier_multiplier, token_bearing,
+};
 pub use report::{
     CSV_HEADER, ReportWindow, SpeedTotals, account_of_upstream, csv_field, format_csv, parse_days,
     parse_last, parse_since, row_matches_filter, speed_totals,
@@ -182,6 +185,12 @@ pub struct Row {
     pub flow_ms: Option<i64>,
     /// Model id reported by the upstream reply when recorded.
     pub served_model: String,
+    /// Tier the client asked for, after `fast` is read as `priority`.
+    pub tier_asked: String,
+    /// Tier sent upstream.
+    pub tier_sent: String,
+    /// Tier the reply named, when it named one.
+    pub tier_served: String,
     /// Client session id from gateway headers when recorded.
     pub session_id: String,
     /// First native session header, when one was sent.
@@ -283,6 +292,9 @@ impl Ledger {
             ("first_reasoning_ms", "INTEGER"),
             ("flow_ms", "INTEGER"),
             ("served_model", "TEXT NOT NULL DEFAULT ''"),
+            ("tier_asked", "TEXT NOT NULL DEFAULT ''"),
+            ("tier_sent", "TEXT NOT NULL DEFAULT ''"),
+            ("tier_served", "TEXT NOT NULL DEFAULT ''"),
         ] {
             ensure_column(&connection, column, declaration)?;
         }
@@ -336,7 +348,8 @@ impl Ledger {
                         priced, cost_usd, price_input, price_output, price_cache_read,
                         price_cache_write, price_cache_write_1h, outcome, provider_key_id,
                         client_agent, ttft_ms, session_id, native_session_id, endpoint, kind,
-                        first_text_ms, first_reasoning_ms, flow_ms, served_model
+                        first_text_ms, first_reasoning_ms, flow_ms, served_model,
+                        tier_asked, tier_sent, tier_served
                  FROM requests ORDER BY id",
             )
             .map_err(|error| UsageError(error.to_string()))?;
@@ -473,7 +486,8 @@ impl Ledger {
                         priced, cost_usd, price_input, price_output, price_cache_read,
                         price_cache_write, price_cache_write_1h, outcome, provider_key_id,
                         client_agent, ttft_ms, session_id, native_session_id, endpoint, kind,
-                        first_text_ms, first_reasoning_ms, flow_ms, served_model
+                        first_text_ms, first_reasoning_ms, flow_ms, served_model,
+                        tier_asked, tier_sent, tier_served
                  FROM requests WHERE created_unix >= ?1 ORDER BY id DESC LIMIT ?2",
             )
             .map_err(|error| UsageError(error.to_string()))?;
@@ -580,6 +594,9 @@ fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
         first_reasoning_ms: row.get(31)?,
         flow_ms: row.get(32)?,
         served_model: row.get(33)?,
+        tier_asked: row.get(34)?,
+        tier_sent: row.get(35)?,
+        tier_served: row.get(36)?,
     })
 }
 
@@ -754,6 +771,21 @@ mod tests {
             status: "200".to_owned(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn d224_usage_row_keeps_the_billed_tiers() {
+        let dir = tempfile::tempdir().expect("dir");
+        let ledger = Ledger::open(&dir.path().join("usage.sqlite")).expect("ledger");
+        let mut stored = row(10, Some(1), Some(2));
+        stored.tier_asked = "priority".to_owned();
+        stored.tier_sent = "ultrafast".to_owned();
+        stored.tier_served = "priority".to_owned();
+        ledger.record(&stored).expect("record");
+        let rows = ledger.rows().expect("rows");
+        assert_eq!(rows[0].tier_asked, "priority");
+        assert_eq!(rows[0].tier_sent, "ultrafast");
+        assert_eq!(rows[0].tier_served, "priority");
     }
 
     #[test]

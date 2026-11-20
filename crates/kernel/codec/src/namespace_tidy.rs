@@ -145,4 +145,8 @@ impl crate::RawTap for NamespaceTap {
     fn tokens(&self) -> (Option<i64>, Option<i64>) {
         self.inner.tokens()
     }
+
+    fn served_tier(&self) -> String {
+        self.inner.served_tier()
+    }
 }

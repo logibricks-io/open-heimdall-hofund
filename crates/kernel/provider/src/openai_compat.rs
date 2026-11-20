@@ -50,6 +50,11 @@ impl OpenAiCompat {
         let direct = endpoint.base_url.clone();
         let attempt = AttemptRoute {
             base_url: direct.clone(),
+            protocol: match protocol {
+                OpenAiProtocol::Chat => "openai-chat",
+                OpenAiProtocol::Responses => "openai-responses",
+            }
+            .to_owned(),
             route: route_id(&endpoint.id, &endpoint.api_key),
             keeps_responses: protocol == OpenAiProtocol::Responses
                 && responses_kept_by_host(&direct),

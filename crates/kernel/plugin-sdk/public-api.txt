@@ -288,6 +288,7 @@ rsa::PrivateKey::fn public_key_pkcs1_base64url (& self) -> Result < String , Plu
 rsa::fn encrypt_oaep_for_test (public_key : & str , plaintext : & str) -> Result < String , PluginError >
 rsa::fn encrypt_pkcs1_for_test (public_key : & str , plaintext : & str) -> Result < String , PluginError >
 serde
+service_tier
 sigv4::AwsSigner derives(Clone)
 sigv4::AwsSigner::fn fixed (mut self , unix_secs : u64 , host : impl Into < String >) -> Self
 sigv4::AwsSigner::fn new (region : impl Into < String > , access_key_id : impl Into < String > , secret_access_key : secrecy :: SecretString ,) -> Self
@@ -382,7 +383,9 @@ wire::Target derives(Clone)
 wire::Target::const fn allocation_quota_rate (mut self , enabled : bool) -> Self
 wire::Target::const fn chatgpt_codex_zstd (mut self , enabled : bool) -> Self
 wire::Target::const fn generate_in_body (mut self , enabled : bool) -> Self
+wire::Target::const fn protocol (& self) -> ProtocolId
 wire::Target::const fn request_body_gzip (mut self , enabled : bool) -> Self
+wire::Target::fn base_url (& self) -> & str
 wire::Target::fn classify_status (mut self , classify : StatusClassify) -> Self
 wire::Target::fn credential (mut self , credential : CredentialStyle) -> Self
 wire::Target::fn headers (mut self , headers : Vec < (String , String) >) -> Self

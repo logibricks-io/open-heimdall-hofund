@@ -396,9 +396,9 @@ fn write_csv_row(out: &mut String, row: &Row) -> Result<(), UsageError> {
         opt_i64(row.cache_write_1h_tokens),
         String::new(),
         bool_cell(handed_on),
-        String::new(),
-        String::new(),
-        String::new(),
+        row.tier_asked.clone(),
+        row.tier_sent.clone(),
+        row.tier_served.clone(),
         String::new(),
         String::new(),
     ];
