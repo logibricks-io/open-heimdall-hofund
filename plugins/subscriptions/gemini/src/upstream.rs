@@ -84,7 +84,7 @@ impl UpstreamProvider for GeminiUpstream {
                 &access,
             )
             .await;
-        match self
+        let sent = match self
             .send(&access, &project, request.clone(), inbound, flags)
             .await
         {
@@ -98,7 +98,8 @@ impl UpstreamProvider for GeminiUpstream {
                 self.send(&renewed, &project, request, inbound, flags).await
             }
             other => other,
-        }
+        };
+        sent.map_err(hofund_plugin_sdk::note_google_sign_in)
     }
 
     async fn probe(&self, query: &ProbeQuery) -> Result<ProbeReport, PluginError> {

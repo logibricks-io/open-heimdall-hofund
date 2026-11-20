@@ -1,4 +1,11 @@
 [[plugin]]
+id = "agy-cli"
+kind = "subscription"
+path = "plugins/subscriptions/agy-cli"
+package = "hofund-plugin-subscription-agy-cli"
+feature = "agy-cli"
+
+[[plugin]]
 id = "antigravity"
 kind = "subscription"
 path = "plugins/subscriptions/antigravity"
