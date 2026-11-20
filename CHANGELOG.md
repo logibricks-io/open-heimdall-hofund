@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- D-229: A Copilot turn refused with "too many images" learns that model's cap, replaces the oldest images outside the latest user message with a placeholder, and sends the turn once more. Later turns for that account and model are fitted before they are sent. A turn already within the cap is unchanged. When the latest user message alone is over the cap, the refusal is returned unchanged. The cap comes from the refusal, not from the model list.
 - D-234: A Claude subscription account, or an Anthropic API key whose upstream is
   `api.anthropic.com`, that the vendor has turned off rests for two hours and
   the routing group asks the next member, including that provider's other
