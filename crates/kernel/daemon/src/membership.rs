@@ -902,7 +902,9 @@ where
             cooldowns.revision_for_model(&id, &model)
         };
         // A count or a forwarded call is a side call: it is never a served
-        // chat, and an endpoint it does not have says nothing about the member.
+        // chat. It cools the member only for a rate limit, a transport
+        // failure, or a plugin mark that the account is restricted or that
+        // the failure should still move on.
         let is_side = matches!(job, Job::Count(..) | Job::Forward(..));
         Box::pin(async move {
             let outcome = inner.call(job).await;
@@ -949,6 +951,9 @@ where
 fn count_cools(error: &PluginError) -> bool {
     use hofund_plugin_api::PluginErrorKind;
 
+    if error.is_account_restricted() || error.is_ordinary_failure() {
+        return true;
+    }
     match error.kind() {
         PluginErrorKind::Status => error.status() == Some(429),
         PluginErrorKind::Connect
@@ -1260,6 +1265,8 @@ pub(crate) fn into_plugin(error: ProviderError) -> PluginError {
     let credit = error.is_credit();
     let credit_soon = error.credit_soon();
     let cooldown = error.cools();
+    let account_restricted = error.is_account_restricted();
+    let ordinary_failure = error.is_ordinary_failure();
     let status = error.status;
     let billed = error.billed().cloned();
     let credit_message = credit.then(|| error.message.clone());
@@ -1300,6 +1307,12 @@ pub(crate) fn into_plugin(error: ProviderError) -> PluginError {
     }
     if let Some(billed) = billed {
         converted = converted.with_billed(billed);
+    }
+    if account_restricted {
+        converted = converted.account_restricted();
+    }
+    if ordinary_failure {
+        converted = converted.ordinary_failure();
     }
     converted
 }
@@ -1417,6 +1430,29 @@ mod tests {
             assert_eq!(restored.reset_after(), Some(Duration::from_secs(240)));
             assert!(restored.credit_soon());
         }
+    }
+
+    #[test]
+    fn d234_account_restricted_survives_provider_round_trip() {
+        let error =
+            ProviderError::status(400, "This organization has been disabled.").account_restricted();
+        let plugin = super::into_plugin(error);
+        assert!(plugin.is_account_restricted());
+        assert!(plugin.cools());
+        assert!(!plugin.skips_failover_same_plugin());
+        assert_eq!(plugin.status(), Some(400));
+        let restored = crate::adapt::provider_error(plugin);
+        assert!(restored.is_account_restricted());
+        assert!(!restored.is_ordinary_failure());
+        assert_eq!(restored.status, Some(400));
+
+        let ordinary = ProviderError::status(400, "relay copy").ordinary_failure();
+        let plugin = super::into_plugin(ordinary);
+        assert!(plugin.is_ordinary_failure());
+        assert!(!plugin.is_account_restricted());
+        let restored = crate::adapt::provider_error(plugin);
+        assert!(restored.is_ordinary_failure());
+        assert!(!restored.is_account_restricted());
     }
 
     struct Boom {
@@ -2624,6 +2660,183 @@ mod tests {
                 .expect("transport rest");
             assert_eq!(cooling.cause(), hofund_router::CooldownCause::Failure);
         }
+    }
+
+    struct CountHits {
+        hits: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Provider for CountHits {
+        fn id(&self) -> &str {
+            "spare"
+        }
+
+        async fn execute(
+            &self,
+            _request: Request,
+            _inbound_protocol: &str,
+        ) -> Result<Completion, ProviderError> {
+            Ok(raw_ok())
+        }
+
+        async fn count_input(
+            &self,
+            _request: Request,
+            _inbound_protocol: &str,
+        ) -> Result<hofund_provider::CountOutcome, ProviderError> {
+            self.hits.fetch_add(1, Ordering::SeqCst);
+            Ok(hofund_provider::CountOutcome::Counted(3))
+        }
+    }
+
+    #[tokio::test]
+    async fn d234_account_off_count_rests_and_the_next_count_skips_the_member() {
+        for (base, restricted, wait) in [
+            (
+                "https://api.anthropic.com",
+                true,
+                Duration::from_secs(2 * 60 * 60),
+            ),
+            ("https://relay.example.com", false, Duration::from_secs(60)),
+        ] {
+            let root = tempfile::tempdir().expect("root");
+            let host = hofund_plugin_host::TestHost::open(
+                hofund_plugin_api::PluginId::from_static("anthropic"),
+                root.path(),
+            );
+            host.http().enqueue_response(
+                400,
+                &[("content-type", "application/json")],
+                br#"{"type":"error","error":{"type":"invalid_request_error","message":"This organization has been disabled."}}"#,
+            );
+            let mut endpoint = hofund_provider::Endpoint::new("d234", base);
+            endpoint.api_key = "test-key".to_owned();
+            let upstream =
+                hofund_plugin_registry::anthropic(endpoint, host.context()).expect("provider");
+            let official = built_member(
+                "official",
+                Arc::new(crate::adapt::ProviderAdapter::new("official", upstream)),
+            );
+            let hits = Arc::new(AtomicUsize::new(0));
+            let spare = built_member(
+                "spare",
+                Arc::new(CountHits {
+                    hits: Arc::clone(&hits),
+                }),
+            );
+            let start = std::time::Instant::now();
+            let book = Arc::new(Cooldowns::with_clock(
+                CooldownPolicy::default(),
+                Arc::new(move || start),
+            ));
+            let snapshot = open(
+                &BTreeMap::from([
+                    ("official".to_owned(), official),
+                    ("spare".to_owned(), spare),
+                ]),
+                route(&["official", "spare"]),
+                FailoverPolicy::default(),
+                Arc::clone(&book),
+            )
+            .expect("snapshot");
+            let request = serde_json::from_value(serde_json::json!({
+                "model": "demo",
+                "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+                "params": {"max_tokens": 16},
+            }))
+            .expect("request");
+            let counted = snapshot
+                .load()
+                .count(&request, "anthropic-messages")
+                .await
+                .unwrap_or_else(|error| panic!("{base}: {error}"));
+            assert_eq!(counted.upstream_id, "spare", "{base}");
+            assert_eq!(hits.load(Ordering::SeqCst), 1, "{base}");
+            assert_eq!(host.http().calls().len(), 1, "{base}");
+            let cooling = book
+                .cooling(&super::member_id("official"))
+                .unwrap_or_else(|| panic!("{base} should rest"));
+            let cause = if restricted {
+                hofund_router::CooldownCause::Restricted
+            } else {
+                hofund_router::CooldownCause::Failure
+            };
+            assert_eq!(cooling.cause(), cause, "{base}");
+            assert_eq!(cooling.until().duration_since(start), wait, "{base}");
+
+            let again = snapshot
+                .load()
+                .count(&request, "anthropic-messages")
+                .await
+                .unwrap_or_else(|error| panic!("{base} next: {error}"));
+            assert_eq!(again.upstream_id, "spare", "{base}");
+            assert_eq!(hits.load(Ordering::SeqCst), 2, "{base}");
+            assert_eq!(host.http().calls().len(), 1, "{base} still resting");
+        }
+    }
+
+    #[tokio::test]
+    async fn d234_unmarked_count_400_and_unsupported_do_not_rest() {
+        let root = tempfile::tempdir().expect("root");
+        let host = hofund_plugin_host::TestHost::open(
+            hofund_plugin_api::PluginId::from_static("anthropic"),
+            root.path(),
+        );
+        host.http().enqueue_response(
+            400,
+            &[("content-type", "application/json")],
+            br#"{"type":"error","error":{"type":"invalid_request_error","message":"bad request"}}"#,
+        );
+        let mut endpoint = hofund_provider::Endpoint::new("d234", "https://api.anthropic.com");
+        endpoint.api_key = "test-key".to_owned();
+        let upstream =
+            hofund_plugin_registry::anthropic(endpoint, host.context()).expect("provider");
+        let hits = Arc::new(AtomicUsize::new(0));
+        let book = cooldowns();
+        let snapshot = open(
+            &BTreeMap::from([
+                (
+                    "official".to_owned(),
+                    built_member(
+                        "official",
+                        Arc::new(crate::adapt::ProviderAdapter::new("official", upstream)),
+                    ),
+                ),
+                (
+                    "spare".to_owned(),
+                    built_member(
+                        "spare",
+                        Arc::new(CountHits {
+                            hits: Arc::clone(&hits),
+                        }),
+                    ),
+                ),
+            ]),
+            route(&["official", "spare"]),
+            FailoverPolicy::default(),
+            Arc::clone(&book),
+        )
+        .expect("snapshot");
+        let request = serde_json::from_value(serde_json::json!({
+            "model": "demo",
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+            "params": {"max_tokens": 16},
+        }))
+        .expect("request");
+        let Err(_) = snapshot.load().count(&request, "anthropic-messages").await else {
+            panic!("an unmarked 400 stops the count");
+        };
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+        assert_eq!(book.cooling(&super::member_id("official")), None);
+
+        let book = cooldowns();
+        run_count(
+            Ok(hofund_provider::CountOutcome::Unsupported),
+            Arc::clone(&book),
+        )
+        .await;
+        assert_eq!(book.cooling(&super::member_id("count")), None);
     }
 
     struct Forwards {
