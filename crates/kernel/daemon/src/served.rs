@@ -92,8 +92,10 @@ fn since_unix(now: SystemTime) -> i64 {
 mod tests {
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use hofund_plugin_api::PluginError;
+    use hofund_router::quota::SERVED_RETENTION;
     use hofund_router::{CooldownCause, CooldownPolicy, Cooldowns};
     use hofund_usage::{Ledger, Row};
 
@@ -136,31 +138,87 @@ mod tests {
         assert!(!unused.background_probe());
     }
 
-    #[test]
-    fn d240_an_old_key_row_does_not_answer_the_current_single_key() {
-        let dir = tempfile::tempdir().expect("dir");
-        let ledger = Ledger::open(&dir.path().join("usage.sqlite")).expect("ledger");
-        let answered = Row {
-            created_unix: 50,
+    fn unix_now() -> i64 {
+        i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_secs(),
+        )
+        .expect("unix")
+    }
+
+    fn window_start(now: i64) -> i64 {
+        now.saturating_sub(i64::try_from(SERVED_RETENTION.as_secs()).expect("window"))
+    }
+
+    fn answered_row(now: i64, key: &str) -> Row {
+        Row {
+            created_unix: now,
             upstream: "solo".to_owned(),
-            provider_key_id: "oldkey0001".to_owned(),
+            provider_key_id: key.to_owned(),
             status: "200".to_owned(),
             ..Row::default()
-        };
-        ledger.record(&answered).expect("record");
+        }
+    }
 
-        let cooldowns = book();
+    /// Both rows sit inside the retention window. The old key alone must not
+    /// answer the member, and the current key's row must. An empty query fails
+    /// before either cooldown is recorded.
+    #[test]
+    fn d240_an_old_key_row_does_not_answer_the_current_single_key() {
+        let now = unix_now();
+        let since = window_start(now);
         let single = member_id("solo");
         let configured = HashSet::from([single.clone()]);
         let mut current = HashMap::new();
         remember_single_key(&mut current, "solo", false, "newkey0002");
-        load(&cooldowns, &configured, &current, &ledger);
 
-        let cooling = cooldowns
+        let old_dir = tempfile::tempdir().expect("dir");
+        let old_ledger = Ledger::open(&old_dir.path().join("usage.sqlite")).expect("ledger");
+        old_ledger
+            .record(&answered_row(now, "oldkey0001"))
+            .expect("old row");
+        let old_rows = old_ledger.answered_keys(since).expect("old query");
+        assert!(
+            old_rows
+                .iter()
+                .any(|(upstream, key)| upstream == "solo" && key == "oldkey0001"),
+            "an empty query must not satisfy the test"
+        );
+        let cooldowns = book();
+        load(&cooldowns, &configured, &current, &old_ledger);
+        let old = cooldowns
+            .record_failure(&single, &marked())
+            .expect("old key");
+        assert_eq!(old.cause(), CooldownCause::Failure);
+        assert!(!old.background_probe());
+
+        let live_dir = tempfile::tempdir().expect("dir");
+        let live_ledger = Ledger::open(&live_dir.path().join("usage.sqlite")).expect("ledger");
+        live_ledger
+            .record(&answered_row(now, "oldkey0001"))
+            .expect("old row");
+        live_ledger
+            .record(&answered_row(now, "newkey0002"))
+            .expect("current row");
+        let live_rows = live_ledger.answered_keys(since).expect("current query");
+        assert!(
+            live_rows
+                .iter()
+                .any(|(upstream, key)| upstream == "solo" && key == "oldkey0001")
+                && live_rows
+                    .iter()
+                    .any(|(upstream, key)| upstream == "solo" && key == "newkey0002"),
+            "an empty query must not satisfy the test"
+        );
+        let cooldowns = book();
+        load(&cooldowns, &configured, &current, &live_ledger);
+        let live = cooldowns
             .record_failure(&single, &marked())
             .expect("current key");
-        assert_eq!(cooling.cause(), CooldownCause::Failure);
-        assert!(!cooling.background_probe());
+        assert_eq!(live.cause(), CooldownCause::Suspended);
+        assert!(live.background_probe());
     }
 
     #[test]

@@ -14,7 +14,7 @@
 //! | Account verification | Rests the whole account for 30 minutes when the error asks for verification. It does not climb the generic ladder. The message is kept, including any link, and is not rewritten. |
 //! | Contained panic | Uses the generic failure ladder with [`CooldownCause::Panic`]. |
 //! | Vendor account restriction | Rests the whole member for 2 hours, flat, and does not climb a ladder or count a generic failure. Unserved-model wording does not narrow it. A background model-list probe is not armed and cannot lift the rest. A plugin sets the mark when it knows the account. The next member, including that provider's other accounts, is still asked. |
-//! | Suspended subscription | A plugin marks a 401 as a subscription the vendor suspended. When this key has answered a request, or is already suspended, the member rests 24 hours flat and a background list probe is armed. The probe lifts the rest when the list answers. A key with no answer on record, a subscription account, or a key whose prior answer was forgotten after the suspension was cleared, takes the generic ladder and is not probed. The mark outlives the rest until a list answer, a real success, or an explicit clear. Replacing the key secret drops the answer and the mark. |
+//! | Suspended subscription | A plugin marks a 401 as a subscription the vendor suspended. When this key has answered a request, or is already suspended, the member rests 24 hours flat and a background list probe is armed. The probe lifts the rest when the list answers. A key with no answer on record, a subscription account, or a key whose prior answer was forgotten after the suspension was cleared, takes the generic ladder and is not probed. The mark outlives the rest until a list answer, a real success, or an explicit clear. Replacing the key secret drops the answer and the mark, makes a model success that started before the change stale, and emits a recovery when that change drops an active suspended rest. |
 //! | Ordinary failure mark | A plugin may mark a status the group should leave, including a 400, as an ordinary failure. It takes the generic failure ladder and is not a restricted rest. |
 //!
 //! Cancelled, unsupported, configuration, internal, unknown future, and other
@@ -322,6 +322,9 @@ struct Book {
     /// Keys whose last kept rest was a suspended subscription, including
     /// after that rest has expired.
     suspended: HashSet<MemberId>,
+    /// Newest secret-change epoch for a member. A success captured before
+    /// this value does not record an answer. Idle maintenance does not drop it.
+    invalidated: HashMap<MemberId, u64>,
     next_revision: u64,
     recoveries: VecDeque<(CooldownKey, CooldownCause)>,
 }
@@ -364,6 +367,7 @@ impl Cooldowns {
                 probe_missed: HashSet::new(),
                 answered: HashSet::new(),
                 suspended: HashSet::new(),
+                invalidated: HashMap::new(),
                 next_revision: 1,
                 recoveries: VecDeque::new(),
             }),
@@ -754,13 +758,15 @@ impl Cooldowns {
     }
 
     /// Drops the answer record and the suspension mark after the key secret
-    /// changes. Other rests stay.
+    /// changes, and makes a model success that started before the change stale.
+    /// An active suspended rest emits a recovery. Other rests stay.
     pub fn forget_prior_service(&self, id: &MemberId) {
         let now = (self.clock)();
         let mut book = self.lock();
         self.maintain_locked(&mut book, now);
         book.answered.remove(id);
         clear_suspension_locked(&mut book, id, now);
+        invalidate_member(&mut book, id);
     }
 
     /// Clears only one model's cooldown and ladder state after its success.
@@ -775,7 +781,8 @@ impl Cooldowns {
     ///
     /// Pass the returned revision to [`Self::record_success_if_unchanged`] when
     /// the call succeeds so it cannot erase a newer failure, panic, or
-    /// observation. Zero means the member has no member-wide entry.
+    /// observation. Zero means the member has no member-wide entry and no
+    /// secret change has superseded an in-flight call.
     #[must_use]
     pub fn revision(&self, id: &MemberId) -> u64 {
         self.scoped_revision(id, None)
@@ -793,13 +800,14 @@ impl Cooldowns {
         self.maintain_locked(&mut book, now);
         let key = CooldownKey::new(id, model);
         let member = CooldownKey::new(id, None);
-        let revision = if model.is_some() {
-            [&key, &member].into_iter().fold(0, |newest, key| {
-                newest.max(book.states.get(key).map_or(0, |state| state.revision))
-            })
-        } else {
-            book.states.get(&key).map_or(0, |state| state.revision)
-        };
+        let mut revision = book.invalidated.get(id).copied().unwrap_or(0);
+        if model.is_some() {
+            for key in [&key, &member] {
+                revision = revision.max(book.states.get(key).map_or(0, |state| state.revision));
+            }
+        } else if let Some(state) = book.states.get(&key) {
+            revision = revision.max(state.revision);
+        }
         for key in std::iter::once(&key).chain(model.is_some().then_some(&member)) {
             if let Some(state) = book.states.get_mut(key) {
                 state.touched = now;
@@ -822,14 +830,18 @@ impl Cooldowns {
         let now = (self.clock)();
         let mut book = self.lock();
         self.maintain_locked(&mut book, now);
-        book.answered.insert(id.clone());
-        forget_probe_guard(&mut book, id);
         let key = CooldownKey::new(id, model);
         let member = CooldownKey::new(id, None);
+        let superseded = revision.is_some_and(|captured| {
+            book.invalidated
+                .get(id)
+                .is_some_and(|epoch| *epoch > captured)
+        });
         let stale = match (model, revision) {
             (_, None) => false,
             (None, Some(revision)) => {
                 revision == 0
+                    || superseded
                     || !book
                         .states
                         .get(&key)
@@ -837,6 +849,7 @@ impl Cooldowns {
             }
             (Some(_), Some(revision)) => {
                 revision == 0
+                    || superseded
                     || [&key, &member].into_iter().any(|key| {
                         book.states
                             .get(key)
@@ -844,6 +857,13 @@ impl Cooldowns {
                     })
             }
         };
+        // Revision 0 records the first answer when no secret change has
+        // superseded it. Rest clearing stays a no-op in that case.
+        let first_answer = matches!(revision, Some(0)) && !superseded;
+        if !stale || first_answer {
+            book.answered.insert(id.clone());
+            forget_probe_guard(&mut book, id);
+        }
         if stale {
             return;
         }
@@ -1005,11 +1025,14 @@ impl Cooldowns {
         book.probe_missed.retain(|id| members.contains(id));
         book.answered.retain(|id| members.contains(id));
         book.suspended.retain(|id| members.contains(id));
+        book.invalidated.retain(|id, _| members.contains(id));
     }
 
     /// Removes one member after its provider identity changes.
     ///
-    /// The changed identity drops active rests without recovery events.
+    /// The changed identity drops active rests without recovery events. A
+    /// model success that started before the removal does not mark the member
+    /// answered.
     pub fn remove(&self, id: &MemberId) {
         let now = (self.clock)();
         let mut book = self.lock();
@@ -1023,6 +1046,7 @@ impl Cooldowns {
         book.probe_missed.remove(id);
         book.answered.remove(id);
         book.suspended.remove(id);
+        invalidate_member(&mut book, id);
     }
 
     /// Moves every rest, ladder, and probe record from one stable member id to
@@ -1059,6 +1083,10 @@ impl Cooldowns {
         }
         if book.suspended.remove(was) {
             book.suspended.insert(now.clone());
+        }
+        if let Some(epoch) = book.invalidated.remove(was) {
+            let kept = book.invalidated.remove(now).unwrap_or(0);
+            book.invalidated.insert(now.clone(), epoch.max(kept));
         }
         for (key, _) in &mut book.recoveries {
             if key.member == *was {
@@ -1656,19 +1684,38 @@ fn lift_suspended_rest(book: &mut Book, member: &CooldownKey) {
 fn clear_suspension_locked(book: &mut Book, id: &MemberId, now: Instant) {
     book.suspended.remove(id);
     let key = CooldownKey::new(id, None);
-    let Some(state) = book.states.get_mut(&key) else {
-        return;
+    let recovered = {
+        let Some(state) = book.states.get_mut(&key) else {
+            return;
+        };
+        let cause = if state
+            .cooling
+            .as_ref()
+            .is_some_and(|cooling| cooling.cause == CooldownCause::Suspended)
+        {
+            let cooling = state.cooling.take().expect("suspended rest");
+            state.idle_since = Some(now);
+            Some(cooling.cause)
+        } else {
+            None
+        };
+        if state.last_cause == Some(CooldownCause::Suspended) {
+            state.last_cause = None;
+        }
+        cause
     };
-    let suspended_cooling = state
-        .cooling
-        .as_ref()
-        .is_some_and(|cooling| cooling.cause == CooldownCause::Suspended);
-    if suspended_cooling {
-        state.cooling = None;
-        state.idle_since = Some(now);
+    if let Some(cause) = recovered {
+        recover(book, key, cause);
     }
-    if state.last_cause == Some(CooldownCause::Suspended) {
-        state.last_cause = None;
+}
+
+fn invalidate_member(book: &mut Book, id: &MemberId) {
+    let revision = next_revision(book);
+    book.invalidated.insert(id.clone(), revision);
+    for (key, state) in &mut book.states {
+        if key.member == *id {
+            state.revision = revision;
+        }
     }
 }
 

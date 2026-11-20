@@ -195,3 +195,70 @@ fn d240_a_stale_model_success_keeps_the_suspended_rest() {
     assert_eq!(kept.cause(), CooldownCause::Suspended);
     assert_eq!(kept.until(), cooling.until());
 }
+
+#[test]
+fn d240_a_first_model_success_records_the_answer() {
+    let (book, id, _) = fixture();
+    assert_eq!(book.revision_for_model(&id, "demo"), 0);
+    book.record_success_for_model_if_unchanged(&id, "demo", 0);
+    let cooling = book.record_failure(&id, &marked()).expect("answered");
+    assert_eq!(cooling.cause(), CooldownCause::Suspended);
+    assert!(cooling.background_probe());
+}
+
+fn assert_pre_change_success_is_stale(replace: fn(&Cooldowns, &MemberId)) {
+    let (book, id, _) = fixture();
+    book.note_answered(&id);
+    let zero = book.revision_for_model(&id, "demo");
+    assert_eq!(zero, 0);
+    replace(&book, &id);
+    book.record_success_for_model_if_unchanged(&id, "demo", zero);
+    let unmarked = book.record_failure(&id, &marked()).expect("unanswered");
+    assert_eq!(unmarked.cause(), CooldownCause::Failure);
+    assert!(!unmarked.background_probe());
+
+    book.note_answered(&id);
+    book.record_failure(&id, &marked()).expect("rest");
+    let revision = book.revision_for_model(&id, "demo");
+    assert_ne!(revision, 0);
+    replace(&book, &id);
+    book.record_success_for_model_if_unchanged(&id, "demo", revision);
+    let removed = book.record_failure(&id, &marked()).expect("state removed");
+    assert_eq!(removed.cause(), CooldownCause::Failure);
+    assert!(!removed.background_probe());
+
+    let fresh = book.revision_for_model(&id, "demo");
+    assert_ne!(fresh, 0);
+    assert_ne!(fresh, revision);
+    book.record_success_for_model_if_unchanged(&id, "demo", fresh);
+    let again = book
+        .record_failure(&id, &marked())
+        .expect("answered after the change");
+    assert_eq!(again.cause(), CooldownCause::Suspended);
+    assert!(again.background_probe());
+}
+
+#[test]
+fn d240_a_key_move_makes_an_in_flight_model_success_stale() {
+    // A single-key replace keeps the member id and calls this directly.
+    assert_pre_change_success_is_stale(Cooldowns::forget_prior_service);
+}
+
+#[test]
+fn d240_a_reload_remove_makes_an_in_flight_model_success_stale() {
+    assert_pre_change_success_is_stale(Cooldowns::remove);
+}
+
+#[test]
+fn d240_a_secret_change_recovers_an_active_suspended_rest() {
+    let (book, id, _) = fixture();
+    book.note_answered(&id);
+    book.record_failure(&id, &marked()).expect("rest");
+    assert!(book.drain_recoveries().is_empty());
+    book.forget_prior_service(&id);
+    assert!(book.cooling(&id).is_none());
+    assert_eq!(
+        book.drain_recoveries(),
+        vec![(id, CooldownCause::Suspended)]
+    );
+}
