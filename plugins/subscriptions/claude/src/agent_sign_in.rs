@@ -23,12 +23,6 @@ pub(crate) async fn write(
     run_lock::wait(account, host).await?;
     creds::private_dir(home)?;
     let _refresh = lock::refresh_locks(home).await?;
-    let live = keychain::read_sign_in(host, home, ReadContext::AgentHome, false).await;
-    let live_refresh = live
-        .as_ref()
-        .and_then(|(credentials, _)| creds::refresh_token(&credentials.text));
-    sync_live_sign_in(home, host, live.as_ref().map(|(c, _)| c)).await?;
-
     let Some(secret) = host.accounts().secret(account).await? else {
         return Err(PluginError::auth(
             "no Claude Code sign-in is stored for this account",
@@ -41,8 +35,15 @@ pub(crate) async fn write(
                 "the stored setup-token account has no token",
             ));
         };
+        // The env value does not need a named live profile. The credentials
+        // file is left as it is.
         return crate::token_env::set_token(host, home, &token);
     }
+    let live = keychain::read_sign_in(host, home, ReadContext::AgentHome, false).await;
+    let live_refresh = live
+        .as_ref()
+        .and_then(|(credentials, _)| creds::refresh_token(&credentials.text));
+    sync_live_sign_in(home, host, live.as_ref().map(|(c, _)| c)).await?;
     if blob.flag(creds::LAPSED) {
         return Err(PluginError::auth(creds::LAPSED_REASON));
     }

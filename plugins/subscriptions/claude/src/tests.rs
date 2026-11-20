@@ -1893,6 +1893,39 @@ mod d226 {
     }
 
     #[test]
+    fn d226_use_writes_the_env_token_without_a_named_live_profile() {
+        let creds_text =
+            r#"{"claudeAiOauth":{"accessToken":"at-live","refreshToken":"rt-live","expiresAt":1}}"#;
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let sub = subscription(&host);
+        let id = setup_id(&host, &sub, SETUP_TOKEN);
+
+        let over = dir.path().join("over-cap");
+        std::fs::create_dir_all(&over).expect("over");
+        let over_creds = over.join(creds::CREDENTIALS_FILE);
+        std::fs::write(&over_creds, creds_text).expect("creds");
+        let mut big = vec![b'x'; (1024 * 1024) + 1];
+        big[0] = b'{';
+        std::fs::write(over.join(creds::PROFILE_FILE), &big).expect("profile");
+        let before = std::fs::read(&over_creds).expect("before");
+        block_on(sub.write_agent_sign_in(&id, &over, host.context())).expect("over cap");
+        assert_eq!(std::fs::read(&over_creds).expect("after"), before);
+        assert_eq!(env_token(&settings_value(&over)), Some(SETUP_TOKEN));
+
+        let unnamed = dir.path().join("no-oauth");
+        std::fs::create_dir_all(&unnamed).expect("unnamed");
+        let unnamed_creds = unnamed.join(creds::CREDENTIALS_FILE);
+        std::fs::write(&unnamed_creds, creds_text).expect("creds");
+        std::fs::write(unnamed.join(creds::PROFILE_FILE), r#"{"oauthAccount":{}}"#)
+            .expect("profile");
+        let before = std::fs::read(&unnamed_creds).expect("before");
+        block_on(sub.write_agent_sign_in(&id, &unnamed, host.context())).expect("no oauth");
+        assert_eq!(std::fs::read(&unnamed_creds).expect("after"), before);
+        assert_eq!(env_token(&settings_value(&unnamed)), Some(SETUP_TOKEN));
+    }
+
+    #[test]
     fn d226_user_set_token_is_left_alone() {
         let dir = tempfile::tempdir().expect("dir");
         let home = dir.path().join("claude");
