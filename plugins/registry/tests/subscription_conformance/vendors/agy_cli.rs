@@ -25,7 +25,9 @@ pub async fn run(cell: Cell) -> Result<(), String> {
         },
     ));
     let mut raw = RawTable::new();
-    raw.insert("command", RawValue::String("/opt/agy/agy".to_owned()));
+    // An absolute path on every host; the scripted child never runs it.
+    let command = dir.path().join("agy").display().to_string();
+    raw.insert("command", RawValue::String(command));
     let subscription = subscription(
         &hofund_plugin_subscription_agy_cli::AgyCliFactory,
         &host,

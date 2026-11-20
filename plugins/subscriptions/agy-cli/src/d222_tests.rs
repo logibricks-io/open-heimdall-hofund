@@ -23,6 +23,13 @@ fn host(dir: &std::path::Path) -> TestHost {
     )
 }
 
+/// An absolute command path on every host; scripted children never run it.
+const AGY: &str = if cfg!(windows) {
+    r"C:\opt\agy\agy.exe"
+} else {
+    "/opt/agy/agy"
+};
+
 fn factory_config(raw_command: &str) -> crate::AgyCliConfig {
     let mut raw = RawTable::new();
     raw.insert("command", RawValue::String(raw_command.to_owned()));
@@ -95,7 +102,7 @@ fn d222_import_writes_a_private_home_and_keeps_direct() {
             .exits(|_| Vec::new()),
     );
     let subscription = AgyCliFactory
-        .build(&factory_config("/opt/agy/agy"), host.context())
+        .build(&factory_config(AGY), host.context())
         .expect("build");
     let payload = r#"{
         "agy_proxy": "direct",
@@ -180,7 +187,7 @@ fn d222_import_copies_the_source_proxy_when_agy_has_none() {
             .exits(|_| Vec::new()),
     );
     let subscription = AgyCliFactory
-        .build(&factory_config("/opt/agy/agy"), host.context())
+        .build(&factory_config(AGY), host.context())
         .expect("build");
     let payload = r#"[{
         "type": "antigravity",
@@ -230,7 +237,7 @@ fn d222_quota_scopes_the_model_and_verification_keeps_one_link() {
         ]
     }));
     let subscription = AgyCliFactory
-        .build(&factory_config("/opt/agy/agy"), host.context())
+        .build(&factory_config(AGY), host.context())
         .expect("build");
     let upstream = subscription
         .upstream(&id, host.context())
@@ -318,7 +325,7 @@ fn d222_other_quota_words_do_not_scope_the_model() {
         PipedScript::new().on_stdin(|_, _| vec!["Quota exceeded. Resets in 1h.".to_owned()]),
     );
     let subscription = AgyCliFactory
-        .build(&factory_config("/opt/agy/agy"), host.context())
+        .build(&factory_config(AGY), host.context())
         .expect("build");
     let upstream = subscription
         .upstream(&id, host.context())
@@ -351,7 +358,7 @@ fn d222_success_json_and_stderr_still_rest() {
             .expect("seed");
     });
     let subscription = AgyCliFactory
-        .build(&factory_config("/opt/agy/agy"), host.context())
+        .build(&factory_config(AGY), host.context())
         .expect("build");
     let upstream = subscription
         .upstream(&id, host.context())
@@ -518,7 +525,7 @@ fn d222_contributes_a_bridge_and_quota_is_empty() {
         .validate_and_build(
             &{
                 let mut raw = RawTable::new();
-                raw.insert("command", RawValue::String("/opt/agy/agy".to_owned()));
+                raw.insert("command", RawValue::String(AGY.to_owned()));
                 raw
             },
             host.context(),
