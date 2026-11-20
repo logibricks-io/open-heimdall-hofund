@@ -2844,9 +2844,9 @@ async fn success(
         client_agent,
     )
     .with_ledger(ledger);
-    if !service_tier_sent.is_empty() {
-        meta.tier_sent = service_tier_sent.to_owned();
-    }
+    // An empty word is the tier left after the keep-list, not a missing
+    // observation. The asked word stays on `tier_asked`.
+    meta.tier_sent = service_tier_sent.to_owned();
     meta.clear_placeholder_served = clear_placeholder_served;
     meta.provider_key_id = provider_key_id.to_owned();
     let member = Some(upstream.to_owned());

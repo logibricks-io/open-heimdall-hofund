@@ -12,10 +12,15 @@ pub const ULTRA_OFFER: [&str; 2] = ["priority", "ultrafast"];
 
 /// Rewrites a top-level string `service_tier` of `fast` to `priority`.
 ///
-/// Any other value, including `Fast`, a non-string, or a nested field, is left
-/// as it arrived.
+/// The comparison ignores ASCII case, so `Fast` and `FAST` are the same word.
+/// Any other value, including a non-string or a nested field, is left as it
+/// arrived.
 pub fn rewrite_fast_word(object: &mut Map<String, Value>) {
-    if object.get("service_tier").and_then(Value::as_str) == Some("fast") {
+    if object
+        .get("service_tier")
+        .and_then(Value::as_str)
+        .is_some_and(|tier| tier.eq_ignore_ascii_case("fast"))
+    {
         object.insert(
             "service_tier".to_owned(),
             Value::String("priority".to_owned()),
@@ -135,20 +140,37 @@ pub fn downgrade_openai_ultrafast(
     None
 }
 
-/// Applies a member's configured tier, then the public API downgrade.
+/// Tiers a ChatGPT-backend body may still carry after the keep-list.
+const KEPT_BACKEND_TIERS: [&str; 2] = ["priority", "ultrafast"];
+
+/// Applies a member's configured tier, then the host rules.
 ///
-/// An empty `member_tier` keeps the tier already on the request.
+/// An empty `member_tier` keeps the tier already on the request. `fast` in
+/// any ASCII case becomes `priority` first. A ChatGPT-backend hop then drops
+/// every word other than `priority` and `ultrafast`, so the tier the router
+/// records is the one still on the body. The Codex body filter repeats that
+/// keep-list.
 pub fn apply_outbound(request: &mut Request, member_tier: &str, base_url: &str, protocol: &str) {
     if !member_tier.is_empty() {
         request
             .extensions
             .insert("service_tier", Value::String(member_tier.to_owned()));
     }
-    let current = extension_tier(&request.extensions);
-    if let Some(next) = downgrade_openai_ultrafast(base_url, protocol, &request.model, &current) {
+    let mut current = extension_tier(&request.extensions);
+    if current.eq_ignore_ascii_case("fast") {
+        current = "priority".to_owned();
         request
             .extensions
-            .insert("service_tier", Value::String(next.to_owned()));
+            .insert("service_tier", Value::String(current.clone()));
+    }
+    if let Some(next) = downgrade_openai_ultrafast(base_url, protocol, &request.model, &current) {
+        current = next.to_owned();
+        request
+            .extensions
+            .insert("service_tier", Value::String(current.clone()));
+    }
+    if chatgpt_backend(base_url) && !KEPT_BACKEND_TIERS.contains(&current.as_str()) {
+        request.extensions.remove("service_tier");
     }
 }
 
@@ -293,7 +315,7 @@ mod tests {
         rewrite_fast_word(&mut object);
         assert_eq!(object["service_tier"], Value::String("priority".to_owned()));
 
-        for kept in ["priority", "ultrafast", "flex", "Fast", "auto"] {
+        for kept in ["priority", "ultrafast", "flex", "auto"] {
             let mut object = Map::new();
             object.insert("service_tier".to_owned(), Value::String(kept.to_owned()));
             rewrite_fast_word(&mut object);
@@ -301,6 +323,16 @@ mod tests {
                 object["service_tier"],
                 Value::String(kept.to_owned()),
                 "{kept}"
+            );
+        }
+        for capital in ["Fast", "FAST", "fAsT"] {
+            let mut object = Map::new();
+            object.insert("service_tier".to_owned(), Value::String(capital.to_owned()));
+            rewrite_fast_word(&mut object);
+            assert_eq!(
+                object["service_tier"],
+                Value::String("priority".to_owned()),
+                "{capital}"
             );
         }
 
@@ -473,6 +505,52 @@ mod tests {
         );
         assert_eq!(configured_tier(true, false), "priority");
         assert_eq!(configured_tier(false, false), "");
+    }
+
+    #[test]
+    fn d224_chatgpt_backend_keeps_only_priority_and_ultrafast() {
+        let backend = "https://chatgpt.com/backend-api/codex";
+        let public_api = "https://api.openai.com/v1";
+        let mut flex = Request::new("gpt-6.2-sol");
+        flex.extensions
+            .insert("service_tier", Value::String("flex".to_owned()));
+        apply_outbound(&mut flex, "", backend, "openai-responses");
+        assert!(flex.extensions.get("service_tier").is_none());
+
+        let mut capital = Request::new("gpt-6.2-sol");
+        capital
+            .extensions
+            .insert("service_tier", Value::String("Fast".to_owned()));
+        apply_outbound(&mut capital, "", backend, "openai-responses");
+        assert_eq!(
+            capital
+                .extensions
+                .get("service_tier")
+                .and_then(Value::as_str),
+            Some("priority")
+        );
+
+        let mut kept = Request::new("gpt-6.2-sol");
+        kept.extensions
+            .insert("service_tier", Value::String("ultrafast".to_owned()));
+        apply_outbound(&mut kept, "", backend, "openai-responses");
+        assert_eq!(
+            kept.extensions.get("service_tier").and_then(Value::as_str),
+            Some("ultrafast")
+        );
+
+        let mut public_flex = Request::new("gpt-6.2-sol");
+        public_flex
+            .extensions
+            .insert("service_tier", Value::String("flex".to_owned()));
+        apply_outbound(&mut public_flex, "", public_api, "openai-responses");
+        assert_eq!(
+            public_flex
+                .extensions
+                .get("service_tier")
+                .and_then(Value::as_str),
+            Some("flex")
+        );
     }
 
     #[test]

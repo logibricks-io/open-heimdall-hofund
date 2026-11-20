@@ -152,6 +152,7 @@ impl ListPriceLookup for SolList {
 
 struct RawTier {
     id: MemberId,
+    base_url: &'static str,
     body: Vec<u8>,
 }
 
@@ -167,6 +168,15 @@ impl Member for RawTier {
 
     fn protocol(&self) -> &str {
         "plain"
+    }
+
+    fn attempt(&self) -> MemberAttempt {
+        MemberAttempt {
+            provider_id: self.route_id().to_owned(),
+            protocol: self.protocol().to_owned(),
+            base_url: self.base_url.to_owned(),
+            ..MemberAttempt::default()
+        }
     }
 
     async fn execute(&self, _: ModelRequest, _: &str) -> Result<Completion, PluginError> {
@@ -205,6 +215,7 @@ async fn d224_streamed_default_after_ultrafast_is_the_standard_rate() {
                 PresetId::try_from("p").expect("preset"),
                 MemberKey::from_static("raw"),
             ),
+            base_url: "",
             body: sse.as_bytes().to_vec(),
         }) as Arc<dyn Member>)],
     )]);
@@ -242,6 +253,76 @@ async fn d224_streamed_default_after_ultrafast_is_the_standard_rate() {
     let row = usage.rows().expect("rows").pop().expect("row");
     assert_eq!(row.tier_sent, "ultrafast");
     assert_eq!(row.tier_served, "default");
+    let price = row.price.expect("price");
+    assert_eq!(price.input, 1.0);
+    assert!((row.cost_usd.expect("cost") - 1.0).abs() < 1e-9);
+}
+
+#[tokio::test]
+async fn d224_chatgpt_flex_answered_default_is_the_list_price() {
+    let dir = TempDir::new().expect("tempdir");
+    let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("ledger"));
+    let catalog = ModelCatalog::open(
+        dir.path(),
+        CatalogSettings::default(),
+        Arc::new(OfflineFetcher),
+    )
+    .expect("catalog");
+    let pricer = Arc::new(EffectivePricer::new(
+        UsageSettings::default(),
+        catalog,
+        Arc::new(SolList),
+    ));
+    let sse = concat!(
+        "event: response.completed\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_flex\",\"model\":\"gpt-6.2-sol\",\"status\":\"completed\",\"service_tier\":\"default\",\"usage\":{\"input_tokens\":1000000,\"output_tokens\":0}}}\n\n",
+    );
+    let routes = BTreeMap::from([(
+        "gpt-6.2-sol".to_owned(),
+        vec![Hop::new(Arc::new(RawTier {
+            id: MemberId::from_preset(
+                PresetId::try_from("p").expect("preset"),
+                MemberKey::from_static("backend"),
+            ),
+            base_url: "https://chatgpt.com/backend-api",
+            body: sse.as_bytes().to_vec(),
+        }) as Arc<dyn Member>)],
+    )]);
+    let mut codecs = HashMap::new();
+    codecs.insert(
+        "/v1/responses".to_owned(),
+        Arc::new(OpenAiResponses) as Arc<dyn Codec>,
+    );
+    let gateway = Gateway::new(
+        Snapshot::new(Router::from_hops(routes, FailoverPolicy::default())),
+        "secret".to_owned(),
+        codecs,
+        Arc::clone(&usage),
+    )
+    .with_effective_pricer(pricer);
+    let response = gateway
+        .into_router()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header("authorization", "Bearer secret")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"model":"gpt-6.2-sol","input":"hi","stream":true,"service_tier":"flex"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let _ = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let row = usage.rows().expect("rows").pop().expect("row");
+    assert_eq!(row.tier_asked, "flex");
+    assert_eq!(row.tier_sent, "");
+    assert_eq!(row.tier_served, "");
     let price = row.price.expect("price");
     assert_eq!(price.input, 1.0);
     assert!((row.cost_usd.expect("cost") - 1.0).abs() < 1e-9);

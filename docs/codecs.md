@@ -17,13 +17,15 @@ Implemented:
 - `Converse` (`bedrock-converse`)
 
 Chat Completions and Responses read a top-level string `service_tier`. The word
-`fast` is stored and sent as `priority`. Other values, including `Fast`, are
-kept. On `api.openai.com`, Chat Completions never send `ultrafast` (they send
+`fast`, in any ASCII case, is stored and sent as `priority`. On
+`api.openai.com`, Chat Completions never send `ultrafast` (they send
 `priority`), and Responses send `ultrafast` only for `gpt-6.2-astra`,
 `gpt-6.2-sol`, `gpt-6-astra`, and `gpt-6.1-sol`, including dated snapshots of
-those ids. Other hosts keep the tier they were given. A Responses stream
-copies a top-level `service_tier`, or `response.service_tier` on
-`response.created` and `response.completed`, onto the start and delta events.
+those ids. A ChatGPT-backend hop drops every other word, including `flex`,
+before the sent tier is recorded; the Codex body filter repeats that
+keep-list. A Responses stream copies a top-level `service_tier`, or
+`response.service_tier` on `response.created` and `response.completed`, onto
+the start and delta events.
 
 There is no HTTP server here. The codec crate does not open sockets, and its
 tests do not use the network. `GenerativeLanguage` is both an inbound client
