@@ -32,6 +32,9 @@ pub(super) fn reset_time(
     span: Duration,
 ) -> Option<SystemTime> {
     let reset = reset.map(str::trim).filter(|s| !s.is_empty())?;
+    if let Some(instant) = hofund_plugin_sdk::time::parse_rfc3339(reset) {
+        return Some(instant);
+    }
     let (zone_name, rest) = split_zone(reset);
     let zone = Zone::resolve(zone_name);
     let rest = rest

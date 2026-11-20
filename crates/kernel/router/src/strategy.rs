@@ -58,6 +58,13 @@ pub struct Seat {
     pub cost: f64,
     /// Current cache-read price per million tokens.
     pub cache_cost: f64,
+    /// Context window in tokens. Zero means the window is not known.
+    /// Small context first reads it.
+    pub window: u64,
+    /// Whether this member should be used before the others while it still
+    /// has room. Small context first reads it. Callers leave it false when
+    /// no such preference is set.
+    pub lead: bool,
 }
 
 impl Seat {
@@ -88,6 +95,8 @@ impl Seat {
             priced: false,
             cost: 0.0,
             cache_cost: 0.0,
+            window: 0,
+            lead: false,
         }
     }
 }
@@ -119,6 +128,8 @@ pub struct Needs {
     pub price: bool,
     /// Current free-model flags and prices.
     pub free: bool,
+    /// Known context window per member.
+    pub window: bool,
 }
 
 /// A member-ordering callback.
@@ -139,6 +150,8 @@ pub struct Strategy {
     pub by_speed: bool,
     /// Whether it weighs current prices.
     pub by_price: bool,
+    /// Whether it weighs each member's context window.
+    pub by_window: bool,
 }
 
 impl Strategy {
@@ -154,6 +167,7 @@ impl Strategy {
             by_free: false,
             by_speed: false,
             by_price: false,
+            by_window: false,
         }
     }
 
@@ -191,6 +205,13 @@ impl Strategy {
         self.by_price = true;
         self
     }
+
+    /// Marks each member's context window as consumed.
+    #[must_use]
+    pub const fn by_window(mut self) -> Self {
+        self.by_window = true;
+        self
+    }
 }
 
 impl fmt::Debug for Strategy {
@@ -202,6 +223,7 @@ impl fmt::Debug for Strategy {
             .field("by_free", &self.by_free)
             .field("by_speed", &self.by_speed)
             .field("by_price", &self.by_price)
+            .field("by_window", &self.by_window)
             .finish_non_exhaustive()
     }
 }
@@ -388,6 +410,7 @@ impl StrategyState {
                 speed: strategy.by_speed,
                 price: strategy.by_price,
                 free: strategy.by_free,
+                window: strategy.by_window,
             })
     }
 
@@ -552,7 +575,7 @@ fn panic_text(payload: &(dyn std::any::Any + Send)) -> &str {
     }
 }
 
-fn builtins() -> [(&'static str, Strategy); 10] {
+fn builtins() -> [(&'static str, Strategy); 11] {
     [
         ("smart", Strategy::new(smart)),
         (
@@ -567,6 +590,7 @@ fn builtins() -> [(&'static str, Strategy); 10] {
         ("fast", Strategy::new(fastest).by_speed()),
         ("cheap", Strategy::new(cheapest).by_price()),
         ("drain", Strategy::new(drain).exact()),
+        ("fit", Strategy::new(small_first).by_window()),
     ]
 }
 
@@ -945,6 +969,52 @@ fn cheapest(_: &str, seats: &[Seat], _: &StrategyState) -> Vec<usize> {
     order
 }
 
+/// Small context first (`fit`), a group's routing. Starts from Smart's
+/// order, then stably sorts by band and by context window. A member set to
+/// be used first stays ahead of the others while it still has room, and a
+/// member all but used up stays behind them. Within a band a smaller known
+/// window comes first and an unknown window last. Equal windows keep
+/// Smart's order. Seats the request cannot fit stay in this permutation.
+/// On a `fit` route, dispatch leaves a known window the estimate already
+/// exceeds off the ask list until every member that may hold it is out of
+/// quota or credit.
+fn small_first(pool: &str, seats: &[Seat], state: &StrategyState) -> Vec<usize> {
+    let mut order = smart(pool, seats, state);
+    order.sort_by(|left, right| {
+        let (left_band, left_window) = fit_band(&seats[*left]);
+        let (right_band, right_window) = fit_band(&seats[*right]);
+        left_band
+            .cmp(&right_band)
+            .then_with(|| window_order(left_window, right_window))
+    });
+    order
+}
+
+fn fit_band(seat: &Seat) -> (u8, u64) {
+    let band = if seat_tier(seat) == 2 {
+        2
+    } else if seat.lead {
+        0
+    } else {
+        1
+    };
+    (band, seat.window)
+}
+
+fn window_order(left: u64, right: u64) -> std::cmp::Ordering {
+    if left == right {
+        return std::cmp::Ordering::Equal;
+    }
+    if left == 0 || right == 0 {
+        return if right == 0 {
+            std::cmp::Ordering::Less
+        } else {
+            std::cmp::Ordering::Greater
+        };
+    }
+    left.cmp(&right)
+}
+
 /// A stable insertion sort by a less-than that need not be a total order.
 /// `same_cost` is not transitive, so `sort_by` may panic on it; insertion
 /// sort is what the reference's stable sort does for pools of up to twenty.
@@ -1179,7 +1249,7 @@ mod tests {
         let strategy = state.registry().find("free").expect("free");
         assert!(strategy.by_free);
         for other in [
-            "smart", "order", "rotate", "usage", "pace", "weight", "fast", "cheap",
+            "smart", "order", "rotate", "usage", "pace", "weight", "fast", "cheap", "fit",
         ] {
             assert!(!state.registry().find(other).expect(other).by_free);
         }
@@ -1886,5 +1956,72 @@ mod tests {
                 &state
             )
         );
+    }
+
+    #[test]
+    fn d239_fit_orders_by_window_after_smart() {
+        use super::Needs;
+        let state = StrategyState::with_builtins();
+        let soon = std::time::UNIX_EPOCH + std::time::Duration::from_secs(2 * 3600);
+        let later = std::time::UNIX_EPOCH + std::time::Duration::from_secs(72 * 3600);
+        let mut seats = self::seats(&[
+            "1m",
+            "unknown",
+            "256k-later",
+            "200k-spent",
+            "256k-soon",
+            "200k",
+        ]);
+        seats[0].known = true;
+        seats[0].window = 1_000_000;
+        seats[1].known = true;
+        seats[2].known = true;
+        seats[2].window = 256_000;
+        seats[2].soon = vec![Some(later)];
+        seats[3].known = true;
+        seats[3].window = 100_000;
+        seats[3].used = 100.0;
+        seats[4].known = true;
+        seats[4].window = 256_000;
+        seats[4].soon = vec![Some(soon)];
+        seats[5].known = true;
+        seats[5].window = 200_000;
+
+        assert_eq!(routed(&state, "smart", &seats)[0], "256k-soon");
+        assert_eq!(
+            routed(&state, "fit", &seats),
+            [
+                "200k",
+                "256k-soon",
+                "256k-later",
+                "1m",
+                "unknown",
+                "200k-spent"
+            ]
+        );
+
+        seats[0].lead = true;
+        assert_eq!(routed(&state, "fit", &seats)[0], "1m");
+        seats[0].lead = false;
+        seats[3].lead = true;
+        let spent_lead = routed(&state, "fit", &seats);
+        assert_eq!(spent_lead.last().map(String::as_str), Some("200k-spent"));
+        assert_ne!(spent_lead[0], "200k-spent");
+
+        let strategy = state.registry().find("fit").expect("fit");
+        assert!(strategy.by_window);
+        assert!(!strategy.by_use && !strategy.by_free && !strategy.by_speed && !strategy.by_price);
+        assert_eq!(
+            state.needs("fit"),
+            Needs {
+                window: true,
+                ..Needs::default()
+            }
+        );
+        for name in [
+            "smart", "order", "rotate", "usage", "pace", "weight", "free", "fast", "cheap", "drain",
+        ] {
+            assert!(!state.needs(name).window, "{name}");
+        }
     }
 }

@@ -13,7 +13,23 @@ pub(crate) const LOGIN_ARGS: [&str; 3] = ["auth", "login", "--claudeai"];
 pub(crate) const STATUS_ARGS: [&str; 3] = ["auth", "status", "--json"];
 
 /// Reads subscription usage without calling a model.
-pub(crate) const USAGE_ARGS: [&str; 2] = ["-p", "/usage"];
+///
+/// JSON output carries the usage report beside the text. Empty tool and
+/// setting sources keep the read off the user's own Claude Code settings.
+pub(crate) const USAGE_ARGS: [&str; 12] = [
+    "-p",
+    "/usage",
+    "--output-format",
+    "json",
+    "--tools",
+    "",
+    "--strict-mcp-config",
+    "--setting-sources",
+    "",
+    "--settings",
+    r#"{"disableDeepLinkRegistration":"disable"}"#,
+    "--no-session-persistence",
+];
 
 /// How long `/usage` gets to finish.
 pub(crate) const USAGE_WAIT: Duration = Duration::from_secs(30);
@@ -200,7 +216,28 @@ pub(crate) fn strip_ansi(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_ansi;
+    use super::{USAGE_ARGS, strip_ansi};
+
+    #[test]
+    fn d238_usage_args_match_the_json_read() {
+        assert_eq!(
+            USAGE_ARGS,
+            [
+                "-p",
+                "/usage",
+                "--output-format",
+                "json",
+                "--tools",
+                "",
+                "--strict-mcp-config",
+                "--setting-sources",
+                "",
+                "--settings",
+                r#"{"disableDeepLinkRegistration":"disable"}"#,
+                "--no-session-persistence",
+            ]
+        );
+    }
 
     #[test]
     fn r5_29_strip_ansi_keeps_newlines() {
