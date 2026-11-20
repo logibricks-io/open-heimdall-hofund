@@ -1,0 +1,1 @@
+[{"type":"assistant","usage_report":{"rate_limits":{"limits":[{"kind":"session","percent":37.5,"resets_at":"2026-11-19T15:00:00.000Z"}],"extra_usage":null}}},{"type":"result","is_error":false,"result":"Current session: 13% used"}]
