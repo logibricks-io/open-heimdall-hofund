@@ -2249,3 +2249,62 @@ fn k6_replacement_moves_member_and_model_rests() {
     assert_eq!(rests.len(), 1);
     assert_eq!(rests[0].member, new.to_string());
 }
+
+#[test]
+fn d222_written_quota_reset_rests_the_model_until_that_time() {
+    let (book, id, clock) = fixture();
+    let written = Duration::from_secs(4_720);
+    let error = PluginError::quota_status(429, "Individual quota reached. Resets in 1h18m40s.")
+        .with_reset_after(written)
+        .with_model_scope();
+    let cooling = book
+        .record_failure_for_model(&id, "model-a", &error)
+        .expect("model rest");
+    assert_eq!(cooling.cause(), CooldownCause::Quota);
+    assert!(book.cooling(&id).is_none());
+    let left = book
+        .cooling_for_model(&id, "model-a")
+        .expect("model")
+        .until()
+        .duration_since(*clock.lock().expect("clock"));
+    assert_eq!(left, written);
+    assert!(book.cooling_for_model(&id, "model-b").is_none());
+}
+
+#[test]
+fn d222_quota_words_without_the_flag_rest_the_account() {
+    let (book, id, clock) = fixture();
+    let written = Duration::from_secs(HOUR);
+    let error =
+        PluginError::quota_status(429, "Quota exceeded. Resets in 1h.").with_reset_after(written);
+    let cooling = book
+        .record_failure_for_model(&id, "model-a", &error)
+        .expect("account rest");
+    assert_eq!(cooling.cause(), CooldownCause::Quota);
+    assert_eq!(remaining(&book, &id, &clock), written);
+    assert!(book.cooling_for_model(&id, "model-b").is_some());
+}
+
+#[test]
+fn d222_verify_rests_the_account_for_thirty_minutes() {
+    let (book, id, clock) = fixture();
+    let message = "agy bridge: this account needs to be verified: open <https://accounts.example/verify> in a browser signed in to it, verify it, then try again";
+    let error = PluginError::status_error(403, message).with_verify_rest();
+    let cooling = book
+        .record_failure_for_model(&id, "model-a", &error)
+        .expect("verify rest");
+    assert_eq!(cooling.cause(), CooldownCause::Verify);
+    assert_eq!(
+        remaining(&book, &id, &clock),
+        Duration::from_secs(30 * MINUTE)
+    );
+    assert_eq!(cooling.error().matches("needs to be verified").count(), 1);
+    assert!(cooling.error().contains("https://accounts.example/verify"));
+    assert!(book.cooling_for_model(&id, "model-b").is_some());
+    let permission = PluginError::status_error(403, "The caller does not have permission");
+    let (other, other_id, _) = fixture();
+    let generic = other
+        .record_failure(&other_id, &permission)
+        .expect("permission rest");
+    assert_eq!(generic.cause(), CooldownCause::Failure);
+}

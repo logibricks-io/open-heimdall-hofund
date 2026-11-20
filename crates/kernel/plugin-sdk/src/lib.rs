@@ -61,6 +61,7 @@ pub mod daily_warmup;
 pub mod digest;
 pub mod enc_v1;
 pub mod futures;
+pub mod google_rest;
 pub mod image;
 pub mod inflate;
 pub mod jwt;
@@ -72,6 +73,7 @@ pub mod probe;
 pub mod process;
 pub mod protobuf;
 pub mod register;
+pub mod role_price;
 pub mod rsa;
 pub mod sigv4;
 pub mod time;
@@ -80,6 +82,7 @@ pub mod uuid;
 pub mod wire;
 
 pub use futures::{FuturesUnordered, Race, next_ready, race};
+pub use google_rest::note_google_sign_in;
 pub use inflate::gzip;
 pub use oauth::{AccessToken, TokenError, form_body, parse_access_token, refresh_form};
 pub use page::{
@@ -88,6 +91,7 @@ pub use page::{
     string_items,
 };
 pub use register::Contribution;
+pub use role_price::orchestrator_price_ids;
 pub use transport::{Call, HttpRequest, HttpResponse, Reply, text_response};
 
 #[cfg(test)]
