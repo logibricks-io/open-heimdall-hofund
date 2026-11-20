@@ -134,6 +134,7 @@ expression: pretty_value!(&request)
     "thinking": {
       "type": "enabled",
       "budget_tokens": 128
-    }
+    },
+    "hofund_messages_wire": true
   }
 }
