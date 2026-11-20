@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- D-221: Antigravity sign-in, import, and add are refused for new accounts because Google suspends accounts it sees on Code Assist through Antigravity's own client. Saved accounts keep working and show a risk line. The message points at the agy CLI route. Gemini CLI is unchanged.
+
 ## [0.2.0-rc.2] - 2026-11-18
 
 This is a second preview (prerelease) of v0.2.0. It exists so the tag

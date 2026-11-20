@@ -115,6 +115,8 @@ pub struct SubscriptionListing {
     pub flow: &'static str,
     /// Accounts ordered by label and then id.
     pub accounts: Vec<AccountListing>,
+    /// Risk line when new enrollment is withdrawn and an account is saved.
+    pub notice: Option<String>,
 }
 
 /// One signed-in account. It carries no secret.
@@ -416,11 +418,21 @@ pub(crate) async fn list_in(opened: &[Opened]) -> Result<Vec<SubscriptionListing
                 needs_sign_in,
             });
         }
+        let notice = if accounts.is_empty() {
+            None
+        } else {
+            entry
+                .instance
+                .account_enrollment()
+                .risk()
+                .map(str::to_owned)
+        };
         listings.push(SubscriptionListing {
             id: entry.id.clone(),
             name: entry.name.clone(),
             flow: flow_name(entry.instance.flow().kind()),
             accounts,
+            notice,
         });
     }
     Ok(listings)
@@ -485,7 +497,7 @@ pub fn subscriptions_json(listings: &[SubscriptionListing]) -> String {
     let value: Vec<_> = listings
         .iter()
         .map(|listing| {
-            json!({
+            let mut value = json!({
                 "id": listing.id,
                 "name": listing.name,
                 "flow": listing.flow,
@@ -495,7 +507,11 @@ pub fn subscriptions_json(listings: &[SubscriptionListing]) -> String {
                     "ready": account.needs_sign_in.is_none(),
                     "needs_sign_in": account.needs_sign_in,
                 })).collect::<Vec<_>>(),
-            })
+            });
+            if let Some(notice) = &listing.notice {
+                value["notice"] = json!(notice);
+            }
+            value
         })
         .collect();
     serde_json::Value::Array(value).to_string()
@@ -909,12 +925,6 @@ where
     P: Stream<Item = String> + Unpin,
     W: Write,
 {
-    if subscription.id().as_str() == "antigravity" {
-        say(
-            out,
-            "warning: Google may suspend an Antigravity account it sees used outside Antigravity. Use one you can afford to lose.",
-        )?;
-    }
     let failed = |error: hofund_plugin_api::PluginError| SignInError::failed(error.to_string());
     let challenge = subscription
         .start_sign_in(ctx, host)
@@ -1140,9 +1150,9 @@ mod tests {
 
     use futures_util::{Stream, stream};
     use hofund_plugin_api::{
-        AccountId, AccountStatus, HostContext, LoopbackSpec, ModelList, PluginError, PluginId,
-        PluginKind, QuotaWindow, RawTable, SecretString, SignInChallenge, SignInCtx, SignInFlow,
-        SignInProof, Subscription, UpstreamProvider,
+        AccountEnrollment, AccountId, AccountStatus, HostContext, LoopbackSpec, ModelList,
+        PluginError, PluginId, PluginKind, QuotaWindow, RawTable, SecretString, SignInChallenge,
+        SignInCtx, SignInFlow, SignInProof, Subscription, UpstreamProvider,
     };
     use hofund_plugin_host::TestHost;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1182,6 +1192,7 @@ mod tests {
         mode: Mode,
         flow: SignInFlow,
         calls: Arc<Calls>,
+        enrollment: AccountEnrollment,
     }
 
     #[hofund_plugin_sdk::async_trait]
@@ -1194,11 +1205,18 @@ mod tests {
             &self.flow
         }
 
+        fn account_enrollment(&self) -> AccountEnrollment {
+            self.enrollment
+        }
+
         async fn start_sign_in(
             &self,
             ctx: &SignInCtx,
             host: &HostContext,
         ) -> Result<SignInChallenge, PluginError> {
+            if let Some(refusal) = self.enrollment.refusal() {
+                return Err(PluginError::config(refusal));
+            }
             match self.mode {
                 Mode::OpenUrl => {
                     let binding = host
@@ -1317,9 +1335,14 @@ mod tests {
 
         async fn import_accounts(
             &self,
-            _text: &str,
+            text: &str,
             _host: &HostContext,
         ) -> Result<Vec<AccountId>, PluginError> {
+            if let Some(refusal) = self.enrollment.refusal() {
+                let _ = text;
+                return Err(PluginError::config(refusal));
+            }
+            let _ = text;
             self.calls
                 .imports
                 .lock()
@@ -1337,6 +1360,10 @@ mod tests {
     }
 
     fn new_rig(mode: Mode) -> Rig {
+        new_enrolled_rig(mode, AccountEnrollment::Open)
+    }
+
+    fn new_enrolled_rig(mode: Mode, enrollment: AccountEnrollment) -> Rig {
         let dir = tempfile::tempdir().expect("dir");
         let plugin = PluginId::from_static(PLUGIN);
         let test = TestHost::open_for(PluginKind::Subscription, plugin.clone(), dir.path());
@@ -1352,6 +1379,7 @@ mod tests {
                 SignInFlow::Pkce
             },
             calls: Arc::clone(&calls),
+            enrollment,
         });
         Rig {
             _dir: dir,
@@ -1781,6 +1809,7 @@ mod tests {
         assert_eq!(listings.len(), 1);
         assert_eq!(listings[0].flow, "pkce");
         assert_eq!(listings[0].name, "Fake Subscription");
+        assert!(listings[0].notice.is_none());
         let ids: Vec<&str> = listings[0].accounts.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(ids, vec!["zeta", "lapsed"], "ordered by label, then id");
         let json = subscriptions_json(&listings);
@@ -1913,6 +1942,7 @@ mod tests {
                         mode: Mode::Device,
                         flow: SignInFlow::Pkce,
                         calls: Arc::clone(&calls),
+                        enrollment: AccountEnrollment::Open,
                     }),
                     host: host.context().clone(),
                     config_dir: dir.path().to_path_buf(),
@@ -1968,6 +1998,7 @@ mod tests {
                         mode: Mode::Device,
                         flow: SignInFlow::Pkce,
                         calls: Arc::clone(&calls),
+                        enrollment: AccountEnrollment::Open,
                     }),
                     host: host.context().clone(),
                     config_dir: _dir.path().to_path_buf(),
@@ -2100,5 +2131,72 @@ mod tests {
         .expect("managed browser sign-in");
         assert_eq!(result.as_str(), "fake-account");
         assert_eq!(*rig.calls.proofs.lock().expect("proofs"), ["await"]);
+    }
+
+    #[tokio::test]
+    async fn d221_risk_line_is_listed_only_for_a_saved_account() {
+        const RISK: &str = "saved-account risk line";
+        const REFUSAL: &str = "new-account refusal line";
+        let withdrawn = AccountEnrollment::Withdrawn {
+            risk: RISK,
+            refusal: REFUSAL,
+        };
+        let empty = new_enrolled_rig(Mode::Device, withdrawn);
+        let listings = list_in(&empty.opened()).await.expect("list");
+        assert!(listings[0].accounts.is_empty());
+        assert!(listings[0].notice.is_none());
+        assert!(!subscriptions_json(&listings).contains("notice"));
+
+        let saved = new_enrolled_rig(Mode::Device, withdrawn);
+        saved.add_account("saved", "Saved").await;
+        let listings = list_in(&saved.opened()).await.expect("list");
+        assert_eq!(listings[0].notice.as_deref(), Some(RISK));
+        let json = subscriptions_json(&listings);
+        assert!(json.contains(RISK), "{json}");
+
+        let mut out = Vec::new();
+        let error = drive_sign_in(
+            saved.fake.as_ref(),
+            saved.test.context(),
+            saved.test.loopback(),
+            saved.ctx(),
+            stream::empty(),
+            std::future::pending::<()>(),
+            Duration::from_secs(2),
+            &mut out,
+        )
+        .await
+        .expect_err("withdrawn");
+        assert!(error.to_string().contains(REFUSAL), "{error}");
+        let printed = String::from_utf8(out).expect("utf8");
+        assert!(!printed.contains("afford to lose"), "{printed}");
+
+        let (_dir, mut opened, calls) = google_import_rig();
+        opened[0].instance = Arc::new(Fake {
+            id: PluginId::from_static("antigravity"),
+            mode: Mode::Device,
+            flow: SignInFlow::Pkce,
+            calls: Arc::clone(&calls),
+            enrollment: withdrawn,
+        });
+        let error = super::accounts_import(
+            &opened,
+            r#"{"type":"antigravity","refresh_token":"synthetic","email":"u@example.test"}"#,
+        )
+        .await
+        .expect_err("refused import");
+        assert!(error.to_string().contains(REFUSAL), "{error}");
+        assert!(calls.imports.lock().expect("imports").is_empty());
+        let ids = super::accounts_import(
+            &opened,
+            r#"{"type":"gemini","refresh_token":"synthetic","email":"u@example.test"}"#,
+        )
+        .await
+        .expect("open import");
+        assert_eq!(ids, ["imported"]);
+        assert_eq!(
+            calls.imports.lock().expect("imports").as_slice(),
+            ["gemini"]
+        );
     }
 }

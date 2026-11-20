@@ -9,10 +9,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use hofund_plugin_api::{
-    AccountId, AccountStatus, BuildError, ConfigError, HostContext, LoopbackSpec, ModelList,
-    PluginError, PluginId, QuotaWindow, RawTable, RawValue, Schema, SecretString, SignInChallenge,
-    SignInCtx, SignInFlow, SignInFlowKind, SignInProof, Subscription, SubscriptionFactory,
-    SubscriptionSpec, UpstreamProvider, ValidConfig,
+    AccountEnrollment, AccountId, AccountStatus, BuildError, ConfigError, HostContext,
+    LoopbackSpec, ModelList, PluginError, PluginId, QuotaWindow, RawTable, RawValue, Schema,
+    SecretString, SignInChallenge, SignInCtx, SignInFlow, SignInFlowKind, SignInProof,
+    Subscription, SubscriptionFactory, SubscriptionSpec, UpstreamProvider, ValidConfig,
 };
 use hofund_plugin_sdk::Contribution;
 use hofund_plugin_sdk::oauth::{Pkce, SecretObject, TokenCache, constant_time_eq, new_state};
@@ -33,8 +33,11 @@ pub(crate) const SCOPES: &str = "https://www.googleapis.com/auth/cloud-platform 
      https://www.googleapis.com/auth/cclog \
      https://www.googleapis.com/auth/experimentsandconfigs";
 
-/// The account-suspension risk stated before sign-in.
-pub const SIGN_IN_WARNING: &str = "Google may suspend an Antigravity account it sees used outside Antigravity. Use one you can afford to lose.";
+/// Shown when a saved Antigravity account is still configured.
+pub const RISK_LINE: &str = "Google may suspend this saved Antigravity account: it sees Code Assist use through Antigravity's own client. Saved accounts keep working. Use the agy CLI route. Gemini CLI is unchanged.";
+
+/// Returned when sign-in, import, or add would create an Antigravity account.
+pub const ENROLLMENT_REFUSAL: &str = "Antigravity is withdrawn for new accounts: Google suspends accounts it sees on Code Assist through Antigravity's own client. Use the agy CLI route instead. Gemini CLI is unchanged.";
 
 static SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
     PluginId::from_static("antigravity"),
@@ -80,6 +83,7 @@ impl Default for Endpoints {
 pub fn factory_with_endpoints(endpoints: Endpoints) -> AntigravityFactory {
     AntigravityFactory {
         endpoints: Arc::new(endpoints),
+        allow_new_accounts: false,
     }
 }
 
@@ -87,6 +91,17 @@ pub fn factory_with_endpoints(endpoints: Endpoints) -> AntigravityFactory {
 #[derive(Clone, Debug)]
 pub struct AntigravityFactory {
     endpoints: Arc<Endpoints>,
+    allow_new_accounts: bool,
+}
+
+impl AntigravityFactory {
+    /// Lets a recording test create an account. User config cannot set this.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_new_accounts_for_test(mut self) -> Self {
+        self.allow_new_accounts = true;
+        self
+    }
 }
 
 #[doc(hidden)]
@@ -163,6 +178,7 @@ impl SubscriptionFactory for AntigravityFactory {
             pending: Mutex::new(HashMap::new()),
             tokens: Arc::new(TokenCache::new(tokens::REFRESH_MARGIN)),
             catalog: Arc::new(models::Catalog::default()),
+            allow_new_accounts: self.allow_new_accounts,
         }))
     }
 }
@@ -181,9 +197,18 @@ struct Antigravity {
     pending: Mutex<HashMap<String, Pending>>,
     tokens: Arc<TokenCache<SecretString>>,
     catalog: Arc<models::Catalog>,
+    allow_new_accounts: bool,
 }
 
 impl Antigravity {
+    fn enrollment_refusal(&self) -> Result<(), PluginError> {
+        if self.allow_new_accounts {
+            Ok(())
+        } else {
+            Err(PluginError::config(ENROLLMENT_REFUSAL))
+        }
+    }
+
     fn take_pending(&self, session: &str) -> Option<Pending> {
         self.pending
             .lock()
@@ -210,11 +235,23 @@ impl Subscription for Antigravity {
         &self.flow
     }
 
+    fn account_enrollment(&self) -> AccountEnrollment {
+        if self.allow_new_accounts {
+            AccountEnrollment::Open
+        } else {
+            AccountEnrollment::Withdrawn {
+                risk: RISK_LINE,
+                refusal: ENROLLMENT_REFUSAL,
+            }
+        }
+    }
+
     async fn start_sign_in(
         &self,
         ctx: &SignInCtx,
         host: &HostContext,
     ) -> Result<SignInChallenge, PluginError> {
+        self.enrollment_refusal()?;
         let pkce = Pkce::generate()?;
         let state = new_state()?;
         let spec = LoopbackSpec::ephemeral()
@@ -256,6 +293,7 @@ impl Subscription for Antigravity {
         proof: SignInProof,
         host: &HostContext,
     ) -> Result<AccountId, PluginError> {
+        self.enrollment_refusal()?;
         let pending = self.take_pending(ctx.session());
         host.loopback().release(ctx);
         let Some(pending) = pending else {
@@ -425,6 +463,9 @@ impl Subscription for Antigravity {
         text: &str,
         host: &HostContext,
     ) -> Result<Vec<AccountId>, PluginError> {
+        if !self.allow_new_accounts {
+            import::reject_new_enrollment(text)?;
+        }
         let imported = import::store(
             host,
             &self.endpoints,
@@ -438,6 +479,19 @@ impl Subscription for Antigravity {
             self.catalog.forget(id);
         }
         Ok(imported)
+    }
+
+    async fn import_agent_sign_in(
+        &self,
+        home: &std::path::Path,
+        reference: &str,
+        host: &HostContext,
+    ) -> Result<AccountId, PluginError> {
+        let _ = (home, reference, host);
+        self.enrollment_refusal()?;
+        Err(PluginError::unsupported(
+            "this subscription does not import an agent sign-in",
+        ))
     }
 }
 
@@ -467,6 +521,8 @@ pub fn reset_version_cache() {
     version::reset_cache();
 }
 
+#[cfg(test)]
+mod d221_tests;
 #[cfg(test)]
 mod r49d_tests;
 #[cfg(test)]
