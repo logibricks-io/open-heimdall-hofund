@@ -7,12 +7,13 @@
 //! | Generic failure | Starts at 1 minute and doubles after an ended generic rest, capped at 10 minutes. A failure during an active generic rest keeps its rung. Connection, timeout, transport, interrupted-body, decode, I/O, and authentication errors use this ladder, as do HTTP 401, 403, 408, and 5xx statuses that are not vendor overload. An unserved model uses this ladder on its own key. Other model failures also count on both keys and move to the model ladder when its count passes the member's, so sibling answers do not restart it. |
 //! | Vendor overload | Rests only the requested model on that member for 30 seconds, or for `Retry-After` capped at 1 minute when present. Counts no failure and does not climb the generic ladder. |
 //! | HTTP 429 | Uses the larger of the rate ladder and the retry hint, with the hint capped at 1 hour. The rate ladder starts at 1 minute, doubles for a new 429 within 30 minutes after the previous rate rest ended, and is capped at 30 minutes. A 429 during an active rest does not advance the ladder. A refusal saying the requested model's credentials are cooling uses a model-local ladder. |
-//! | Exhausted quota | Uses the header retry hint capped at 1 hour, or 15 minutes without a positive hint. Model-cooling wording scopes the rest to that model. |
+//! | Exhausted quota | Uses a body-written reset capped at 8 days, otherwise the header retry hint capped at 1 hour, or 15 minutes without a positive hint. Model-cooling wording, or a model-scope flag set by the plugin, scopes the rest to that model. |
 //! | API-key credit refusal | Climbs 30 minutes, 2 hours, 8 hours, 24 hours, 3 days, then 7 days after each ended credit rest, repeating 7 days. An active rest keeps its rung. A named reset wins and is capped at 35 days. A retry hint or soon/smaller-request wording stays flat at 30 minutes and off the ladder. Model-cooling wording keys the ladder by model. Success and manual removal restart the ladder. |
 //! | Windowed-account credit refusal | Uses a named body or header reset, the latest full-window reset, a retry hint longer than 5 hours, then 5 hours, capped at 35 days. A renewed window lifts a rest whose deadline was not vendor-named; a vendor-timed rest lifts only when a matching window's reset elapsed or moved to a later cycle. Failed and empty readings lift nothing. Other subscription accounts stay flat at 30 minutes. |
 //! | Passive observation | Zero remaining uses the window reset capped at 8 days, the retry hint capped at 1 hour, or 15 minutes without either. Positive remaining at least 98% used with a known positive limit rests only for a positive window reset capped at 8 days. Accounts spending credits and all other observations record nothing. Observations do not advance either failure ladder. |
+//! | Account verification | Rests the whole account for 30 minutes when the error asks for verification. It does not climb the generic ladder. The message is kept, including any link, and is not rewritten. |
 //! | Contained panic | Uses the generic failure ladder with [`CooldownCause::Panic`]. |
-//! | Vendor account restriction | Rests the whole member for 2 hours, flat, and does not climb a ladder or count a generic failure. A plugin sets the mark when it knows the account. The next member, including that provider's other accounts, is still asked. |
+//! | Vendor account restriction | Rests the whole member for 2 hours, flat, and does not climb a ladder or count a generic failure. Unserved-model wording does not narrow it. A background model-list probe is not armed and cannot lift the rest. A plugin sets the mark when it knows the account. The next member, including that provider's other accounts, is still asked. |
 //! | Ordinary failure mark | A plugin may mark a status the group should leave, including a 400, as an ordinary failure. It takes the generic failure ladder and is not a restricted rest. |
 //!
 //! Cancelled, unsupported, configuration, internal, unknown future, and other
@@ -155,13 +156,15 @@ pub enum CooldownCause {
     Panic,
     /// Vendor servers too busy for the requested model.
     Overload,
+    /// The account must be verified before it serves again.
+    Verify,
     /// The vendor restricted the account. Flat two-hour rest.
     Restricted,
 }
 
 impl CooldownCause {
     /// Every cooldown cause. A new variant must be added to this list.
-    pub const ALL: [CooldownCause; 8] = [
+    pub const ALL: [CooldownCause; 9] = [
         Self::Failure,
         Self::RateLimit,
         Self::Quota,
@@ -169,6 +172,7 @@ impl CooldownCause {
         Self::Observed,
         Self::Panic,
         Self::Overload,
+        Self::Verify,
         Self::Restricted,
     ];
 
@@ -183,6 +187,7 @@ impl CooldownCause {
             Self::Observed => "observed",
             Self::Panic => "panic",
             Self::Overload => "overload",
+            Self::Verify => "verify",
             Self::Restricted => "restricted",
         }
     }
@@ -585,11 +590,14 @@ impl Cooldowns {
             }
             failure = Failure::Generic(CooldownCause::Failure);
         }
+        // Restricted stays member-wide. `&&` binds tighter than `||`, so the
+        // failure-kind guard has to cover `model_unserved` as well.
         let model_only = model.is_some()
+            && !matches!(failure, Failure::Restricted)
             && (matches!(
                 failure,
                 Failure::RateLimit | Failure::Quota | Failure::Credit
-            ) && crate::decision::model_cooling(error)
+            ) && (crate::decision::model_cooling(error) || error.scopes_model())
                 || crate::decision::model_unserved(error));
         if let Some(model) = model
             && matches!(failure, Failure::Generic(_))
@@ -601,8 +609,10 @@ impl Cooldowns {
             return Some(applied);
         }
         let key = CooldownKey::new(id, model_only.then_some(model).flatten());
-        let background_probe =
-            key.model.is_none() && id.subscription().is_none() && probe_error(error);
+        let background_probe = !matches!(failure, Failure::Restricted)
+            && key.model.is_none()
+            && id.subscription().is_none()
+            && probe_error(error);
         let credit = credit_context(&book, id, now);
         let revision = next_revision(&mut book);
         if matches!(failure, Failure::Quota | Failure::Credit) {
@@ -674,16 +684,18 @@ impl Cooldowns {
     ///
     /// A later rest with another deadline wins. This is not a real request
     /// success, so it starts the 30-minute miss guard instead of clearing it.
+    /// A restricted rest is never lifted.
     pub fn lift_probe(&self, id: &MemberId, until: Instant) -> bool {
         let now = (self.clock)();
         let mut book = self.lock();
         self.maintain_locked(&mut book, now);
         let key = CooldownKey::new(id, None);
         let matches = book.states.get(&key).is_some_and(|state| {
-            state
-                .cooling
-                .as_ref()
-                .is_some_and(|cooling| cooling.until == until && cooling.background_probe)
+            state.cooling.as_ref().is_some_and(|cooling| {
+                cooling.until == until
+                    && cooling.background_probe
+                    && !matches!(cooling.cause, CooldownCause::Restricted)
+            })
         });
         if !matches {
             return false;
@@ -1111,14 +1123,26 @@ impl Cooldowns {
             }
             Failure::RateLimit => (self.rate_limit(state, now, error.retry_after()), false),
             Failure::Quota => {
+                let named_reset = positive_hint(error.reset_after());
                 let hint = positive_hint(error.retry_after());
-                let duration = hint.map_or(self.policy.quota_default, |after| {
-                    after.min(self.policy.retry_after_max)
-                });
+                let (duration, named) = if let Some(after) = named_reset {
+                    (after.min(self.policy.quota_max), true)
+                } else {
+                    let duration = hint.map_or(self.policy.quota_default, |after| {
+                        after.min(self.policy.retry_after_max)
+                    });
+                    (duration, hint.is_some())
+                };
                 let mut candidate = cooling(now, duration, CooldownCause::Quota, state.failures);
-                candidate.guessed = hint.is_none();
-                candidate.vendor_timed = hint.is_some();
-                (candidate, hint.is_some())
+                candidate.guessed = !named;
+                candidate.vendor_timed = named;
+                (candidate, named)
+            }
+            Failure::Verify => {
+                let mut candidate =
+                    cooling(now, Duration::from_secs(30 * 60), CooldownCause::Verify, 0);
+                candidate.vendor_timed = true;
+                (candidate, true)
             }
             Failure::Credit => {
                 let (candidate, named, on_ladder) = self.credit(state, now, error, credit);
@@ -1432,6 +1456,7 @@ enum Failure {
     RateLimit,
     Quota,
     Credit,
+    Verify,
     Restricted,
 }
 
@@ -1483,6 +1508,9 @@ fn failure_kind(error: &PluginError) -> Option<Failure> {
     }
     if error.is_credit() {
         return Some(Failure::Credit);
+    }
+    if error.verifies_account() && matches!(error.status(), Some(401 | 403)) {
+        return Some(Failure::Verify);
     }
     if crate::decision::model_unserved(error) {
         return Some(Failure::Generic(CooldownCause::Failure));
@@ -1660,7 +1688,8 @@ mod tests {
                 CooldownCause::Observed => 4,
                 CooldownCause::Panic => 5,
                 CooldownCause::Overload => 6,
-                CooldownCause::Restricted => 7,
+                CooldownCause::Verify => 7,
+                CooldownCause::Restricted => 8,
             })
             .collect::<Vec<_>>();
         assert_eq!(indices, (0..CooldownCause::ALL.len()).collect::<Vec<_>>());

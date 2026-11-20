@@ -459,6 +459,33 @@ Remaining verification is live-account acceptance; all evidence here is determin
 
 ---
 
+## agy CLI (`agy-cli`)
+
+Antigravity used through the user's own `agy` binary. D-222. Tests `d222_*` use scripted children only.
+
+| # | behavior | reference | hofund | status | notes |
+|---|---|---|---|---|---|
+| a | per-account homes | one agy home per moved account | `{state}/agy-homes/{account}` and `sign-in.json` mode 0600 | Done | The refresh stays in the secret store |
+| b | one-click move | dedup by refresh prefix and email; bare keys first; skip emails already present; do not delete the source | `import_accounts` plus `select_moves` | Partial | The caller passes the saved account list. This plugin cannot read another subscription's secrets, and there is no Providers button |
+| c | proxy carry | keep a user proxy, including `direct`; copy the source proxy only when agy has no accounts and no proxy; store a differing account proxy | `provider_after_carry`, `account_proxy_to_store`, `cli::via` on the import probe, `AGY_PROXY` | Done | A URL is also `HTTPS_PROXY`. `direct` sets no HTTP proxy. The provider file stays `direct` while the moved account is probed through its own proxy |
+| d | quota reset | "Resets in \<duration\>" including seconds, held up to 7 days, rests the model for a Google sign-in | `retry_after_from_body` keeps seconds; a quota body sets `reset_after` and leaves a header on `retry_after`; `scopes_model`. The sentence is also read from a success JSON `text` or nested `error.message`, and from stderr. A later pool sentence wins over an earlier bare "quota" line | Done | A header-only retry hint stays capped at 1 hour. The same words without the flag rest the account. A partial reply before the sentence is not kept |
+| e | verification | "Verification Required" rests 30 minutes, link kept, advice not appended twice | `with_verify_rest`; the message is stored as sent, including when the sentence is a JSON `text` field | Done | The rest record has no separate link field. A plain permission 403 is a generic failure |
+| f | model pool | "exhausted your capacity on this model" rests the model, not the account | `note_google_sign_in` from agy-cli, Antigravity, and Gemini. A 429 with that sentence is `PluginErrorKind::Quota` before the router sees it | Done | Other vendors do not call it |
+| g | role prices | orchestrator and worker role ids use the named model's price | `orchestrator_price_ids` applied by `EffectivePricer` | Done | A merely similar name stays unpriced |
+| h | Gemini API key | settings.json when `modelProvider` is gemini; the key is the environment; skip a gateway base | `read_gemini_key` reads only the supplied environment key. A `GEMINI_API_KEY` field in the file is ignored | Partial | No Providers-page row imports it |
+| i | CLI install | install agy and the auth plugin when missing | not implemented | Missing | The operator sets absolute `command`. hofund does not download agy |
+| j | live prompt argv | the CLI's own prompt flags | hofund bridge: `agy prompt` reads JSON on stdin | Missing | The reference commits do not include that argv. Tests use a scripted child |
+
+**Gaps**
+
+- No CLI installer, no Providers import button, and no live `agy` process. The Gemini key reader is not called from discovery or import.
+- A partial reply that arrives before a quota or verification sentence is dropped. The reference keeps that text and still rests.
+- The verification link is inside the error text. The rest record has no separate link field.
+- agy usage windows are not fed into routing (quota returns an empty list).
+- Per-account homes were not checked on Windows.
+
+---
+
 ## SuperGrok (`grok`)
 
 **Reference files read:** `grok.go`, `grok_accounts.go`, `grok_install.go`, `grok_usage.go`, `migrate_side.go`.

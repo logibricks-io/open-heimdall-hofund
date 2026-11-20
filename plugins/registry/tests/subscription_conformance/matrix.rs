@@ -2,7 +2,7 @@ use hofund_plugin_api::ProtocolId;
 
 use crate::vendors;
 
-pub const EXECUTED_CELLS: usize = 93;
+pub const EXECUTED_CELLS: usize = 109;
 pub const NA_CELLS: usize = 147;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,6 +127,12 @@ static COPILOT: &[Row] = &[
     row(Shape::Messages, "claude-sonnet", BOTH, BOTH),
 ];
 static GEMINI: &[Row] = &[row(Shape::Generative, "gemini-2.5-pro", BOTH, BOTH)];
+static AGY_CLI: &[Row] = &[
+    row(Shape::Chat, "gemini-3-flash", BOTH, BOTH),
+    row(Shape::Responses, "gemini-3-flash", BOTH, BOTH),
+    row(Shape::Messages, "gemini-3-flash", BOTH, BOTH),
+    row(Shape::Generative, "gemini-3-flash", BOTH, BOTH),
+];
 static ANTIGRAVITY: &[Row] = &[row(Shape::Generative, "gemini-3-flash", BOTH, BOTH)];
 static GROK: &[Row] = &[row(Shape::Responses, "grok-4.7", BOTH, BOTH)];
 static KIRO: &[Row] = &[row(Shape::Messages, "claude-sonnet-4.5", BOTH, BOTH)];
@@ -176,6 +182,11 @@ pub const VENDORS: &[Vendor] = &[
         id: "gemini",
         name: "Gemini",
         rows: GEMINI,
+    },
+    Vendor {
+        id: "agy-cli",
+        name: "agy CLI",
+        rows: AGY_CLI,
     },
     Vendor {
         id: "antigravity",

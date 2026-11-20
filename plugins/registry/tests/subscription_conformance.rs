@@ -10,7 +10,7 @@ mod vendors;
 #[tokio::test(flavor = "current_thread")]
 async fn cross_vendor_conformance_matrix() {
     let cells = matrix::cells();
-    assert_eq!(cells.len(), 240);
+    assert_eq!(cells.len(), 256);
     assert_eq!(
         cells.iter().filter(|(_, supported)| *supported).count(),
         matrix::EXECUTED_CELLS
