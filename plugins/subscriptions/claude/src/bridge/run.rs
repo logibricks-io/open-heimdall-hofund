@@ -32,6 +32,17 @@ pub(crate) const ALWAYS_ENV: &[(&str, &str)] = &[
     ("CLAUDE_CODE_PROMPT_CACHE_TTL", "1h"),
 ];
 
+/// Defaults that keep a client tool from being moved to the background or
+/// aborted for idle time. Each name is set to the default only when the
+/// process environment does not already set it. The reference applies the
+/// same pair on every bridge run, including a turn that offers no tools,
+/// and forwards both names into a WSL distro. One-off runs do not use this
+/// plan.
+pub(crate) const TOOL_WAIT_DEFAULTS: &[(&str, &str)] = &[
+    ("CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS", "0"),
+    ("CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT", "0"),
+];
+
 /// How a text-only run should be started.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct StartSpec {
@@ -79,6 +90,19 @@ pub(crate) fn reject_non_text(_request: &Request) -> Result<(), PluginError> {
 
 /// Builds the argv, env, and stdin for a text-only start (no resume, no MCP).
 pub(crate) fn start_plan(spec: &StartSpec, request: &Request) -> Result<SpawnPlan, PluginError> {
+    start_plan_with(spec, request, |key| std::env::var_os(key))
+}
+
+/// [`start_plan`] with an injected process environment.
+///
+/// `ambient` is how the real process environment is read. Tests pass a map
+/// so a user-set tool-wait value is deterministic without mutating the
+/// process environment.
+fn start_plan_with(
+    spec: &StartSpec,
+    request: &Request,
+    ambient: impl Fn(&str) -> Option<OsString>,
+) -> Result<SpawnPlan, PluginError> {
     reject_non_text(request)?;
     let mut args: Vec<OsString> = vec![
         os("-p"),
@@ -131,6 +155,7 @@ pub(crate) fn start_plan(spec: &StartSpec, request: &Request) -> Result<SpawnPla
     for (key, value) in ALWAYS_ENV {
         env.insert(os(*key), os(*value));
     }
+    insert_tool_wait(&mut env, ambient);
     env.insert(os("CLAUDE_CODE_OAUTH_TOKEN"), spec.token.clone());
     env.insert(
         os("CLAUDE_CONFIG_DIR"),
@@ -145,11 +170,8 @@ pub(crate) fn start_plan(spec: &StartSpec, request: &Request) -> Result<SpawnPla
 
     if let Some(tool) = &spec.wsl_tool {
         let pairs: Vec<_> = env.into_iter().collect();
-        let crossed = crate::wslrun::cross_env(
-            tool,
-            &pairs,
-            &["CLAUDE_CONFIG_DIR/p", "CLAUDE_CODE_OAUTH_TOKEN"],
-        );
+        let forward = wsl_forward_names();
+        let crossed = crate::wslrun::cross_env(tool, &pairs, &forward);
         env = crossed.into_iter().collect();
     }
 
@@ -283,6 +305,28 @@ fn event_is_tool(event: &StreamEvent) -> bool {
 
 fn os(value: impl AsRef<str>) -> OsString {
     OsString::from(value.as_ref())
+}
+
+/// Copies each tool-wait name from `ambient`, or the default when absent.
+fn insert_tool_wait(
+    env: &mut BTreeMap<OsString, OsString>,
+    ambient: impl Fn(&str) -> Option<OsString>,
+) {
+    for &(key, default) in TOOL_WAIT_DEFAULTS {
+        let value = ambient(key).unwrap_or_else(|| os(default));
+        env.insert(os(key), value);
+    }
+}
+
+/// Names [`crate::wslrun::cross_env`] lists on `WSLENV` for a bridge plan.
+///
+/// Account-directory and token names match the previous plan. The tool-wait
+/// names are included so a distro run sees the same values as a native run.
+fn wsl_forward_names() -> Vec<&'static str> {
+    let mut names = Vec::with_capacity(2 + TOOL_WAIT_DEFAULTS.len());
+    names.extend(["CLAUDE_CONFIG_DIR/p", "CLAUDE_CODE_OAUTH_TOKEN"]);
+    names.extend(TOOL_WAIT_DEFAULTS.iter().map(|(key, _)| *key));
+    names
 }
 
 /// True when `request` carries an image part.
@@ -599,5 +643,166 @@ mod tests {
             "{args:?}"
         );
         assert!(!args.contains(&"--resume".into()), "{args:?}");
+    }
+
+    fn mcp_config_path() -> PathBuf {
+        PathBuf::from(if cfg!(windows) {
+            r"C:\tmp\acct\mcp.json"
+        } else {
+            "/tmp/acct/mcp.json"
+        })
+    }
+
+    fn tools_spec() -> StartSpec {
+        let mut spec = spec();
+        spec.mcp_config = Some(mcp_config_path());
+        spec
+    }
+
+    fn tools_request() -> Request {
+        request_from(json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+            "tools": [{"name": "lookup", "input_schema": {"type": "object"}}]
+        }))
+    }
+
+    fn lookup<'a>(pairs: &'a [(&str, &str)]) -> impl Fn(&str) -> Option<OsString> + 'a {
+        move |key| {
+            pairs
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| OsString::from(*value))
+        }
+    }
+
+    fn env_value(plan: &super::SpawnPlan, key: &str) -> String {
+        plan.env
+            .get(&OsString::from(key))
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "unset".to_owned())
+    }
+
+    fn tool_wait(plan: &super::SpawnPlan) -> (String, String) {
+        (
+            env_value(plan, "CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS"),
+            env_value(plan, "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT"),
+        )
+    }
+
+    /// A run that hands the client tools waits with both limits off.
+    #[test]
+    fn d233_tools_run_sets_both_tool_wait_vars_to_zero() {
+        let plan =
+            super::start_plan_with(&tools_spec(), &tools_request(), lookup(&[])).expect("plan");
+        let args: Vec<String> = plan
+            .argv
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.contains(&"--mcp-config".to_owned()), "{args:?}");
+        assert!(args.contains(&"--strict-mcp-config".to_owned()), "{args:?}");
+        assert_eq!(tool_wait(&plan), ("0".to_owned(), "0".to_owned()));
+        assert!(
+            !plan.env.contains_key(&OsString::from("WSLENV")),
+            "a native plan does not invent WSLENV"
+        );
+    }
+
+    /// A value already set in the process environment is copied through.
+    /// An empty value counts as set, matching the reference prefix check.
+    #[test]
+    fn d233_user_set_tool_wait_value_is_kept() {
+        assert_kept(
+            &[("CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS", "600000")],
+            "600000",
+            "0",
+        );
+        assert_kept(
+            &[
+                ("CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS", "600000"),
+                ("CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT", "15"),
+            ],
+            "600000",
+            "15",
+        );
+        assert_kept(&[("CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT", "")], "0", "");
+    }
+
+    fn assert_kept(pairs: &[(&str, &str)], background: &str, idle: &str) {
+        let plan =
+            super::start_plan_with(&tools_spec(), &tools_request(), lookup(pairs)).expect("plan");
+        assert_eq!(
+            tool_wait(&plan),
+            (background.to_owned(), idle.to_owned()),
+            "{pairs:?}"
+        );
+    }
+
+    /// The reference sets the pair on every bridge run, not only when the
+    /// turn offers tools. One-off runs never call `start_plan`.
+    #[test]
+    fn d233_run_without_tools_matches_reference() {
+        let plan = super::start_plan_with(&spec(), &text_request("hi"), lookup(&[])).expect("plan");
+        let args: Vec<String> = plan
+            .argv
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(!args.iter().any(|arg| arg == "--mcp-config"), "{args:?}");
+        assert!(!has_tools(&text_request("hi")));
+        assert_eq!(tool_wait(&plan), ("0".to_owned(), "0".to_owned()));
+
+        let mut wsl = spec();
+        wsl.wsl_distro = Some("Ubuntu".into());
+        wsl.wsl_tool = Some(wsl_tool());
+        let crossed =
+            super::start_plan_with(&wsl, &text_request("hi"), lookup(&[])).expect("wsl plan");
+        assert_eq!(tool_wait(&crossed), ("0".to_owned(), "0".to_owned()));
+        let wslenv = env_value(&crossed, "WSLENV");
+        assert!(
+            wslenv.contains("CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS"),
+            "{wslenv}"
+        );
+        assert!(
+            wslenv.contains("CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT"),
+            "{wslenv}"
+        );
+    }
+
+    /// A WSL plan that offers tools forwards both names and keeps a user value.
+    #[test]
+    fn d233_wsl_plan_forwards_both_tool_wait_vars() {
+        let mut spec = tools_spec();
+        spec.wsl_distro = Some("Ubuntu".into());
+        spec.wsl_tool = Some(wsl_tool());
+        let plan = super::start_plan_with(&spec, &tools_request(), lookup(&[])).expect("plan");
+        assert_eq!(tool_wait(&plan), ("0".to_owned(), "0".to_owned()));
+        let wslenv = env_value(&plan, "WSLENV");
+        assert!(
+            wslenv.contains("CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS"),
+            "{wslenv}"
+        );
+        assert!(
+            wslenv.contains("CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT"),
+            "{wslenv}"
+        );
+
+        let kept = super::start_plan_with(
+            &spec,
+            &tools_request(),
+            lookup(&[("CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS", "600000")]),
+        )
+        .expect("user plan");
+        assert_eq!(tool_wait(&kept), ("600000".to_owned(), "0".to_owned()));
+        let kept_wslenv = env_value(&kept, "WSLENV");
+        assert!(
+            kept_wslenv.contains("CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS"),
+            "{kept_wslenv}"
+        );
+        assert!(
+            kept_wslenv.contains("CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT"),
+            "{kept_wslenv}"
+        );
     }
 }
