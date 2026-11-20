@@ -42,6 +42,25 @@ fn protocol(wire: Wire) -> ProtocolId {
     }
 }
 
+#[test]
+fn d230_declared_realtime_paths_follow_the_preset() {
+    let presets = compiled_presets();
+    let realtime = |id: &str| {
+        presets
+            .iter()
+            .find(|preset| preset.id == id)
+            .map(|preset| preset.realtime)
+            .unwrap_or_else(|| panic!("missing preset {id}"))
+    };
+    assert_eq!(realtime("qwen-token-plan"), "/api-ws/v1/realtime");
+    assert_eq!(realtime("qwen"), "/api-ws/v1/realtime");
+    assert_eq!(realtime("qwen-cn"), "/api-ws/v1/realtime");
+    assert_eq!(realtime("bailian-token-plan"), "/api-ws/v1/realtime");
+    assert_eq!(realtime("openai"), "/v1/realtime");
+    assert_eq!(realtime("qwen-decision"), "");
+    assert_eq!(realtime("deepseek"), "");
+}
+
 #[cfg(feature = "test-fixtures")]
 #[test]
 fn fixtures_are_separate_and_aliases_resolve_their_region() {

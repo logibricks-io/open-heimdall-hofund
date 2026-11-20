@@ -76,6 +76,11 @@ pub struct Endpoint {
     pub id: String,
     /// API root. The adapter appends its protocol path.
     pub base_url: String,
+    /// Absolute HTTP(S) realtime endpoint before the model query.
+    ///
+    /// Empty when this provider does not declare a realtime session. The URL
+    /// is not a credential.
+    pub realtime_url: String,
     /// Catalog preset id, when this endpoint came from one.
     pub preset: Option<String>,
     /// Credential sent with each call. Empty when the upstream does not use one.
@@ -128,6 +133,15 @@ impl std::fmt::Debug for Endpoint {
                         format!("{base}?<redacted>")
                     }),
             )
+            .field(
+                "realtime_url",
+                &self
+                    .realtime_url
+                    .split_once('?')
+                    .map_or(self.realtime_url.clone(), |(base, _)| {
+                        format!("{base}?<redacted>")
+                    }),
+            )
             .field("preset", &self.preset)
             .field("api_key", &"[redacted]")
             .field("credential", &self.credential)
@@ -153,6 +167,7 @@ impl Endpoint {
         Self {
             id: id.into(),
             base_url: base_url.into(),
+            realtime_url: String::new(),
             preset: None,
             api_key: String::new(),
             credential: Credential::Default,
@@ -1493,6 +1508,7 @@ mod tests {
         let endpoint = Endpoint {
             id: "public".to_owned(),
             base_url: "https://api.openai.com/v1".to_owned(),
+            realtime_url: String::new(),
             preset: None,
             api_key: String::new(),
             credential: Credential::Default,
