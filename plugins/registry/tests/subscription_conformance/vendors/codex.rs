@@ -65,6 +65,7 @@ pub async fn run(cell: Cell) -> Result<(), String> {
         device_issuer: "https://auth.test".to_owned(),
         base: "https://codex.test/backend-api/codex".to_owned(),
         port: None,
+        npm_latest: None,
     };
     let subscription = subscription(&factory_with_endpoints(endpoints), &host, RawTable::new());
     execute_async(&subscription, &account, &host, cell).await
