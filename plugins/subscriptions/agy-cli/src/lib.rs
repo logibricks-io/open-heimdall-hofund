@@ -266,7 +266,9 @@ impl Subscription for AgyCli {
                 failed.push(format!("{}: {error}", row.email));
                 continue;
             }
-            if let Err(error) = cli::models(host, &program, &home, &provider).await {
+            if let Err(error) =
+                cli::models(host, &program, &home, cli::via(&account_proxy, &provider)).await
+            {
                 let _ = std::fs::remove_dir_all(&home);
                 failed.push(format!("{}: {error}", row.email));
                 continue;

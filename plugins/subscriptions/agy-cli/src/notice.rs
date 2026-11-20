@@ -8,9 +8,20 @@ use hofund_plugin_sdk::note_google_sign_in;
 /// A refusal found in `text`, or `None` when the text is a normal reply.
 #[must_use]
 pub(crate) fn classify_output(text: &str) -> Option<PluginError> {
-    text.lines()
-        .map(str::trim)
-        .find_map(|line| classify_line(line).or_else(|| classify_raw(line)))
+    let mut first = None;
+    for line in text.lines().map(str::trim) {
+        let Some(error) = classify_line(line).or_else(|| classify_raw(line)) else {
+            continue;
+        };
+        // A later pool sentence wins over an earlier line that only says "quota".
+        if error.scopes_model() {
+            return Some(error);
+        }
+        if first.is_none() {
+            first = Some(error);
+        }
+    }
+    first
 }
 
 fn classify_line(line: &str) -> Option<PluginError> {

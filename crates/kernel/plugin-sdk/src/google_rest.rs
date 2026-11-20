@@ -14,13 +14,32 @@ use hofund_plugin_api::{PluginError, PluginErrorKind};
 /// the whole account.
 #[must_use]
 pub fn note_google_sign_in(error: PluginError) -> PluginError {
-    let error =
-        if matches!(error.kind(), PluginErrorKind::Quota) || matches!(error.status(), Some(429)) {
-            scope_model_pool(error)
-        } else {
-            error
-        };
+    let error = pool_quota(error);
     note_verification(error)
+}
+
+/// A model-pool sentence on a quota error, or on a 429, rests that model as quota.
+fn pool_quota(error: PluginError) -> PluginError {
+    let seen =
+        matches!(error.kind(), PluginErrorKind::Quota) || matches!(error.status(), Some(429));
+    if !seen || !is_model_pool_quota(error.message()) {
+        return error;
+    }
+    if error.kind() == PluginErrorKind::Quota {
+        return error.with_model_scope();
+    }
+    let status = error.status().unwrap_or(429);
+    let mut quota = PluginError::quota_status(status, error.message()).with_model_scope();
+    if let Some(after) = error.retry_after() {
+        quota = quota.with_retry_after(after);
+    }
+    if let Some(after) = error.reset_after() {
+        quota = quota.with_reset_after(after);
+    }
+    if !error.cools() {
+        quota = quota.without_cooldown();
+    }
+    quota
 }
 
 /// Whether `message` is a model-pool quota rather than an account quota.
@@ -40,14 +59,6 @@ pub fn asks_for_verification(message: &str) -> bool {
         || lower.contains("needs to be verified")
         || lower.contains("verify your account")
         || lower.contains("account verification required")
-}
-
-fn scope_model_pool(error: PluginError) -> PluginError {
-    if is_model_pool_quota(error.message()) {
-        error.with_model_scope()
-    } else {
-        error
-    }
 }
 
 fn note_verification(error: PluginError) -> PluginError {
@@ -89,7 +100,7 @@ fn first_https(text: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::{asks_for_verification, is_model_pool_quota, note_google_sign_in};
-    use hofund_plugin_api::PluginError;
+    use hofund_plugin_api::{PluginError, PluginErrorKind};
 
     #[test]
     fn d222_pool_words_scope_the_model_and_other_words_do_not() {
@@ -111,6 +122,15 @@ mod tests {
         assert!(!account.scopes_model());
         assert!(is_model_pool_quota("INDIVIDUAL QUOTA REACHED"));
         assert!(!is_model_pool_quota("Quota exceeded"));
+        let promoted = note_google_sign_in(PluginError::status_error(
+            429,
+            "You have exhausted your capacity on this model.",
+        ));
+        assert_eq!(promoted.kind(), PluginErrorKind::Quota);
+        assert!(promoted.scopes_model());
+        let rate = note_google_sign_in(PluginError::status_error(429, "Too many requests"));
+        assert_eq!(rate.kind(), PluginErrorKind::Status);
+        assert!(!rate.scopes_model());
     }
 
     #[test]

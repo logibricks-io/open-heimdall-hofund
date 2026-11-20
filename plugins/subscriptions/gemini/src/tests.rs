@@ -1313,6 +1313,7 @@ fn d222_capacity_refusal_scopes_the_model() {
     .err()
     .expect("capacity");
     assert!(error.scopes_model());
+    assert_eq!(error.kind(), PluginErrorKind::Quota);
     assert_eq!(error.status(), Some(429));
 }
 

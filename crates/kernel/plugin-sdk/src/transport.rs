@@ -1093,8 +1093,10 @@ fn resets_after(text: &str) -> Option<Duration> {
                 character.is_ascii_digit() || matches!(character, '.' | 'h' | 'm' | 's')
             })
             .collect::<String>();
+        // A sentence ends with a period. That mark is not part of the duration.
+        let written = written.trim_end_matches('.');
         if let Some(after) =
-            parse_duration(&written).filter(|after| !after.is_zero() && *after <= LONGEST_WRITTEN)
+            parse_duration(written).filter(|after| !after.is_zero() && *after <= LONGEST_WRITTEN)
         {
             return Some(after);
         }
@@ -1980,6 +1982,10 @@ mod tests {
         assert_eq!(
             retry_after_from_body(b"quota will reset after 3h19m30s"),
             Some(Duration::from_secs(3 * 3_600 + 19 * 60 + 30))
+        );
+        assert_eq!(
+            retry_after_from_body(b"Your quota will reset after 1h18m40s."),
+            Some(Duration::from_secs(4_720))
         );
         assert_eq!(retry_after_from_body(b"quota will reset after 200h"), None);
         assert_eq!(

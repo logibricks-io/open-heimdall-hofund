@@ -5,8 +5,8 @@ use std::collections::HashSet;
 
 use hofund_kit_subscription::{PipedScript, TestHost, block_on};
 use hofund_plugin_api::{
-    Completion, ContentPart, PluginId, PluginKind, ProtocolId, RawTable, RawValue, Request, Role,
-    SecretString,
+    Completion, ContentPart, PluginErrorKind, PluginId, PluginKind, ProtocolId, RawTable, RawValue,
+    Request, Role, SecretString,
 };
 use hofund_plugin_sdk::oauth::secret_text;
 
@@ -159,9 +159,14 @@ fn d222_import_writes_a_private_home_and_keeps_direct() {
         spawns[0]
             .env_var(crate::cli::PROXY_VAR)
             .and_then(|value| value.to_str()),
-        Some("direct")
+        Some("http://account.test:9")
     );
-    assert!(spawns[0].env_var("HTTPS_PROXY").is_none());
+    assert_eq!(
+        spawns[0]
+            .env_var("HTTPS_PROXY")
+            .and_then(|value| value.to_str()),
+        Some("http://account.test:9")
+    );
     assert!(spawns[0].env_var(crate::cli::HOME_VAR).is_some());
 }
 
@@ -399,6 +404,22 @@ fn d222_success_json_and_stderr_still_rest() {
     )
     .expect("nested message");
     assert!(nested.scopes_model());
+}
+
+#[test]
+fn d222_a_later_pool_sentence_wins_over_a_bare_quota_line() {
+    let error = crate::notice::classify_output(
+        "quota\nIndividual quota reached. Please upgrade your subscription to increase your limits. Resets in 1h18m40s.\n",
+    )
+    .expect("pool");
+    assert!(error.scopes_model());
+    assert_eq!(error.kind(), PluginErrorKind::Quota);
+    assert_eq!(
+        error.reset_after(),
+        Some(std::time::Duration::from_secs(4_720))
+    );
+    let bare = crate::notice::classify_output("quota\n").expect("account");
+    assert!(!bare.scopes_model());
 }
 
 #[test]
