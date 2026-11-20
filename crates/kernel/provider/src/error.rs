@@ -28,6 +28,7 @@ pub struct ProviderError {
     cooldown: bool,
     account_restricted: bool,
     ordinary_failure: bool,
+    subscription_suspended: bool,
     billed: Option<Box<hofund_plugin_api::BilledUsage>>,
 }
 
@@ -103,6 +104,7 @@ impl ProviderError {
             cooldown: true,
             account_restricted: false,
             ordinary_failure: false,
+            subscription_suspended: false,
             billed: None,
         }
     }
@@ -133,6 +135,7 @@ impl ProviderError {
                 cooldown: true,
                 account_restricted: false,
                 ordinary_failure: false,
+                subscription_suspended: false,
                 billed: None,
             }
         } else {
@@ -158,6 +161,7 @@ impl ProviderError {
         let cooldown = error.cools();
         let account_restricted = error.is_account_restricted();
         let ordinary_failure = error.is_ordinary_failure();
+        let subscription_suspended = error.is_subscription_suspended();
         let mut converted = match kind {
             hofund_plugin_api::PluginErrorKind::Connect => Self::connect(message),
             hofund_plugin_api::PluginErrorKind::Timeout => Self::timeout(message),
@@ -185,6 +189,7 @@ impl ProviderError {
         converted.cooldown = cooldown;
         converted.account_restricted = account_restricted;
         converted.ordinary_failure = ordinary_failure;
+        converted.subscription_suspended = subscription_suspended;
         if let Some(after) = error.retry_after() {
             converted = converted.with_retry_after(after);
         }
@@ -330,6 +335,7 @@ impl ProviderError {
             cooldown: true,
             account_restricted: false,
             ordinary_failure: false,
+            subscription_suspended: false,
             billed: None,
         }
     }
@@ -362,5 +368,20 @@ impl ProviderError {
     #[must_use]
     pub const fn is_ordinary_failure(&self) -> bool {
         self.ordinary_failure
+    }
+
+    /// Marks a 401 the plugin reads as a suspended subscription.
+    ///
+    /// See [`hofund_plugin_api::PluginError::subscription_suspended`].
+    #[must_use]
+    pub const fn subscription_suspended(mut self) -> Self {
+        self.subscription_suspended = true;
+        self
+    }
+
+    /// Whether the plugin marked this 401 as a suspended subscription.
+    #[must_use]
+    pub const fn is_subscription_suspended(&self) -> bool {
+        self.subscription_suspended
     }
 }

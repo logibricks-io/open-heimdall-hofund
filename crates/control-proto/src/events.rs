@@ -333,6 +333,8 @@ pub enum CooldownReason {
     Verify,
     /// The vendor restricted the account.
     Restricted,
+    /// A plugin-marked suspended subscription.
+    Suspended,
     /// A newer peer supplied an unknown reason.
     #[serde(other)]
     Unknown,
@@ -352,6 +354,7 @@ impl CooldownReason {
             Self::Overload => "overload",
             Self::Verify => "verify",
             Self::Restricted => "restricted",
+            Self::Suspended => "suspended",
             Self::Unknown => "unknown",
         }
     }

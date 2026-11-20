@@ -1121,6 +1121,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn d240_edited_key_drops_its_answer() {
+        let original = "listen = \"127.0.0.1:0\"\n[[providers]]\nid = \"first\"\nprotocol = \"openai-chat\"\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key = \"first-key\"\n[[providers.keys]]\nkey = \"old-key\"\n[[routes]]\nmodel = \"m\"\nupstreams = [\"first\"]\n";
+        let fixture = fixture(original);
+        let old =
+            crate::membership::key_member_id("first", &crate::provider_keys::key_id("old-key"));
+        let new =
+            crate::membership::key_member_id("first", &crate::provider_keys::key_id("new-key"));
+        fixture.runtime.cooldown_book().note_answered(&old);
+        let candidate = original.replace("old-key", "new-key");
+        fixture
+            .ops
+            .apply_with_key_moves(
+                &revision(original.as_bytes()),
+                candidate,
+                vec![(old.clone(), new.clone())],
+            )
+            .await
+            .unwrap_or_else(|failure| panic!("apply: {:?}", failure.error));
+        let book = fixture.runtime.cooldown_book();
+        let marked = PluginError::status_error(401, "denied").subscription_suspended();
+        let cooling = book.record_failure(&new, &marked).expect("edited key");
+        assert_eq!(cooling.cause(), hofund_router::CooldownCause::Failure);
+        assert!(!cooling.background_probe());
+    }
+
+    #[tokio::test]
     async fn explicit_reload_republishes_an_equal_revision_and_watcher_skips_it() {
         let original = document("");
         let fixture = fixture(&original);

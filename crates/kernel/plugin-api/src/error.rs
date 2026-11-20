@@ -83,6 +83,8 @@ pub struct PluginError {
     skip_failover_same_plugin: bool,
     account_restricted: bool,
     ordinary_failure: bool,
+    /// A 401 the plugin reads as a suspended subscription, not a bad key.
+    subscription_suspended: bool,
     billed: Option<Box<BilledUsage>>,
     #[source]
     cause: Option<Box<dyn Error + Send + Sync>>,
@@ -104,6 +106,7 @@ impl PluginError {
             skip_failover_same_plugin: false,
             account_restricted: false,
             ordinary_failure: false,
+            subscription_suspended: false,
             billed: None,
             cause: None,
         }
@@ -383,6 +386,25 @@ impl PluginError {
     #[must_use]
     pub const fn is_ordinary_failure(&self) -> bool {
         self.ordinary_failure
+    }
+
+    /// Marks a 401 the plugin reads as a subscription the vendor suspended.
+    ///
+    /// The router rests that key for a day and probes its list in the
+    /// background only when the key has answered a request before, or is
+    /// already resting this way. A plugin sets the mark when it knows the
+    /// 401 is that case. A key with no answer on record keeps the generic
+    /// failure rest and is not probed.
+    #[must_use]
+    pub const fn subscription_suspended(mut self) -> Self {
+        self.subscription_suspended = true;
+        self
+    }
+
+    /// Whether the plugin marked this 401 as a suspended subscription.
+    #[must_use]
+    pub const fn is_subscription_suspended(&self) -> bool {
+        self.subscription_suspended
     }
 
     /// The underlying error, when one was attached.

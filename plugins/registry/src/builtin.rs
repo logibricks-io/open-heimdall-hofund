@@ -675,6 +675,7 @@ fn plugin_error(error: ProviderError) -> PluginError {
     let cooldown = error.cools();
     let account_restricted = error.is_account_restricted();
     let ordinary_failure = error.is_ordinary_failure();
+    let subscription_suspended = error.is_subscription_suspended();
     let status = error.status;
     let credit_message = credit.then(|| error.message.clone());
     let mut converted = match error.kind {
@@ -711,6 +712,9 @@ fn plugin_error(error: ProviderError) -> PluginError {
     }
     if ordinary_failure {
         converted = converted.ordinary_failure();
+    }
+    if subscription_suspended {
+        converted = converted.subscription_suspended();
     }
     converted
 }
