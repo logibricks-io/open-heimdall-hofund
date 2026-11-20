@@ -5,9 +5,9 @@ use std::time::Duration;
 
 use hofund_kit_subscription::{TestHost, block_on, join_all};
 use hofund_plugin_api::{
-    AccountId, AccountStatus, Completion, PluginErrorKind, PluginId, PluginKind, ProtocolId,
-    RawTable, RawValue, SecretString, SignInChallenge, SignInCtx, SignInProof, Subscription,
-    SubscriptionFactory,
+    AccountEnrollment, AccountId, AccountStatus, Completion, PluginErrorKind, PluginId, PluginKind,
+    ProtocolId, RawTable, RawValue, SecretString, SignInChallenge, SignInCtx, SignInProof,
+    Subscription, SubscriptionFactory,
 };
 use hofund_plugin_sdk::oauth::{SecretObject, TokenCache, account_id_from};
 
@@ -53,6 +53,19 @@ fn subscription_with(host: &TestHost, project: Option<&str>) -> Arc<dyn Subscrip
 
 fn subscription(host: &TestHost) -> Arc<dyn Subscription> {
     subscription_with(host, None)
+}
+
+#[test]
+fn d221_gemini_cli_enrollment_stays_open() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let sub = subscription(&host);
+    assert_eq!(sub.account_enrollment(), AccountEnrollment::Open);
+    assert!(sub.account_enrollment().refusal().is_none());
+    assert!(sub.account_enrollment().risk().is_none());
+    let challenge = block_on(sub.start_sign_in(&ctx(), host.context())).expect("start");
+    assert!(matches!(challenge, SignInChallenge::OpenUrl { .. }));
+    block_on(sub.cancel_sign_in(&ctx(), host.context())).expect("cancel");
 }
 
 fn ctx() -> SignInCtx {

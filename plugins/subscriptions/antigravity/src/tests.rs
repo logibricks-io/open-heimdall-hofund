@@ -13,7 +13,7 @@ use hofund_plugin_sdk::json::{Value, json};
 use hofund_plugin_sdk::oauth::{SecretObject, TokenCache, account_id_from};
 
 use crate::project;
-use crate::{Endpoints, SIGN_IN_WARNING, client, factory_with_endpoints, tokens, version};
+use crate::{Endpoints, client, factory_with_endpoints, tokens, version};
 
 const SESSION: &str = "0123456789abcdef0123456789abcdef";
 const TOKEN_URL: &str = "https://oauth.test/token";
@@ -63,7 +63,7 @@ fn subscription(host: &TestHost) -> Arc<dyn Subscription> {
 }
 
 fn subscription_with(host: &TestHost, project_id: Option<&str>) -> Arc<dyn Subscription> {
-    let factory = factory_with_endpoints(endpoints());
+    let factory = factory_with_endpoints(endpoints()).with_new_accounts_for_test();
     let mut raw = RawTable::new();
     configured(&mut raw);
     if let Some(project_id) = project_id {
@@ -228,10 +228,6 @@ fn r49c_oauth_uses_the_antigravity_client_and_localhost_callback() {
     let scope = param(&pairs, "scope").expect("scope");
     assert!(scope.contains("https://www.googleapis.com/auth/cclog"));
     assert!(scope.contains("https://www.googleapis.com/auth/experimentsandconfigs"));
-    assert_eq!(
-        SIGN_IN_WARNING,
-        "Google may suspend an Antigravity account it sees used outside Antigravity. Use one you can afford to lose."
-    );
     block_on(sub.cancel_sign_in(&ctx(), host.context())).expect("cancel");
 }
 

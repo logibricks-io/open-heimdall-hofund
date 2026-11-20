@@ -1154,3 +1154,122 @@ fn d32_3_native_wire_keeps_developer_items_in_input() {
         "internal marks stay off the wire: {item:?}"
     );
 }
+
+#[test]
+fn d232_instructions_after_input() {
+    let cases = [
+        ("gpt-6.1", false),
+        ("gpt-6.1-sol", false),
+        ("gpt-6.2", true),
+        ("gpt-6.2-sol", true),
+        ("gpt-6.2-astra", true),
+        ("gpt-6.10", true),
+        ("gpt-6.10-sol", true),
+        ("gpt-7", true),
+        ("gpt-7.0", true),
+        ("gpt-7.1-luna", true),
+        ("gpt-5.5", false),
+        ("gpt-5.5-sol", false),
+        ("gpt-5.6-sol", false),
+        ("gpt-6", false),
+        ("gpt-6-sol", false),
+        ("gpt-4.1", false),
+        ("openai/gpt-6.2-sol", true),
+        ("codex/gpt-6.2-sol", true),
+        ("relay/gpt-6.10", true),
+        ("GPT-6.3", true),
+        ("o3", false),
+        ("claude-opus-5-5", false),
+        ("chatgpt-6.2", false),
+        ("", false),
+    ];
+    for (model, want) in cases {
+        assert_eq!(
+            hofund_codec::instructions_after_input(model),
+            want,
+            "{model}"
+        );
+    }
+}
+
+#[test]
+fn d232_translated_system_first_in_input_on_gpt_6_2() {
+    let chat = OpenAiChat
+        .decode_request(
+            br#"{"model":"gpt-6.2-sol","messages":[{"role":"system","content":"You are Claude Code."},{"role":"user","content":"hi"}]}"#,
+        )
+        .expect("chat");
+    let value = encoded_responses(&chat);
+    assert!(value.get("instructions").is_none(), "{value}");
+    assert_eq!(value["input"].as_array().map(Vec::len), Some(2));
+    assert_eq!(value["input"][0]["role"], "developer");
+    assert_eq!(value["input"][0]["type"], "message");
+    assert_eq!(value["input"][0]["content"][0]["type"], "input_text");
+    assert_eq!(
+        value["input"][0]["content"][0]["text"],
+        "You are Claude Code."
+    );
+    assert_eq!(value["input"][1]["role"], "user");
+
+    let older = OpenAiChat
+        .decode_request(
+            br#"{"model":"gpt-6-sol","messages":[{"role":"system","content":"You are Claude Code."},{"role":"user","content":"hi"}]}"#,
+        )
+        .expect("chat");
+    let value = encoded_responses(&older);
+    assert_eq!(value["instructions"], "You are Claude Code.");
+    assert_eq!(value["input"].as_array().map(Vec::len), Some(1));
+
+    let anthropic = AnthropicMessages
+        .decode_request(
+            br#"{"model":"openai/gpt-6.2-sol","max_tokens":8,"system":"Be brief.","messages":[{"role":"user","content":"hi"}]}"#,
+        )
+        .expect("anthropic");
+    let value = encoded_responses(&anthropic);
+    assert!(value.get("instructions").is_none(), "{value}");
+    assert_eq!(value["input"][0]["role"], "developer");
+    assert_eq!(value["input"][0]["content"][0]["text"], "Be brief.");
+    assert_eq!(value["input"][1]["role"], "user");
+
+    let anthropic_old = AnthropicMessages
+        .decode_request(
+            br#"{"model":"gpt-5.5","max_tokens":8,"system":"Be brief.","messages":[{"role":"user","content":"hi"}]}"#,
+        )
+        .expect("anthropic");
+    let value = encoded_responses(&anthropic_old);
+    assert_eq!(value["instructions"], "Be brief.");
+    assert_eq!(value["input"].as_array().map(Vec::len), Some(1));
+
+    let mut folded = Request::new("gpt-7");
+    folded.messages.push({
+        let mut message = Message::new(Role::System);
+        message.content.push(ContentPart::text("base"));
+        message
+    });
+    folded.messages.push({
+        let mut message = Message::new(Role::Developer);
+        message.content.push(ContentPart::text("rules"));
+        message
+    });
+    folded.messages.push({
+        let mut message = Message::new(Role::User);
+        message.content.push(ContentPart::text("hi"));
+        message
+    });
+    let value = encoded_responses(&folded);
+    assert!(value.get("instructions").is_none(), "{value}");
+    assert_eq!(value["input"][0]["content"][0]["text"], "base\n\nrules");
+    assert_eq!(value["input"][0]["role"], "developer");
+    assert_eq!(value["input"].as_array().map(Vec::len), Some(2));
+
+    let wire = br#"{"model":"gpt-6.2-sol","instructions":"codex","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}"#;
+    let request = OpenAiResponses.decode_request(wire).expect("wire");
+    let value = encoded_responses(&request);
+    assert_eq!(value["instructions"], "codex");
+    assert_eq!(value["input"].as_array().map(Vec::len), Some(1));
+}
+
+fn encoded_responses(request: &Request) -> serde_json::Value {
+    let wire = OpenAiResponses.encode_request(request).expect("encode");
+    serde_json::from_slice(&wire).expect("json")
+}

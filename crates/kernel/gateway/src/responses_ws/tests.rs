@@ -600,7 +600,7 @@ async fn b2_replay_rechecks_auth_and_runs_the_whole_request_path() {
         .body(Body::empty())
         .expect("origin");
     let (parts, _) = request.into_parts();
-    let replay = replay_request(&parts, br#"{"model":"demo","input":[]}"#);
+    let replay = replay_request(&parts, br#"{"model":"demo","input":[]}"#, None);
     assert_eq!(replay.method(), Method::POST);
     assert_eq!(replay.uri(), "/v1/responses?key=first");
     assert_eq!(replay.headers().get("host").expect("host"), "local.test");
@@ -668,8 +668,8 @@ async fn b2_replay_rechecks_auth_and_runs_the_whole_request_path() {
     assert_eq!(events.ends.lock().expect("ends").len(), 1);
 }
 
-#[test]
-fn b3_client_metadata_becomes_turn_headers() {
+#[tokio::test]
+async fn b3_client_metadata_becomes_turn_headers() {
     let request = Request::builder()
         .method("GET")
         .uri("/v1/responses")
@@ -684,7 +684,7 @@ fn b3_client_metadata_becomes_turn_headers() {
             wire::LITE_METADATA: "TRUE",
         },
     });
-    let replay = replay_request(&parts, &serde_json::to_vec(&body).expect("body"));
+    let replay = replay_request(&parts, &serde_json::to_vec(&body).expect("body"), None);
     assert_eq!(
         replay.headers().get(wire::TURN_STATE).expect("turn state"),
         "turn-state"
@@ -693,6 +693,27 @@ fn b3_client_metadata_becomes_turn_headers() {
         replay.headers().get(wire::LITE_HEADER).expect("lite"),
         "true"
     );
+    let bytes = axum::body::to_bytes(replay.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let parsed: Value = serde_json::from_slice(&bytes).expect("json");
+    assert!(parsed["client_metadata"].get(wire::TURN_STATE).is_none());
+    assert_eq!(parsed["client_metadata"][wire::LITE_METADATA], "TRUE");
+}
+
+#[test]
+fn d223_reply_state_stays_when_a_later_reply_has_none() {
+    let mut kept = None;
+    note_reply_state(&mut kept, "t1", Some("first"));
+    note_reply_state(&mut kept, "t1", None);
+    note_reply_state(&mut kept, "t1", Some(""));
+    assert_eq!(recalled_state(&kept, "t1").as_deref(), Some("first"));
+    note_reply_state(&mut kept, "", Some("ignored"));
+    assert_eq!(recalled_state(&kept, "t1").as_deref(), Some("first"));
+    assert!(recalled_state(&kept, "t2").is_none());
+    note_reply_state(&mut kept, "t2", Some("second"));
+    assert!(recalled_state(&kept, "t1").is_none());
+    assert_eq!(recalled_state(&kept, "t2").as_deref(), Some("second"));
 }
 
 #[tokio::test]
@@ -1440,6 +1461,88 @@ async fn e3_backend_socket_replays_each_turn_through_the_full_surface_route() {
     let seen = surface.calls.lock().expect("backend calls");
     assert_eq!(seen[0].turn_state.as_deref(), Some("from-client"));
     assert_eq!(seen[0].lite.as_deref(), Some("true"));
+    assert!(
+        seen[0].body["client_metadata"]
+            .get(wire::TURN_STATE)
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn d223_socket_keeps_turn_state_for_its_turn() {
+    let (fake, _calls, _replies) = Fake::new("primary");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
+    let surface = Arc::new(BackendSurface::default());
+    let server = TestServer::start(backend_gateway(
+        vec![fake.member()],
+        None,
+        usage,
+        None,
+        Arc::clone(&surface),
+    ))
+    .await;
+    let mut client = Client::connect(&server, BACKEND_PATH).await;
+
+    let mut first_turn = create(None, json!([user("first")]));
+    first_turn["client_metadata"] = json!({
+        "turn_id": "t1",
+        wire::TURN_STATE: "from-client",
+        wire::LITE_METADATA: "true",
+    });
+    let first = client.turn(&first_turn).await;
+    assert_eq!(
+        first.last().expect("completed")["type"],
+        "response.completed"
+    );
+
+    let mut same_turn = create(None, json!([user("again")]));
+    same_turn["client_metadata"] = json!({"turn_id": "t1"});
+    let again = client.turn(&same_turn).await;
+    assert_eq!(
+        again.last().expect("completed")["type"],
+        "response.completed"
+    );
+
+    let mut other_turn = create(None, json!([user("other")]));
+    other_turn["client_metadata"] = json!({"turn_id": "t2"});
+    let other = client.turn(&other_turn).await;
+    assert_eq!(
+        other.last().expect("completed")["type"],
+        "response.completed"
+    );
+
+    let mut override_turn = create(None, json!([user("override")]));
+    override_turn["client_metadata"] = json!({
+        "turn_id": "t1",
+        wire::TURN_STATE: "fresh",
+    });
+    let overridden = client.turn(&override_turn).await;
+    assert_eq!(
+        overridden.last().expect("completed")["type"],
+        "response.completed"
+    );
+
+    let seen = surface.calls.lock().expect("backend calls");
+    assert_eq!(seen.len(), 4);
+    assert_eq!(seen[0].turn_state.as_deref(), Some("from-client"));
+    assert_eq!(seen[0].lite.as_deref(), Some("true"));
+    assert!(
+        seen[0].body["client_metadata"]
+            .get(wire::TURN_STATE)
+            .is_none()
+    );
+    assert_eq!(seen[0].body["client_metadata"][wire::LITE_METADATA], "true");
+    assert_eq!(seen[0].body["client_metadata"]["turn_id"], "t1");
+    assert_eq!(seen[1].turn_state.as_deref(), Some("turn-state"));
+    assert!(seen[1].lite.is_none());
+    assert_eq!(seen[2].turn_state, None);
+    assert_eq!(seen[3].turn_state.as_deref(), Some("fresh"));
+    assert!(
+        seen[3].body["client_metadata"]
+            .get(wire::TURN_STATE)
+            .is_none()
+    );
 }
 
 #[tokio::test]
