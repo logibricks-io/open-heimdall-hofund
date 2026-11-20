@@ -1255,6 +1255,7 @@ pub(crate) fn into_plugin(error: ProviderError) -> PluginError {
     let credit = error.is_credit();
     let credit_soon = error.credit_soon();
     let cooldown = error.cools();
+    let account_restricted = error.is_account_restricted();
     let status = error.status;
     let billed = error.billed().cloned();
     let credit_message = credit.then(|| error.message.clone());
@@ -1295,6 +1296,9 @@ pub(crate) fn into_plugin(error: ProviderError) -> PluginError {
     }
     if let Some(billed) = billed {
         converted = converted.with_billed(billed);
+    }
+    if account_restricted {
+        converted = converted.account_restricted();
     }
     converted
 }
@@ -1412,6 +1416,20 @@ mod tests {
             assert_eq!(restored.reset_after(), Some(Duration::from_secs(240)));
             assert!(restored.credit_soon());
         }
+    }
+
+    #[test]
+    fn d234_account_restricted_survives_provider_round_trip() {
+        let error =
+            ProviderError::status(400, "This organization has been disabled.").account_restricted();
+        let plugin = super::into_plugin(error);
+        assert!(plugin.is_account_restricted());
+        assert!(plugin.cools());
+        assert!(!plugin.skips_failover_same_plugin());
+        assert_eq!(plugin.status(), Some(400));
+        let restored = crate::adapt::provider_error(plugin);
+        assert!(restored.is_account_restricted());
+        assert_eq!(restored.status, Some(400));
     }
 
     struct Boom {

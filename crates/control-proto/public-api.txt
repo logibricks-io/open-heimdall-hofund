@@ -215,6 +215,7 @@ CooldownReason::Overload
 CooldownReason::Panic
 CooldownReason::Quota
 CooldownReason::RateLimit
+CooldownReason::Restricted
 CooldownReason::Unknown #[serde(other)]
 CooldownReason::const fn as_str (self) -> & 'static str
 DiscoveredAccount #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)

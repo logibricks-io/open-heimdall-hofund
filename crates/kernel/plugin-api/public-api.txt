@@ -781,8 +781,10 @@ PlanWindow::fn with_count (mut self , amount : f64 , limit : f64 , unit : impl I
 PlanWindow::fn with_display (mut self , display : impl Into < String >) -> Self
 PluginError
 PluginError #[non_exhaustive] derives(Debug, Error)
+PluginError::const fn account_restricted (mut self) -> Self
 PluginError::const fn cools (& self) -> bool
 PluginError::const fn credit_soon (& self) -> bool
+PluginError::const fn is_account_restricted (& self) -> bool
 PluginError::const fn is_credit (& self) -> bool
 PluginError::const fn kind (& self) -> PluginErrorKind
 PluginError::const fn reset_after (& self) -> Option < Duration >

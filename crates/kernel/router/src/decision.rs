@@ -180,6 +180,11 @@ pub(crate) fn allows(error: &PluginError, connect_errors: bool, statuses: &BTree
     let Some(status) = error.status() else {
         return false;
     };
+    // The plugin already decided this account was restricted. A 400 would
+    // otherwise stop the group. Other accounts of the provider are still asked.
+    if error.is_account_restricted() {
+        return true;
+    }
     let text = words_of(error.message());
     if overflowed(status, &text) {
         return false;
@@ -313,6 +318,9 @@ pub(crate) fn too_long_unsaid(
     model: &str,
     provider: &str,
 ) -> Option<PluginError> {
+    if error.is_account_restricted() {
+        return None;
+    }
     let status = error.status()?;
     if !matches!(status, 400 | 413 | 422 | 500 | 502 | 503 | 504) {
         return None;

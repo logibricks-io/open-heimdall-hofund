@@ -10,6 +10,7 @@ use thiserror::Error;
 /// An upstream call failed before a normal completion was produced.
 #[derive(Debug, Error)]
 #[error("{message}")]
+#[allow(clippy::struct_excessive_bools)] // independent protocol flags, not a state machine
 pub struct ProviderError {
     /// How the call failed.
     pub kind: ProviderErrorKind,
@@ -25,6 +26,7 @@ pub struct ProviderError {
     credit: bool,
     credit_soon: bool,
     cooldown: bool,
+    account_restricted: bool,
     billed: Option<Box<hofund_plugin_api::BilledUsage>>,
 }
 
@@ -98,6 +100,7 @@ impl ProviderError {
             credit: false,
             credit_soon: false,
             cooldown: true,
+            account_restricted: false,
             billed: None,
         }
     }
@@ -126,6 +129,7 @@ impl ProviderError {
                 credit: false,
                 credit_soon: false,
                 cooldown: true,
+                account_restricted: false,
                 billed: None,
             }
         } else {
@@ -149,6 +153,7 @@ impl ProviderError {
         let credit = error.is_credit();
         let credit_soon = error.credit_soon();
         let cooldown = error.cools();
+        let account_restricted = error.is_account_restricted();
         let mut converted = match kind {
             hofund_plugin_api::PluginErrorKind::Connect => Self::connect(message),
             hofund_plugin_api::PluginErrorKind::Timeout => Self::timeout(message),
@@ -174,6 +179,7 @@ impl ProviderError {
         converted.credit = credit;
         converted.credit_soon = credit_soon;
         converted.cooldown = cooldown;
+        converted.account_restricted = account_restricted;
         if let Some(after) = error.retry_after() {
             converted = converted.with_retry_after(after);
         }
@@ -317,7 +323,23 @@ impl ProviderError {
             credit: false,
             credit_soon: false,
             cooldown: true,
+            account_restricted: false,
             billed: None,
         }
+    }
+
+    /// Marks an account its vendor has restricted.
+    ///
+    /// See [`hofund_plugin_api::PluginError::account_restricted`].
+    #[must_use]
+    pub const fn account_restricted(mut self) -> Self {
+        self.account_restricted = true;
+        self
+    }
+
+    /// Whether the vendor restricted this account.
+    #[must_use]
+    pub const fn is_account_restricted(&self) -> bool {
+        self.account_restricted
     }
 }

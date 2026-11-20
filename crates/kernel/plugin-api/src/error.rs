@@ -77,6 +77,7 @@ pub struct PluginError {
     credit_soon: bool,
     cooldown: bool,
     skip_failover_same_plugin: bool,
+    account_restricted: bool,
     billed: Option<Box<BilledUsage>>,
     #[source]
     cause: Option<Box<dyn Error + Send + Sync>>,
@@ -94,6 +95,7 @@ impl PluginError {
             credit_soon: false,
             cooldown: true,
             skip_failover_same_plugin: false,
+            account_restricted: false,
             billed: None,
             cause: None,
         }
@@ -311,6 +313,24 @@ impl PluginError {
     #[must_use]
     pub const fn skips_failover_same_plugin(&self) -> bool {
         self.skip_failover_same_plugin
+    }
+
+    /// Marks an account its vendor has restricted.
+    ///
+    /// The router rests that account for two hours and still asks the next
+    /// member, including the provider's other accounts. A plugin sets this
+    /// only when it already knows which account answered, not from the words
+    /// alone.
+    #[must_use]
+    pub const fn account_restricted(mut self) -> Self {
+        self.account_restricted = true;
+        self
+    }
+
+    /// Whether the vendor restricted this account.
+    #[must_use]
+    pub const fn is_account_restricted(&self) -> bool {
+        self.account_restricted
     }
 
     /// The underlying error, when one was attached.

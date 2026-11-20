@@ -12,6 +12,7 @@
 //! | Windowed-account credit refusal | Uses a named body or header reset, the latest full-window reset, a retry hint longer than 5 hours, then 5 hours, capped at 35 days. A renewed window lifts a rest whose deadline was not vendor-named; a vendor-timed rest lifts only when a matching window's reset elapsed or moved to a later cycle. Failed and empty readings lift nothing. Other subscription accounts stay flat at 30 minutes. |
 //! | Passive observation | Zero remaining uses the window reset capped at 8 days, the retry hint capped at 1 hour, or 15 minutes without either. Positive remaining at least 98% used with a known positive limit rests only for a positive window reset capped at 8 days. Accounts spending credits and all other observations record nothing. Observations do not advance either failure ladder. |
 //! | Contained panic | Uses the generic failure ladder with [`CooldownCause::Panic`]. |
+//! | Vendor account restriction | Rests the whole member for 2 hours, flat, and does not climb a ladder or count a generic failure. A plugin sets the mark when it knows the account. The next member, including that provider's other accounts, is still asked. |
 //!
 //! Cancelled, unsupported, configuration, internal, unknown future, and other
 //! request-shaped HTTP 4xx errors do not cool a member. A new failure, panic,
@@ -40,6 +41,7 @@ use serde::{Deserialize, Serialize};
 const RECOVERY_CAPACITY: usize = 1_024;
 const CREDIT_RESET_MAX: Duration = Duration::from_secs(35 * 24 * 60 * 60);
 const WINDOWED_CREDIT_DEFAULT: Duration = Duration::from_secs(5 * 60 * 60);
+const RESTRICTED_REST: Duration = Duration::from_secs(2 * 60 * 60);
 const CREDIT_LADDER: [Duration; 6] = [
     Duration::from_secs(30 * 60),
     Duration::from_secs(2 * 60 * 60),
@@ -151,11 +153,13 @@ pub enum CooldownCause {
     Panic,
     /// Vendor servers too busy for the requested model.
     Overload,
+    /// The vendor restricted the account. Flat two-hour rest.
+    Restricted,
 }
 
 impl CooldownCause {
     /// Every cooldown cause. A new variant must be added to this list.
-    pub const ALL: [CooldownCause; 7] = [
+    pub const ALL: [CooldownCause; 8] = [
         Self::Failure,
         Self::RateLimit,
         Self::Quota,
@@ -163,6 +167,7 @@ impl CooldownCause {
         Self::Observed,
         Self::Panic,
         Self::Overload,
+        Self::Restricted,
     ];
 
     /// Stable label used by metrics.
@@ -176,6 +181,7 @@ impl CooldownCause {
             Self::Observed => "observed",
             Self::Panic => "panic",
             Self::Overload => "overload",
+            Self::Restricted => "restricted",
         }
     }
 }
@@ -1117,6 +1123,10 @@ impl Cooldowns {
                 ladder = Some(on_ladder);
                 (candidate, named)
             }
+            Failure::Restricted => (
+                cooling(now, RESTRICTED_REST, CooldownCause::Restricted, 0),
+                false,
+            ),
         };
         candidate.status = error.status();
         candidate.error = error.message().trim().chars().take(300).collect();
@@ -1420,6 +1430,7 @@ enum Failure {
     RateLimit,
     Quota,
     Credit,
+    Restricted,
 }
 
 fn note_probe_failure(book: &mut Book, id: &MemberId, now: Instant) {
@@ -1456,6 +1467,9 @@ fn probe_error(error: &PluginError) -> bool {
 fn failure_kind(error: &PluginError) -> Option<Failure> {
     if !error.cools() || !crate::decision::rests(error) {
         return None;
+    }
+    if error.is_account_restricted() {
+        return Some(Failure::Restricted);
     }
     if error.is_credit() {
         return Some(Failure::Credit);
@@ -1636,6 +1650,7 @@ mod tests {
                 CooldownCause::Observed => 4,
                 CooldownCause::Panic => 5,
                 CooldownCause::Overload => 6,
+                CooldownCause::Restricted => 7,
             })
             .collect::<Vec<_>>();
         assert_eq!(indices, (0..CooldownCause::ALL.len()).collect::<Vec<_>>());

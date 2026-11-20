@@ -452,6 +452,10 @@ Already **`PluginError::auth`** in plugin refresh (`account.rs:85-88`); do not m
 - **`skip_failover_same_plugin`** (or equivalent) on `PluginError` in **`hofund-plugin-api`**, set only by the Claude plugin on room-full 503. Router failover reads the flag and drops remaining candidates with the **same plugin id**; no message substring matching in `crates/kernel/router`.
 - Third-party extra-usage 400: **`.without_cooldown()`** only; default failover does not try another member for bare 400 (`decision.rs:171-178`, `lib.rs:95-98`) — no extra router rule required (optional follow-up note in review).
 
+### 4.8 Account turned off (D-234)
+
+When the vendor has turned the Claude subscription account off, `classify` keeps a 400 or 403 and sets the vendor-neutral `PluginError::account_restricted` flag. A status-less line with the same words, which used to be a 502, becomes a 403 with that flag. A 5xx stays an ordinary failure and is not marked. Native and WSL runs share `failure::classify`. The router rests the marked account for two hours and still asks the next member, including this provider's other accounts. Extra-usage and Usage Policy refusals are classified before this case and stay as they were. A relay that returns the same words is not this path: only the Messages adapter, and only when the configured host is `api.anthropic.com`, sets the flag for an API key.
+
 ## 5. Plugin versus kernel
 
 ### 5.1 Division

@@ -68,7 +68,50 @@ pub(crate) fn classify_parts(
     if quota_shaped(quota_status, message) {
         return PluginError::quota_status(api_error_status.unwrap_or(429), message);
     }
+    if let Some(error) = account_off(api_error_status, message) {
+        return error;
+    }
     PluginError::status_error(bridge_status(api_error_status), message)
+}
+
+/// An account the vendor turned off, on a Claude subscription run.
+///
+/// A status-less line, which the bridge used to answer as 502, is a 403.
+/// A 5xx stays an ordinary failure. Native and WSL runs both classify here.
+fn account_off(status: Option<u16>, message: &str) -> Option<PluginError> {
+    if !account_off_words(message) {
+        return None;
+    }
+    let status = match status {
+        Some(status) if (400..500).contains(&status) => status,
+        Some(status) if status >= 400 => return None,
+        _ => 403,
+    };
+    Some(PluginError::status_error(status, message).account_restricted())
+}
+
+/// Kept in step with the Messages adapter's account-off words.
+fn account_off_words(message: &str) -> bool {
+    let folded = fold_account_off(message);
+    if folded.contains("this organization has been disabled")
+        || folded.contains("organization has disabled claude subscription access")
+        || folded.contains("oauth authentication is currently not allowed for this organization")
+    {
+        return true;
+    }
+    let cannot = folded.replace("can't", "cannot");
+    cannot.contains("account is on hold and cannot use claude")
+        || cannot.contains("account cannot receive replies from claude")
+        || cannot.contains("account cannot receive responses from claude")
+}
+
+fn fold_account_off(message: &str) -> String {
+    let mut out = String::with_capacity(message.len());
+    for ch in message.chars() {
+        let ch = if ch == '\u{2019}' { '\'' } else { ch };
+        out.extend(ch.to_lowercase());
+    }
+    out.replace("\\u{2019}", "'").replace("\\u2019", "'")
 }
 
 fn bridge_status(api_error_status: Option<u16>) -> u16 {
@@ -406,5 +449,92 @@ mod tests {
             let error = classify(&result_error(None, message, None));
             assert_ne!(error.status(), Some(400), "{message}");
         }
+    }
+
+    fn variants(message: &str) -> Vec<String> {
+        let mut out = vec![message.to_owned(), message.to_ascii_uppercase()];
+        if message.contains("can't") {
+            out.push(message.replace("can't", "can\u{2019}t"));
+            out.push(message.replace("can't", "cannot"));
+            out.push(message.replace("can't", "can\\u2019t"));
+        }
+        out
+    }
+
+    /// Native and WSL runs both classify result lines through [`classify`].
+    #[test]
+    fn d234_account_off_phrases_rest_as_restricted_on_400_and_403() {
+        let phrases = [
+            "This organization has been disabled.",
+            "Your account is on hold and can't use Claude Code. View details or appeal: https://claude.ai/restricted",
+            "Your organization has disabled Claude subscription access for Claude Code",
+            "OAuth authentication is currently not allowed for this organization.",
+            "Your account can't receive replies from Claude right now.",
+            "Your account can't receive responses from Claude right now.",
+        ];
+        for phrase in phrases {
+            for message in variants(phrase) {
+                for status in [400_u16, 403] {
+                    let error = classify(&result_error(Some(status), &message, None));
+                    assert_eq!(error.status(), Some(status), "{status} {message}");
+                    assert!(error.is_account_restricted(), "{status} {message}");
+                    assert!(error.cools(), "{status} {message}");
+                    assert!(!error.skips_failover_same_plugin(), "{message}");
+                    assert_eq!(error.kind(), PluginErrorKind::Status);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn d234_on_hold_without_a_status_is_403_restricted() {
+        for message in variants(
+            "Your account is on hold and can't use Claude Code. View details or appeal: https://claude.ai/restricted",
+        ) {
+            let error = classify(&result_error(None, &message, None));
+            assert_eq!(error.status(), Some(403), "{message}");
+            assert!(error.is_account_restricted(), "{message}");
+            assert!(error.cools(), "{message}");
+        }
+    }
+
+    #[test]
+    fn d234_a_5xx_with_the_same_words_stays_ordinary() {
+        let error = classify(&result_error(
+            Some(500),
+            "This organization has been disabled.",
+            None,
+        ));
+        assert_eq!(error.status(), Some(500));
+        assert!(!error.is_account_restricted());
+    }
+
+    #[test]
+    fn d234_extra_usage_and_usage_policy_are_unchanged() {
+        let extra = classify(&result_error(
+            Some(400),
+            "Third-party apps now draw from your extra usage, not your plan limits.",
+            None,
+        ));
+        assert_eq!(extra.status(), Some(400));
+        assert!(!extra.cools());
+        assert!(!extra.is_account_restricted());
+
+        let policy = classify(&result_error(
+            Some(400),
+            "Claude Code is unable to respond to this request, which appears to violate our Usage Policy",
+            None,
+        ));
+        assert_eq!(policy.status(), Some(400));
+        assert!(policy.cools());
+        assert!(!policy.is_account_restricted());
+
+        let quota = classify(&result_error(
+            Some(429),
+            "You exceeded your plan's usage limit",
+            None,
+        ));
+        assert_eq!(quota.kind(), PluginErrorKind::Quota);
+        assert!(!quota.is_account_restricted());
     }
 }
