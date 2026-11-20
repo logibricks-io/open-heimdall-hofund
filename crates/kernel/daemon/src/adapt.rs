@@ -126,6 +126,9 @@ pub(crate) fn provider_error(error: PluginError) -> ProviderError {
     if error.is_account_restricted() {
         converted = converted.account_restricted();
     }
+    if error.is_ordinary_failure() {
+        converted = converted.ordinary_failure();
+    }
     converted
 }
 

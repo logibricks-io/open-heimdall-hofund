@@ -27,6 +27,7 @@ pub struct ProviderError {
     credit_soon: bool,
     cooldown: bool,
     account_restricted: bool,
+    ordinary_failure: bool,
     billed: Option<Box<hofund_plugin_api::BilledUsage>>,
 }
 
@@ -101,6 +102,7 @@ impl ProviderError {
             credit_soon: false,
             cooldown: true,
             account_restricted: false,
+            ordinary_failure: false,
             billed: None,
         }
     }
@@ -130,6 +132,7 @@ impl ProviderError {
                 credit_soon: false,
                 cooldown: true,
                 account_restricted: false,
+                ordinary_failure: false,
                 billed: None,
             }
         } else {
@@ -154,6 +157,7 @@ impl ProviderError {
         let credit_soon = error.credit_soon();
         let cooldown = error.cools();
         let account_restricted = error.is_account_restricted();
+        let ordinary_failure = error.is_ordinary_failure();
         let mut converted = match kind {
             hofund_plugin_api::PluginErrorKind::Connect => Self::connect(message),
             hofund_plugin_api::PluginErrorKind::Timeout => Self::timeout(message),
@@ -180,6 +184,7 @@ impl ProviderError {
         converted.credit_soon = credit_soon;
         converted.cooldown = cooldown;
         converted.account_restricted = account_restricted;
+        converted.ordinary_failure = ordinary_failure;
         if let Some(after) = error.retry_after() {
             converted = converted.with_retry_after(after);
         }
@@ -324,6 +329,7 @@ impl ProviderError {
             credit_soon: false,
             cooldown: true,
             account_restricted: false,
+            ordinary_failure: false,
             billed: None,
         }
     }
@@ -341,5 +347,20 @@ impl ProviderError {
     #[must_use]
     pub const fn is_account_restricted(&self) -> bool {
         self.account_restricted
+    }
+
+    /// Marks a failure the group should leave as an ordinary one.
+    ///
+    /// See [`hofund_plugin_api::PluginError::ordinary_failure`].
+    #[must_use]
+    pub const fn ordinary_failure(mut self) -> Self {
+        self.ordinary_failure = true;
+        self
+    }
+
+    /// Whether the plugin marked this failure as an ordinary one.
+    #[must_use]
+    pub const fn is_ordinary_failure(&self) -> bool {
+        self.ordinary_failure
     }
 }

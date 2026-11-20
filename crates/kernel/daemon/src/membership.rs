@@ -1256,6 +1256,7 @@ pub(crate) fn into_plugin(error: ProviderError) -> PluginError {
     let credit_soon = error.credit_soon();
     let cooldown = error.cools();
     let account_restricted = error.is_account_restricted();
+    let ordinary_failure = error.is_ordinary_failure();
     let status = error.status;
     let billed = error.billed().cloned();
     let credit_message = credit.then(|| error.message.clone());
@@ -1299,6 +1300,9 @@ pub(crate) fn into_plugin(error: ProviderError) -> PluginError {
     }
     if account_restricted {
         converted = converted.account_restricted();
+    }
+    if ordinary_failure {
+        converted = converted.ordinary_failure();
     }
     converted
 }
@@ -1429,7 +1433,16 @@ mod tests {
         assert_eq!(plugin.status(), Some(400));
         let restored = crate::adapt::provider_error(plugin);
         assert!(restored.is_account_restricted());
+        assert!(!restored.is_ordinary_failure());
         assert_eq!(restored.status, Some(400));
+
+        let ordinary = ProviderError::status(400, "relay copy").ordinary_failure();
+        let plugin = super::into_plugin(ordinary);
+        assert!(plugin.is_ordinary_failure());
+        assert!(!plugin.is_account_restricted());
+        let restored = crate::adapt::provider_error(plugin);
+        assert!(restored.is_ordinary_failure());
+        assert!(!restored.is_account_restricted());
     }
 
     struct Boom {

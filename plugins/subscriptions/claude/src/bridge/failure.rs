@@ -79,7 +79,7 @@ pub(crate) fn classify_parts(
 /// A status-less line, which the bridge used to answer as 502, is a 403.
 /// A 5xx stays an ordinary failure. Native and WSL runs both classify here.
 fn account_off(status: Option<u16>, message: &str) -> Option<PluginError> {
-    if !account_off_words(message) {
+    if !hofund_plugin_sdk::account_off::account_off_words(message) {
         return None;
     }
     let status = match status {
@@ -88,30 +88,6 @@ fn account_off(status: Option<u16>, message: &str) -> Option<PluginError> {
         _ => 403,
     };
     Some(PluginError::status_error(status, message).account_restricted())
-}
-
-/// Kept in step with the Messages adapter's account-off words.
-fn account_off_words(message: &str) -> bool {
-    let folded = fold_account_off(message);
-    if folded.contains("this organization has been disabled")
-        || folded.contains("organization has disabled claude subscription access")
-        || folded.contains("oauth authentication is currently not allowed for this organization")
-    {
-        return true;
-    }
-    let cannot = folded.replace("can't", "cannot");
-    cannot.contains("account is on hold and cannot use claude")
-        || cannot.contains("account cannot receive replies from claude")
-        || cannot.contains("account cannot receive responses from claude")
-}
-
-fn fold_account_off(message: &str) -> String {
-    let mut out = String::with_capacity(message.len());
-    for ch in message.chars() {
-        let ch = if ch == '\u{2019}' { '\'' } else { ch };
-        out.extend(ch.to_lowercase());
-    }
-    out.replace("\\u{2019}", "'").replace("\\u2019", "'")
 }
 
 fn bridge_status(api_error_status: Option<u16>) -> u16 {

@@ -371,6 +371,8 @@ pub struct Sent {
     unwrap: Option<Unwrap>,
     watch: Option<(usize, Watch)>,
     allocation_quota_rate: bool,
+    /// Configured Messages base, so an in-band error can be host-scoped.
+    messages_base: Option<String>,
 }
 
 impl fmt::Debug for Sent {
@@ -384,6 +386,7 @@ impl fmt::Debug for Sent {
             .field("unwrap", &self.unwrap.is_some())
             .field("watch", &self.watch.as_ref().map(|(limit, _)| *limit))
             .field("allocation_quota_rate", &self.allocation_quota_rate)
+            .field("messages_base", &self.messages_base)
             .finish()
     }
 }
@@ -398,11 +401,12 @@ impl Sent {
     pub async fn complete(self) -> Result<Completion, PluginError> {
         let (codec, cross_protocol, streaming) = (self.codec, self.cross_protocol, self.streaming);
         let allocation_quota_rate = self.allocation_quota_rate;
+        let messages_base = self.messages_base.clone();
         let body = self.into_body();
         if cross_protocol {
-            decoded(body, codec, streaming, allocation_quota_rate).await
+            decoded(body, codec, streaming, allocation_quota_rate, messages_base).await
         } else {
-            raw(body, codec, streaming, allocation_quota_rate).await
+            raw(body, codec, streaming, allocation_quota_rate, messages_base).await
         }
     }
 
@@ -434,13 +438,14 @@ impl Sent {
         if !self.streaming {
             return self.complete().await;
         }
+        let messages_base = self.messages_base.clone();
         let mut decoder = self.codec.stream_decoder();
         let mut body = self.into_body();
         let mut events = Vec::new();
         while let Some(chunk) = body.next_chunk().await {
-            keep_events(decoder.push(&chunk?), &mut events)?;
+            keep_events(decoder.push(&chunk?), &mut events, messages_base.as_deref())?;
         }
-        keep_events(decoder.finish(), &mut events)?;
+        keep_events(decoder.finish(), &mut events, messages_base.as_deref())?;
         if events.is_empty() {
             return Err(PluginError::decode("the upstream stream carried no events"));
         }
@@ -467,11 +472,12 @@ impl Sent {
 fn keep_events(
     events: Result<Vec<StreamEvent>, CodecError>,
     into: &mut Vec<StreamEvent>,
+    messages_base: Option<&str>,
 ) -> Result<(), PluginError> {
     let events = events.map_err(|error| PluginError::decode(error.to_string()))?;
     for mut event in events {
         if let Some(error) = failure_of(&event) {
-            return Err(error);
+            return Err(account_off_stream(messages_base, error));
         }
         if matches!(event, StreamEvent::Unknown(_)) {
             continue;
@@ -644,6 +650,8 @@ pub async fn send(
         unwrap: target.unwrap.clone(),
         watch: None,
         allocation_quota_rate: target.allocation_quota_rate,
+        messages_base: (target.protocol == ProtocolId::ANTHROPIC_MESSAGES)
+            .then(|| target.base_url.clone()),
     })
 }
 
@@ -807,7 +815,12 @@ pub async fn count_input(
             }
         }
     }
-    classify_count(status, retry_after, &bytes, field)
+    classify_count(status, retry_after, &bytes, field).map_err(|error| {
+        match target.classify.as_ref() {
+            Some(classify) => classify(status, &http::HeaderMap::new(), &bytes, error),
+            None => error,
+        }
+    })
 }
 
 /// The codec, body finisher, and path for a protocol this module sends.
@@ -1353,6 +1366,7 @@ async fn decoded(
     codec: &dyn Codec,
     streaming: bool,
     allocation_quota_rate: bool,
+    messages_base: Option<String>,
 ) -> Result<Completion, PluginError> {
     if streaming {
         let events = Events {
@@ -1362,6 +1376,7 @@ async fn decoded(
             finished: false,
             committed: false,
             billed: BilledUsage::default(),
+            messages_base,
         };
         return Ok(Completion::Stream(Box::pin(futures_util::stream::unfold(
             events,
@@ -1384,6 +1399,7 @@ async fn raw(
     codec: &dyn Codec,
     streaming: bool,
     allocation_quota_rate: bool,
+    messages_base: Option<String>,
 ) -> Result<Completion, PluginError> {
     if !streaming {
         let bytes = collect(body).await?;
@@ -1402,7 +1418,7 @@ async fn raw(
         };
         buffered.push(chunk);
         if let Some(error) = events.iter().find_map(failure_of) {
-            return Err(error);
+            return Err(account_off_stream(messages_base.as_deref(), error));
         }
         if events.iter().any(stream_commits) {
             break;
@@ -1435,6 +1451,7 @@ struct Events {
     finished: bool,
     committed: bool,
     billed: BilledUsage,
+    messages_base: Option<String>,
 }
 
 impl Events {
@@ -1482,6 +1499,7 @@ impl Events {
                 if let Some(error) = failure_of(event) {
                     self.pending.clear();
                     self.finished = true;
+                    let error = account_off_stream(self.messages_base.as_deref(), error);
                     return Some(Err(error.with_billed(self.billed.clone())));
                 }
                 self.committed |= stream_commits(event);
@@ -1509,6 +1527,14 @@ impl Events {
             }
             return Some(item);
         }
+    }
+}
+
+/// Host-scopes a Messages error event. Other protocols leave the error as decoded.
+fn account_off_stream(base: Option<&str>, error: PluginError) -> PluginError {
+    match base {
+        Some(base) => crate::account_off::messages_account_off(base, error, true),
+        None => error,
     }
 }
 
@@ -1746,6 +1772,7 @@ pub async fn decode_upstream_response(
         unwrap: None,
         watch: None,
         allocation_quota_rate: false,
+        messages_base: None,
     };
     if client_stream {
         sent.complete().await
@@ -1913,6 +1940,7 @@ mod tests {
             finished: false,
             committed: false,
             billed: BilledUsage::default(),
+            messages_base: None,
         };
         assert!(matches!(
             events.next().await,
@@ -2519,6 +2547,7 @@ mod tests {
                 unwrap: None,
                 watch: None,
                 allocation_quota_rate: false,
+                messages_base: None,
             }
         }
 

@@ -1,8 +1,9 @@
 //! A vendor-restricted account rests for two hours and the group moves on.
 //!
 //! The sentences are classified where the account is known. This harness only
-//! sees the mark those classifiers set. An unmarked 400 still stops the group:
-//! that is what a relay's copy of the same body does.
+//! sees the mark those classifiers set. An unmarked 400 still stops the group.
+//! A relay's copy of the same body is marked as an ordinary failure, so the
+//! group moves on and the member takes the generic rest.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -63,6 +64,9 @@ fn clone_error(error: &PluginError) -> PluginError {
     }
     if error.is_account_restricted() {
         copied = copied.account_restricted();
+    }
+    if error.is_ordinary_failure() {
+        copied = copied.ordinary_failure();
     }
     copied
 }
@@ -194,6 +198,7 @@ async fn d234_unmarked_400_stops_the_group_and_does_not_rest() {
     assert_eq!(upstream_id, "first");
     assert_eq!(error.status(), Some(400));
     assert!(!error.is_account_restricted());
+    assert!(!error.is_ordinary_failure());
     assert_eq!(second_hits.load(Ordering::SeqCst), 0);
     assert_eq!(
         cooldowns.record_failure_for_model(&first_id, "demo", &error),
@@ -273,4 +278,76 @@ async fn d234_extra_usage_and_usage_policy_do_not_move_on() {
             "{message}"
         );
     }
+}
+
+#[tokio::test]
+async fn d234_ordinary_failure_400_fails_over_and_rests_on_the_generic_ladder() {
+    let (cooldowns, start) = book();
+    let second_hits = Arc::new(AtomicUsize::new(0));
+    let message = "This organization has been disabled.";
+    let error = PluginError::status_error(400, message).ordinary_failure();
+    let first = member(
+        "first",
+        &Arc::new(AtomicUsize::new(0)),
+        "subscription",
+        Some(error),
+    );
+    let first_id = first.id().clone();
+    let router = router(
+        vec![first, member("second", &second_hits, "subscription", None)],
+        Arc::clone(&cooldowns),
+    );
+    let routed = dispatch(&router).await.expect("ordinary 400 fails over");
+    assert_eq!(routed.upstream_id, "second");
+    assert_eq!(second_hits.load(Ordering::SeqCst), 1);
+    let cooling = cooldowns
+        .record_failure_for_model(
+            &first_id,
+            "demo",
+            &PluginError::status_error(400, message).ordinary_failure(),
+        )
+        .expect("ordinary rest");
+    assert_eq!(cooling.cause(), CooldownCause::Failure);
+    assert_eq!(
+        cooling.until().duration_since(start),
+        Duration::from_secs(60)
+    );
+}
+
+#[tokio::test]
+async fn d234_restricted_rests_even_when_the_words_would_not() {
+    let (cooldowns, start) = book();
+    let second_hits = Arc::new(AtomicUsize::new(0));
+    let message = "response protection is unavailable";
+    let error = PluginError::status_error(400, message).account_restricted();
+    let first = member(
+        "first",
+        &Arc::new(AtomicUsize::new(0)),
+        "subscription",
+        Some(error),
+    );
+    let first_id = first.id().clone();
+    let router = router(
+        vec![first, member("second", &second_hits, "subscription", None)],
+        Arc::clone(&cooldowns),
+    );
+    let routed = dispatch(&router)
+        .await
+        .expect("restricted still fails over");
+    assert_eq!(routed.upstream_id, "second");
+    let cooling = cooldowns
+        .record_failure_for_model(
+            &first_id,
+            "demo",
+            &PluginError::status_error(400, message).account_restricted(),
+        )
+        .expect("restricted rest");
+    assert_eq!(cooling.cause(), CooldownCause::Restricted);
+    assert_eq!(cooling.until().duration_since(start), TWO_HOURS);
+    let (plain, _) = book();
+    assert_eq!(
+        plain.record_failure_for_model(&first_id, "demo", &PluginError::status_error(400, message)),
+        None,
+        "the same words without the mark do not rest"
+    );
 }

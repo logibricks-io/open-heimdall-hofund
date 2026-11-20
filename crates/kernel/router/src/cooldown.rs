@@ -13,9 +13,11 @@
 //! | Passive observation | Zero remaining uses the window reset capped at 8 days, the retry hint capped at 1 hour, or 15 minutes without either. Positive remaining at least 98% used with a known positive limit rests only for a positive window reset capped at 8 days. Accounts spending credits and all other observations record nothing. Observations do not advance either failure ladder. |
 //! | Contained panic | Uses the generic failure ladder with [`CooldownCause::Panic`]. |
 //! | Vendor account restriction | Rests the whole member for 2 hours, flat, and does not climb a ladder or count a generic failure. A plugin sets the mark when it knows the account. The next member, including that provider's other accounts, is still asked. |
+//! | Ordinary failure mark | A plugin may mark a status the group should leave, including a 400, as an ordinary failure. It takes the generic failure ladder and is not a restricted rest. |
 //!
 //! Cancelled, unsupported, configuration, internal, unknown future, and other
-//! request-shaped HTTP 4xx errors do not cool a member. A new failure, panic,
+//! request-shaped HTTP 4xx errors do not cool a member, unless the plugin
+//! marked the failure as an ordinary failure or an account restriction. A new failure, panic,
 //! or passive observation keeps whichever rest ends later, so a shorter one
 //! never cuts a longer rest short; a deadline tie replaces it. A quota or
 //! credit rest guessed without a vendor time gives way to a same-cause
@@ -1465,11 +1467,19 @@ fn probe_error(error: &PluginError) -> bool {
 }
 
 fn failure_kind(error: &PluginError) -> Option<Failure> {
-    if !error.cools() || !crate::decision::rests(error) {
+    if !error.cools() {
         return None;
     }
+    // Before `rests`: a refusal or policy sentence would otherwise hide a
+    // mark the plugin already made.
     if error.is_account_restricted() {
         return Some(Failure::Restricted);
+    }
+    if error.is_ordinary_failure() {
+        return Some(Failure::Generic(CooldownCause::Failure));
+    }
+    if !crate::decision::rests(error) {
+        return None;
     }
     if error.is_credit() {
         return Some(Failure::Credit);

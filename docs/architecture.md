@@ -461,7 +461,9 @@ cap at eight days. New events never shorten a longer active rest. A vendor-restr
 signaled by a plugin flag rather than by words in the router, rests the whole
 member for two hours and does not climb a ladder. The group still asks the
 next member, including that provider's other accounts. A 400 carries that
-flag only when the plugin that knows the account set it.
+flag only when the plugin that knows the account set it. The same sentences
+from any other host are a separate ordinary-failure mark: the group moves on
+and the member takes the generic failure rest.
 
 Only API-key credit-ladder rests persist. The daemon writes their wall-clock
 deadlines and rungs to `rests.json` beside the configuration through a
@@ -509,7 +511,9 @@ the next member is asked. The order is fixed:
    wording on a 400 or 422. Narrowing `statuses` does not turn these off.
    Escaped (`\u`) JSON text is read decoded as well. A 400 or 403 the plugin
    marked as an account restriction also fails over, and rests that account
-   for two hours; the router does not match the vendor's sentences itself.
+   for two hours. A 400 the plugin marked as an ordinary failure fails over
+   and takes the generic failure rest. The router does not match the vendor's
+   sentences itself.
 4. A response-protection refusal skips every member of the same provider, and
    a request-shape refusal asks the next member, whatever the status list
    says. Neither rests the member, nor does a refusal of the prompt.

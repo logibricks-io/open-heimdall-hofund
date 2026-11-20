@@ -290,14 +290,17 @@ pub fn anthropic(
     let bridged = Bridged {
         inner: adapter.clone(),
     };
-    let base = adapter.direct_base();
+    let base = adapter.direct_base().to_owned();
     Ok(Arc::new(Direct {
         http: host.http().clone(),
-        target: Target::new(ProtocolId::ANTHROPIC_MESSAGES, base)
+        target: Target::new(ProtocolId::ANTHROPIC_MESSAGES, &base)
             .credential(style)
             .headers(headers)
             .quirks(quirks)
-            .preset(preset),
+            .preset(preset)
+            .classify_status(Arc::new(move |_status, _headers, _body, error| {
+                hofund_plugin_sdk::account_off::messages_account_off(&base, error, false)
+            })),
         secret,
         counts: true,
         bridged,
@@ -663,6 +666,7 @@ fn plugin_error(error: ProviderError) -> PluginError {
     let credit = error.is_credit();
     let cooldown = error.cools();
     let account_restricted = error.is_account_restricted();
+    let ordinary_failure = error.is_ordinary_failure();
     let status = error.status;
     let credit_message = credit.then(|| error.message.clone());
     let mut converted = match error.kind {
@@ -697,6 +701,9 @@ fn plugin_error(error: ProviderError) -> PluginError {
     if account_restricted {
         converted = converted.account_restricted();
     }
+    if ordinary_failure {
+        converted = converted.ordinary_failure();
+    }
     converted
 }
 
@@ -724,8 +731,14 @@ mod tests {
         let marked = hofund_provider::ProviderError::status(403, "turned off").account_restricted();
         let plugin = super::plugin_error(marked);
         assert!(plugin.is_account_restricted());
+        assert!(!plugin.is_ordinary_failure());
         assert!(!plugin.skips_failover_same_plugin());
         assert_eq!(plugin.status(), Some(403));
+
+        let ordinary = hofund_provider::ProviderError::status(400, "relay copy").ordinary_failure();
+        let plugin = super::plugin_error(ordinary);
+        assert!(plugin.is_ordinary_failure());
+        assert!(!plugin.is_account_restricted());
 
         let credit = hofund_provider::ProviderError::credit_status(402, "no credit");
         let plugin = super::plugin_error(credit);

@@ -180,9 +180,10 @@ pub(crate) fn allows(error: &PluginError, connect_errors: bool, statuses: &BTree
     let Some(status) = error.status() else {
         return false;
     };
-    // The plugin already decided this account was restricted. A 400 would
-    // otherwise stop the group. Other accounts of the provider are still asked.
-    if error.is_account_restricted() {
+    // The plugin already decided this account was restricted, or that a 400
+    // should still move on as an ordinary failure. Other accounts of the
+    // provider are still asked. The router does not match the sentences.
+    if error.is_account_restricted() || error.is_ordinary_failure() {
         return true;
     }
     let text = words_of(error.message());
@@ -318,7 +319,7 @@ pub(crate) fn too_long_unsaid(
     model: &str,
     provider: &str,
 ) -> Option<PluginError> {
-    if error.is_account_restricted() {
+    if error.is_account_restricted() || error.is_ordinary_failure() {
         return None;
     }
     let status = error.status()?;
