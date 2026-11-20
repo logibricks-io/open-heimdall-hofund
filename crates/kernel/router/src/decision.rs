@@ -218,6 +218,14 @@ pub(crate) fn outgrown(error: &PluginError) -> bool {
         .is_some_and(|status| status == 413 || overflowed(status, &words_of(error.message())))
 }
 
+/// Whether the vendor refused the request's content. An allowance failure is
+/// not a refusal: those members can still be the reason a too-small member is
+/// asked last.
+pub(crate) fn content_refused(error: &PluginError) -> bool {
+    let message = error.message();
+    skips_provider(error) || REFUSED_WORDS.is_match(message) || policy_refusal(message)
+}
+
 /// Whether `error` says the vendor refuses the request's content on every
 /// account of its provider, so none of them is asked it again
 /// (`reference: internal/gateway/fallback.go:1425`). A plugin-marked account

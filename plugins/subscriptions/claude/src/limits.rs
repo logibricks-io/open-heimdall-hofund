@@ -2,10 +2,12 @@
 //! per account when `/usage` is away or for setup-token accounts.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hofund_plugin_api::{AccountId, HostContext, PluginError, PluginErrorKind, QuotaWindow};
+use serde::{Deserialize, Serialize};
 
 use crate::bridge::decode::RateLimitInfo;
 use crate::usage;
@@ -13,6 +15,17 @@ use crate::usage_cadence::{self, QuotaIntent, ReadDecision};
 
 /// How long stream-derived windows stand in for a failed `/usage` read.
 pub(crate) const HEARD_TTL: Duration = Duration::from_secs(60 * 60);
+
+/// A 5-hour window the vendor did not send cannot be inferred from a week
+/// that moved longer ago than this.
+const FIVE_HOURS: Duration = Duration::from_secs(5 * 60 * 60);
+
+/// Same weekly reset, allowing the clock slack a reading already uses.
+const SAME_WEEK: Duration = Duration::from_secs(60 * 60);
+
+/// Last whole reading kept under the account directory so a restart does
+/// not invent a 5-hour window again.
+pub(crate) const READING_FILE: &str = "usage-reading.json";
 
 /// One allowance kind Claude Code names in `unifiedWindows`.
 #[derive(Clone, Copy, Debug)]
@@ -63,7 +76,9 @@ pub(crate) struct RawLimit {
 struct Entry {
     windows: Vec<QuotaWindow>,
     heard_at: Option<SystemTime>,
-    #[allow(dead_code)]
+    /// When `windows` were last written by a whole reading or a header.
+    at: Option<SystemTime>,
+    /// Set only by a whole `/usage` reading. A header from `note` leaves this false.
     whole: bool,
     last_err: Option<String>,
     tried: Option<SystemTime>,
@@ -140,6 +155,7 @@ impl Store {
         sort_windows(&mut merged);
         entry.windows = merged;
         entry.heard_at = Some(now);
+        entry.at = Some(now);
         entry.last_err = None;
     }
 
@@ -190,25 +206,92 @@ impl Store {
         entry.asked = asked;
     }
 
-    /// Keeps a successful `/usage` parse (`whole` reading).
-    pub(crate) fn record_usage(
+    /// Windows and time a `/usage` decision must use.
+    ///
+    /// Only a whole reading counts. A `note` header, which has windows but
+    /// `whole == false`, falls through to `disk`. Call this before the
+    /// command: a rate-limit header while it runs refreshes the entry time
+    /// and must not make an old reading look fresh.
+    pub(crate) fn snapshot_prior(
         &self,
         account: &AccountId,
-        windows: Vec<QuotaWindow>,
-        now: SystemTime,
-    ) {
+        disk: Option<PriorReading>,
+    ) -> (Vec<QuotaWindow>, Option<SystemTime>) {
+        let key = Self::key(account);
+        let guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(entry) = guard.get(&key)
+            && entry.whole
+            && !entry.windows.is_empty()
+        {
+            return (entry.windows.clone(), entry.at);
+        }
+        match disk {
+            Some(reading) => (reading.windows, Some(reading.read_at)),
+            None => (Vec::new(), None),
+        }
+    }
+
+    /// Forgets the cadence stamp so the next asked read runs.
+    ///
+    /// The whole reading and its time stay. Tests use this so a seeded
+    /// reading does not also count as a recent `/usage` attempt.
+    #[cfg(test)]
+    pub(crate) fn clear_tried(&self, account: &AccountId) {
         let key = Self::key(account);
         let mut guard = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let prior = guard.get(&key);
-        let heard = prior.and_then(|e| e.heard_at);
-        let (tried, wait, asked) =
-            prior.map_or((None, Duration::ZERO, 0), |e| (e.tried, e.wait, e.asked));
+        if let Some(entry) = guard.get_mut(&key) {
+            entry.tried = None;
+        }
+    }
+
+    /// Keeps a successful `/usage` parse (`whole` reading).
+    ///
+    /// `prev` and `prev_at` are the snapshot taken before the command. The
+    /// windows stored here are the ones a later restart loads.
+    pub(crate) fn record_usage(
+        &self,
+        account: &AccountId,
+        windows: Vec<QuotaWindow>,
+        now: SystemTime,
+        prev: &[QuotaWindow],
+        prev_at: Option<SystemTime>,
+    ) -> Vec<QuotaWindow> {
+        self.store_whole(account, windows, now, prev, prev_at)
+    }
+
+    fn store_whole(
+        &self,
+        account: &AccountId,
+        windows: Vec<QuotaWindow>,
+        now: SystemTime,
+        prev: &[QuotaWindow],
+        prev_at: Option<SystemTime>,
+    ) -> Vec<QuotaWindow> {
+        let key = Self::key(account);
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let prior = guard.get(&key).map(|entry| PriorSnapshot {
+            heard_at: entry.heard_at,
+            tried: entry.tried,
+            wait: entry.wait,
+            asked: entry.asked,
+        });
+        let heard = prior.as_ref().and_then(|row| row.heard_at);
+        let (tried, wait, asked) = prior.as_ref().map_or((None, Duration::ZERO, 0), |row| {
+            (row.tried, row.wait, row.asked)
+        });
         let mut entry = Entry {
-            windows: with_unstarted(windows),
+            windows: finish_whole(prev, prev_at, windows, now),
             heard_at: heard,
+            at: Some(now),
             whole: true,
             last_err: None,
             tried: Some(tried.unwrap_or(now)),
@@ -216,7 +299,9 @@ impl Store {
             asked,
         };
         sort_windows(&mut entry.windows);
+        let stored = entry.windows.clone();
         guard.insert(key, entry);
+        stored
     }
 
     /// Remembers a failed `/usage` read while keeping prior windows.
@@ -303,6 +388,37 @@ impl Store {
     }
 }
 
+/// Cadence fields kept across a whole-reading replace.
+struct PriorSnapshot {
+    heard_at: Option<SystemTime>,
+    tried: Option<SystemTime>,
+    wait: Duration,
+    asked: u64,
+}
+
+/// A whole reading loaded from the account directory.
+#[derive(Clone, Debug)]
+pub(crate) struct PriorReading {
+    pub(crate) windows: Vec<QuotaWindow>,
+    pub(crate) read_at: SystemTime,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedReading {
+    read_at: String,
+    windows: Vec<SavedWindow>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedWindow {
+    name: String,
+    used: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    limit: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resets_at: Option<String>,
+}
+
 /// Sort windows in Claude Code kind order.
 pub(crate) fn sort_windows(windows: &mut [QuotaWindow]) {
     windows.sort_by_key(kind_order);
@@ -325,6 +441,170 @@ pub(crate) fn with_unstarted(mut windows: Vec<QuotaWindow>) -> Vec<QuotaWindow> 
     }
     sort_windows(&mut windows);
     windows
+}
+
+/// A whole reading, with the unstarted 5-hour window left out when the
+/// vendor sends none or the plan already said it has no meters.
+#[must_use]
+pub(crate) fn finish_whole(
+    prev: &[QuotaWindow],
+    prev_at: Option<SystemTime>,
+    mut windows: Vec<QuotaWindow>,
+    now: SystemTime,
+) -> Vec<QuotaWindow> {
+    if plan_reports_no_meters(&windows) || vendor_sends_no_five_hour(prev, prev_at, &windows, now) {
+        sort_windows(&mut windows);
+        windows
+    } else {
+        with_unstarted(windows)
+    }
+}
+
+/// Whether `windows` is a plan Claude Code reported with no meters.
+fn plan_reports_no_meters(windows: &[QuotaWindow]) -> bool {
+    windows
+        .iter()
+        .any(|window| window.name() == usage::NO_METERS_WINDOW)
+}
+
+/// Whether `current`, read at `now`, is an account the vendor sends no
+/// 5-hour window for.
+///
+/// An idle account and an account with no such window read the same until
+/// the week is seen to rise inside five hours. After that, a reading that
+/// still has no 5-hour window stays without one, including the copy kept
+/// on disk, until a reading includes a real one. A previous no-meters aside
+/// is not that evidence.
+#[must_use]
+pub(crate) fn vendor_sends_no_five_hour(
+    prev: &[QuotaWindow],
+    prev_at: Option<SystemTime>,
+    current: &[QuotaWindow],
+    now: SystemTime,
+) -> bool {
+    if has_five_hour(current) || prev.is_empty() {
+        return false;
+    }
+    if !has_five_hour(prev) {
+        // A no-meters aside has no 5-hour window, and that is not evidence
+        // the vendor sends none. Only a previous reading that already had
+        // real allowance windows, and still no 5-hour window, stays out.
+        return has_allowance_window(prev);
+    }
+    let Some(prev_at) = prev_at else {
+        return false;
+    };
+    let age = now.duration_since(prev_at).unwrap_or(Duration::ZERO);
+    if age >= FIVE_HOURS {
+        return false;
+    }
+    let (Some(before), Some(after)) = (week_with_reset(prev), week_with_reset(current)) else {
+        return false;
+    };
+    let (Some(before_reset), Some(after_reset)) = (before.resets_at(), after.resets_at()) else {
+        return false;
+    };
+    after.used() > before.used() && abs_between(before_reset, after_reset) < SAME_WEEK
+}
+
+fn has_five_hour(windows: &[QuotaWindow]) -> bool {
+    windows.iter().any(|window| window.name() == "5 hours")
+}
+
+/// A session or weekly allowance window, not an aside or a credits line.
+fn has_allowance_window(windows: &[QuotaWindow]) -> bool {
+    windows.iter().any(|window| {
+        let name = window.name();
+        name == "5 hours" || name == "7 days" || name.starts_with("7 days ")
+    })
+}
+
+fn week_with_reset(windows: &[QuotaWindow]) -> Option<&QuotaWindow> {
+    windows
+        .iter()
+        .find(|window| window.name() == "7 days" && window.resets_at().is_some())
+}
+
+fn abs_between(left: SystemTime, right: SystemTime) -> Duration {
+    left.duration_since(right)
+        .or_else(|_| right.duration_since(left))
+        .unwrap_or(Duration::MAX)
+}
+
+/// Reads the whole reading saved beside an account. `None` when the file
+/// is missing or not a reading this process wrote.
+#[must_use]
+pub(crate) fn load_reading(path: &Path) -> Option<PriorReading> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let saved: SavedReading = serde_json::from_str(&text).ok()?;
+    let read_at = hofund_plugin_sdk::time::parse_rfc3339(&saved.read_at)?;
+    let mut windows = Vec::new();
+    for item in saved.windows {
+        let reset = item
+            .resets_at
+            .as_deref()
+            .and_then(hofund_plugin_sdk::time::parse_rfc3339);
+        let Ok(window) = QuotaWindow::new(item.name, item.used, item.limit, reset) else {
+            continue;
+        };
+        windows.push(window);
+    }
+    if windows.is_empty() {
+        return None;
+    }
+    Some(PriorReading { windows, read_at })
+}
+
+/// Writes `windows` as the account's last whole reading.
+pub(crate) fn save_reading(
+    path: &Path,
+    windows: &[QuotaWindow],
+    read_at: SystemTime,
+) -> Result<(), PluginError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|_| PluginError::io("cannot store the Claude usage reading"))?;
+    }
+    let saved = SavedReading {
+        read_at: hofund_plugin_sdk::time::format_rfc3339(read_at),
+        windows: windows
+            .iter()
+            .map(|window| SavedWindow {
+                name: window.name().to_owned(),
+                used: window.used(),
+                limit: window.limit(),
+                resets_at: window
+                    .resets_at()
+                    .map(hofund_plugin_sdk::time::format_rfc3339),
+            })
+            .collect(),
+    };
+    let bytes = serde_json::to_vec(&saved)
+        .map_err(|_| PluginError::io("cannot store the Claude usage reading"))?;
+    let tmp = path.with_extension("json.tmp");
+    {
+        use std::io::Write as _;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&tmp)
+            .map_err(|_| PluginError::io("cannot store the Claude usage reading"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(|_| PluginError::io("cannot store the Claude usage reading"))?;
+        }
+        file.write_all(&bytes)
+            .map_err(|_| PluginError::io("cannot store the Claude usage reading"))?;
+    }
+    std::fs::rename(&tmp, path)
+        .map_err(|_| PluginError::io("cannot store the Claude usage reading"))
 }
 
 /// Zeros windows whose reset time has passed.
@@ -384,6 +664,17 @@ pub(crate) fn observe_from_info(host: &HostContext, info: &RateLimitInfo) {
 mod tests {
     use super::*;
     use crate::bridge::decode::{Decoder, Step};
+
+    fn record(
+        store: &Store,
+        id: &AccountId,
+        windows: Vec<QuotaWindow>,
+        now: SystemTime,
+        disk: Option<PriorReading>,
+    ) -> Vec<QuotaWindow> {
+        let (prev, prev_at) = store.snapshot_prior(id, disk);
+        store.record_usage(id, windows, now, &prev, prev_at)
+    }
 
     fn info_from_json(value: &str) -> RateLimitInfo {
         let mut decoder = Decoder::new();
@@ -470,7 +761,7 @@ mod tests {
             QuotaWindow::new("5 hours", 10, Some(100), None).expect("w"),
             QuotaWindow::new("7 days", 4, Some(100), None).expect("w"),
         ];
-        store.record_usage(&id, usage, now);
+        record(&store, &id, usage, now, None);
         let info = info_from_json(
             r#"{"type":"rate_limit_event","rate_limit_info":{"unifiedWindows":{"five_hour":{"utilization":0.8,"resetsAt":1800000300}}}}"#,
         );
@@ -501,6 +792,288 @@ mod tests {
                 .fallback_on_usage_error(&id, &err, now + HEARD_TTL + Duration::from_secs(1))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn d237_idle_week_keeps_an_unstarted_five_hour_window() {
+        let store = Store::new();
+        let id = AccountId::from_static("claude-d237-idle");
+        let now = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let reset = now + Duration::from_secs(72 * 60 * 60);
+        record(
+            &store,
+            &id,
+            vec![QuotaWindow::new("7 days", 10, Some(100), Some(reset)).expect("week")],
+            now,
+            None,
+        );
+        let windows = store.kept_windows(&id, now).expect("kept");
+        let five = windows
+            .iter()
+            .find(|w| w.name() == "5 hours")
+            .expect("5 hours");
+        assert_eq!(five.used(), 0);
+        assert!(five.resets_at().is_none());
+    }
+
+    #[test]
+    fn d237_week_rose_inside_five_hours_omits_the_invented_window() {
+        let store = Store::new();
+        let id = AccountId::from_static("claude-d237-rose");
+        let now = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let reset = now + Duration::from_secs(72 * 60 * 60);
+        let week = |used| QuotaWindow::new("7 days", used, Some(100), Some(reset)).expect("week");
+        record(&store, &id, vec![week(10)], now, None);
+        let later = now + Duration::from_secs(60 * 60);
+        record(&store, &id, vec![week(12)], later, None);
+        let windows = store.kept_windows(&id, later).expect("kept");
+        assert!(
+            windows.iter().all(|w| w.name() != "5 hours"),
+            "invented window stayed: {windows:?}"
+        );
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].used(), 12);
+        let idle_again = later + Duration::from_secs(30 * 60);
+        record(&store, &id, vec![week(12)], idle_again, None);
+        let stayed = store.kept_windows(&id, idle_again).expect("kept");
+        assert!(stayed.iter().all(|window| window.name() != "5 hours"));
+    }
+
+    #[test]
+    fn d237_rise_five_hours_later_still_adds_the_unstarted_window() {
+        let store = Store::new();
+        let id = AccountId::from_static("claude-d237-old");
+        let now = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let reset = now + Duration::from_secs(72 * 60 * 60);
+        let week = |used| QuotaWindow::new("7 days", used, Some(100), Some(reset)).expect("week");
+        record(&store, &id, vec![week(10)], now, None);
+        let later = now + FIVE_HOURS;
+        record(&store, &id, vec![week(12)], later, None);
+        let windows = store.kept_windows(&id, later).expect("kept");
+        assert!(windows.iter().any(|window| window.name() == "5 hours"));
+    }
+
+    #[test]
+    fn d237_week_reset_an_hour_away_does_not_count_as_the_same_week() {
+        let store = Store::new();
+        let id = AccountId::from_static("claude-d237-reset");
+        let now = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let reset = now + Duration::from_secs(72 * 60 * 60);
+        record(
+            &store,
+            &id,
+            vec![QuotaWindow::new("7 days", 10, Some(100), Some(reset)).expect("week")],
+            now,
+            None,
+        );
+        let later = now + Duration::from_secs(60 * 60);
+        let moved = reset + SAME_WEEK;
+        record(
+            &store,
+            &id,
+            vec![QuotaWindow::new("7 days", 12, Some(100), Some(moved)).expect("week")],
+            later,
+            None,
+        );
+        let windows = store.kept_windows(&id, later).expect("kept");
+        assert!(windows.iter().any(|window| window.name() == "5 hours"));
+    }
+
+    #[test]
+    fn d237_reading_file_keeps_the_omission_until_a_real_window() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join(READING_FILE);
+        let id = AccountId::from_static("claude-d237-disk");
+        let now = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let reset = now + Duration::from_secs(72 * 60 * 60);
+        let week = |used| QuotaWindow::new("7 days", used, Some(100), Some(reset)).expect("week");
+        let store = Store::new();
+        let first = record(&store, &id, vec![week(10)], now, None);
+        save_reading(&path, &first, now).expect("save");
+        let later = now + Duration::from_secs(60 * 60);
+        let omitted = record(&store, &id, vec![week(12)], later, None);
+        assert!(omitted.iter().all(|window| window.name() != "5 hours"));
+        save_reading(&path, &omitted, later).expect("save");
+
+        let fresh = Store::new();
+        let disk = load_reading(&path);
+        let stayed = record(
+            &fresh,
+            &id,
+            vec![week(12)],
+            later + Duration::from_secs(60),
+            disk,
+        );
+        assert!(
+            stayed.iter().all(|window| window.name() != "5 hours"),
+            "restart invented a window: {stayed:?}"
+        );
+        let session_reset = later + Duration::from_secs(4 * 60 * 60);
+        let brought = record(
+            &fresh,
+            &id,
+            vec![
+                QuotaWindow::new("5 hours", 3, Some(100), Some(session_reset)).expect("session"),
+                week(13),
+            ],
+            later + Duration::from_secs(120),
+            None,
+        );
+        let five = brought
+            .iter()
+            .find(|window| window.name() == "5 hours")
+            .expect("real window");
+        assert_eq!(five.used(), 3);
+        assert_eq!(five.resets_at(), Some(session_reset));
+    }
+
+    #[test]
+    fn d237_reading_file_sees_a_rise_after_restart() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join(READING_FILE);
+        let id = AccountId::from_static("claude-d237-restart-rise");
+        let now = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let reset = now + Duration::from_secs(72 * 60 * 60);
+        let week = |used| QuotaWindow::new("7 days", used, Some(100), Some(reset)).expect("week");
+        let store = Store::new();
+        let idle = record(&store, &id, vec![week(10)], now, None);
+        assert!(idle.iter().any(|window| window.name() == "5 hours"));
+        save_reading(&path, &idle, now).expect("save");
+
+        let fresh = Store::new();
+        let later = now + Duration::from_secs(60 * 60);
+        let omitted = record(&fresh, &id, vec![week(12)], later, load_reading(&path));
+        assert!(
+            omitted.iter().all(|window| window.name() != "5 hours"),
+            "restart kept the invented window: {omitted:?}"
+        );
+    }
+
+    #[test]
+    fn d238_no_meters_reading_does_not_invent_a_five_hour_window() {
+        let store = Store::new();
+        let id = AccountId::from_static("claude-d238-none");
+        let now = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let aside = QuotaWindow::new(usage::NO_METERS_WINDOW, 0, None, None)
+            .expect("aside")
+            .with_display(usage::NO_METERS_DISPLAY)
+            .with_blocking(false);
+        let stored = record(&store, &id, vec![aside], now, None);
+        assert!(stored.iter().all(|window| window.name() != "5 hours"));
+        assert_eq!(stored[0].display(), usage::NO_METERS_DISPLAY);
+        assert!(!stored[0].blocking());
+    }
+
+    #[test]
+    fn d237_no_meters_aside_does_not_latch_a_missing_five_hour_window() {
+        let store = Store::new();
+        let id = AccountId::from_static("claude-d237-aside");
+        let now = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let reset = now + Duration::from_secs(72 * 60 * 60);
+        let week = |used| QuotaWindow::new("7 days", used, Some(100), Some(reset)).expect("week");
+        let aside = QuotaWindow::new(usage::NO_METERS_WINDOW, 0, None, None)
+            .expect("aside")
+            .with_display(usage::NO_METERS_DISPLAY)
+            .with_blocking(false);
+        let stored = record(&store, &id, vec![aside], now, None);
+        assert!(stored.iter().all(|window| window.name() != "5 hours"));
+
+        let later = now + Duration::from_secs(60);
+        let idle = record(&store, &id, vec![week(10)], later, None);
+        let five = idle
+            .iter()
+            .find(|window| window.name() == "5 hours")
+            .expect("unstarted");
+        assert_eq!(five.used(), 0);
+        assert!(five.resets_at().is_none());
+
+        let risen = record(
+            &store,
+            &id,
+            vec![week(12)],
+            later + Duration::from_secs(60 * 60),
+            None,
+        );
+        assert!(
+            risen.iter().all(|window| window.name() != "5 hours"),
+            "a risen week kept a 5-hour window: {risen:?}"
+        );
+
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join(READING_FILE);
+        save_reading(&path, &stored, now).expect("save");
+        let fresh = Store::new();
+        let after = record(&fresh, &id, vec![week(10)], later, load_reading(&path));
+        let five = after
+            .iter()
+            .find(|window| window.name() == "5 hours")
+            .expect("unstarted after restart");
+        assert_eq!(five.used(), 0);
+    }
+
+    #[test]
+    fn d237_header_reading_is_not_a_previous_whole_reading() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join(READING_FILE);
+        let id = AccountId::from_static("claude-d237-header");
+        let now = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let reset = now + Duration::from_secs(72 * 60 * 60);
+        let week = |used| QuotaWindow::new("7 days", used, Some(100), Some(reset)).expect("week");
+        let session = QuotaWindow::new("5 hours", 4, Some(100), Some(reset)).expect("session");
+        let store = Store::new();
+        let saved = record(&store, &id, vec![session, week(10)], now, None);
+        save_reading(&path, &saved, now).expect("save");
+
+        let fresh = Store::new();
+        let info = info_from_json(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"seven_day","utilization":0.2,"resetsAt":1800000000}}"#,
+        );
+        fresh.note(&id, &info, now + Duration::from_secs(60));
+        let (prev, prev_at) = fresh.snapshot_prior(&id, load_reading(&path));
+        assert_eq!(prev_at, Some(now));
+        let kept = prev
+            .iter()
+            .find(|window| window.name() == "5 hours")
+            .expect("disk window");
+        assert_eq!(kept.used(), 4);
+
+        let idle = fresh.record_usage(
+            &id,
+            vec![week(10)],
+            now + Duration::from_secs(120),
+            &prev,
+            prev_at,
+        );
+        let five = idle
+            .iter()
+            .find(|window| window.name() == "5 hours")
+            .expect("unstarted, because the saved reading had a real window");
+        assert_eq!(five.used(), 0);
+
+        let header_only = Store::new();
+        header_only.note(&id, &info, now);
+        let (empty, empty_at) = header_only.snapshot_prior(&id, None);
+        assert!(empty.is_empty());
+        assert!(empty_at.is_none());
+        let started = record(&header_only, &id, vec![week(3)], now, None);
+        assert!(
+            started
+                .iter()
+                .any(|window| window.name() == "5 hours" && window.used() == 0)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn d237_reading_file_is_created_mode_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join(READING_FILE);
+        let window = QuotaWindow::new("7 days", 1, Some(100), None).expect("week");
+        save_reading(&path, &[window], UNIX_EPOCH + Duration::from_secs(10)).expect("save");
+        let mode = std::fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert!(!path.with_extension("json.tmp").exists());
     }
 
     #[test]

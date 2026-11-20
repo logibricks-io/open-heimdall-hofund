@@ -939,6 +939,17 @@ impl Router {
                 self.overflow
                     .demote_hops(&conversation.key, input_tokens, resolved.hops);
         }
+        // `fit` leaves out a member whose known window cannot hold the
+        // estimate. Other strategies keep their order: a known-too-small
+        // member is still asked, and later ones are skipped only after an
+        // overflow (`needs_room`).
+        let over_window = if resolved.routing == "fit" {
+            let (fitting, over_window) = split_over_window(resolved.hops, input_tokens);
+            resolved.hops = fitting;
+            over_window
+        } else {
+            Vec::new()
+        };
         resolved.spent = self.spent(&resolved);
         if let Some(trace) = trace.as_mut() {
             trace.set_routing(&resolved.routing);
@@ -992,6 +1003,8 @@ impl Router {
             strategies: Arc::clone(&self.strategies),
             served: self.served_models(),
             drain_moves: ordered.drain_moves,
+            over_window,
+            saw_other: false,
             clear_placeholder_served: false,
             walk_started: wait_hook
                 .as_ref()
@@ -1510,6 +1523,7 @@ impl Router {
         pool: &str,
         routing: &str,
     ) -> Vec<strategy::Seat> {
+        let needs = self.strategies.needs(routing);
         let mut seats = hops
             .iter()
             .map(|hop| {
@@ -1518,6 +1532,9 @@ impl Router {
                 seat.learns = hop.member.learns_allowance();
                 seat.weight = hop.weight;
                 seat.free = hop.free;
+                if needs.window {
+                    seat.window = hop.context_window.filter(|window| *window > 0).unwrap_or(0);
+                }
                 let model = hop.wire_model.as_deref().unwrap_or(&resolved.bare);
                 seat.resting = self.cooldowns.as_ref().is_some_and(|cooldowns| {
                     cooldowns
@@ -1538,13 +1555,7 @@ impl Router {
                         .unwrap_or_else(|| resolved.bare.clone())
                 })
                 .collect::<Vec<_>>();
-            measurements.weigh(
-                &mut seats,
-                &models,
-                pool,
-                self.strategies.needs(routing),
-                SystemTime::now(),
-            );
+            measurements.weigh(&mut seats, &models, pool, needs, SystemTime::now());
         }
         seats
     }
@@ -1838,6 +1849,12 @@ struct DispatchState {
     last_model: Option<String>,
     outgrown: Vec<(String, String)>,
     needs_room: Option<u64>,
+    /// `fit` members whose known window cannot hold the estimate. Asked only
+    /// as a last resort, after every member that may hold it is out of quota
+    /// or credit.
+    over_window: Vec<Hop>,
+    /// A fitting member already failed for a reason other than quota or credit.
+    saw_other: bool,
     missing_detail: String,
     wait_hook: Option<Arc<dyn WaitHook>>,
     /// Where an answer's stick is recorded, when the request has a conversation.
@@ -1865,6 +1882,44 @@ struct Answered {
     completion: Completion,
     tier_sent: String,
     clear_placeholder_served: bool,
+}
+
+/// Splits `hops` into members that may hold `tokens` and members whose known
+/// window is no larger than that estimate. An unknown window stays with the
+/// members that may hold the request. When every member is too small, or none
+/// is, the strategy order is returned unchanged and the second list is empty.
+fn split_over_window(hops: Vec<Hop>, tokens: u64) -> (Vec<Hop>, Vec<Hop>) {
+    if hops.len() < 2 {
+        return (hops, Vec::new());
+    }
+    let mut fitting = Vec::with_capacity(hops.len());
+    let mut small = Vec::new();
+    for hop in hops {
+        if hop
+            .context_window
+            .is_some_and(|window| window > 0 && tokens >= window)
+        {
+            small.push(hop);
+        } else {
+            fitting.push(hop);
+        }
+    }
+    if fitting.is_empty() || small.is_empty() {
+        fitting.extend(small);
+        return (fitting, Vec::new());
+    }
+    (fitting, small)
+}
+
+/// Quota or credit, and not a refusal, a passing retry, or an overflow.
+fn allowance_failure(error: &PluginError) -> bool {
+    if decision::outgrown(error)
+        || decision::content_refused(error)
+        || patience::busy(error, 0, PoolMemberPatience::Off, Instant::now()).is_some()
+    {
+        return false;
+    }
+    patience::spent(error)
 }
 
 fn region_key(provider: &str, model: &str) -> String {
@@ -2049,6 +2104,10 @@ impl DispatchState {
                     hook.wait(patience::REGION_RETRY_PAUSE).await;
                 }
                 asking = std::mem::take(&mut self.region_reask);
+                continue;
+            }
+            if let Some(next) = self.take_over_window() {
+                asking = next;
                 continue;
             }
             break;
@@ -2302,6 +2361,8 @@ impl DispatchState {
                     if decision::outgrown(&error) {
                         // As long on every account of this model; another
                         // member not known to be too small may hold it.
+                        // An overflow is not the allowance failure that asks
+                        // a member left out for its window.
                         if error.status() != Some(413) {
                             self.needs_room = Some(self.input_tokens);
                         }
@@ -2315,6 +2376,7 @@ impl DispatchState {
                         self.outgrown.push((upstream_id.clone(), upstream_model));
                         self.last = Some((upstream_id, error));
                         *ending = Ending::Other;
+                        self.note_other_if_another_follows(asking, index);
                         continue;
                     }
                     if error.skips_failover_same_plugin() {
@@ -2376,6 +2438,12 @@ impl DispatchState {
                     } else {
                         PoolMemberPatience::Inherited
                     };
+                    if !allowance_failure(&error) {
+                        // A passing failure of the member that is currently
+                        // last is replanned. It is not an earlier failure;
+                        // the try after that replan is the one that counts.
+                        self.note_other_if_another_follows(asking, index);
+                    }
                     if let Some(failure) =
                         patience::busy(&error, index, member_patience, self.now())
                     {
@@ -2421,6 +2489,80 @@ impl DispatchState {
             .with_tier(hofund_control_proto::sent_tier_label(&self.tier_sent)),
         );
         trace.sync_open();
+    }
+
+    /// Puts the left-out members on the ask list when the final try failed
+    /// for quota or credit, and no earlier fitting member failed for another
+    /// reason. A refusal, a passing retry, or an overflow does not qualify.
+    /// A member already resting for quota or credit stays out.
+    fn take_over_window(&mut self) -> Option<Vec<usize>> {
+        if self.over_window.is_empty() || self.saw_other {
+            return None;
+        }
+        let error = &self.last.as_ref()?.1;
+        if !allowance_failure(error) {
+            return None;
+        }
+        let extra: Vec<Hop> = std::mem::take(&mut self.over_window)
+            .into_iter()
+            .filter(|hop| !self.resting_allowance(hop))
+            .collect();
+        if extra.is_empty() {
+            return None;
+        }
+        let start = self.resolved.hops.len();
+        self.resolved.hops.extend(extra);
+        Some((start..self.resolved.hops.len()).collect())
+    }
+
+    /// A non-allowance failure counts as earlier only when another fitting
+    /// member is still to be asked.
+    fn note_other_if_another_follows(&mut self, asking: &[usize], index: usize) {
+        if self.another_fitting_follows(asking, index) {
+            self.saw_other = true;
+        }
+    }
+
+    fn another_fitting_follows(&self, asking: &[usize], index: usize) -> bool {
+        let Some(pos) = asking.iter().position(|item| *item == index) else {
+            return false;
+        };
+        asking[pos + 1..].iter().any(|later| {
+            self.resolved
+                .hops
+                .get(*later)
+                .is_some_and(|hop| !self.member_skipped(hop))
+        })
+    }
+
+    fn member_skipped(&self, hop: &Hop) -> bool {
+        let upstream_model = hop.wire_model.as_deref().unwrap_or(&self.resolved.bare);
+        let plugin_id = hop.member.plugin_id();
+        self.refused_providers.contains(hop.member.route_id())
+            || (!plugin_id.is_empty() && self.skipped_plugins.contains(plugin_id))
+            || self.region_closed_for(hop)
+            || self
+                .outgrown
+                .iter()
+                .any(|(route, model)| route == hop.member.route_id() && model == upstream_model)
+            || self.needs_room.is_some_and(|tokens| {
+                hop.context_window
+                    .is_some_and(|window| window > 0 && tokens >= window)
+            })
+    }
+
+    fn resting_allowance(&self, hop: &Hop) -> bool {
+        let model = hop.wire_model.as_deref().unwrap_or(&self.resolved.bare);
+        self.cooldowns.as_ref().is_some_and(|cooldowns| {
+            cooldowns
+                .cooling_for_model(hop.member.id(), model)
+                .is_some_and(|cooling| {
+                    matches!(
+                        cooling.cause(),
+                        CooldownCause::Quota | CooldownCause::Credit
+                    )
+                })
+        })
     }
 
     fn note_skip(&mut self, order: u32, reason: SkipReason) {

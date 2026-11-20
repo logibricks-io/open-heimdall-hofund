@@ -153,11 +153,16 @@ and `hofund <command> --help` print that command's usage.
 ### Routing
 
 A route accepts `routing = "smart"`, `"order"`, `"rotate"`, `"usage"`,
-`"pace"`, `"weight"`, `"free"`, `"fast"`, `"cheap"`, or `"drain"`; the default is
-`smart`. `order` keeps the listed order, `rotate` advances a per-route turn,
-`weight` uses smooth weighted round robin, `free` puts free models first
-in their listed order, and `drain` keeps one member until it is used up or
-unavailable, then moves to the next in listed order. Unknown strategy names are configuration errors.
+`"pace"`, `"weight"`, `"free"`, `"fast"`, `"cheap"`, `"drain"`, or `"fit"`;
+the default is `smart`. `order` keeps the listed order, `rotate` advances a
+per-route turn, `weight` uses smooth weighted round robin, `free` puts free
+models first in their listed order, and `drain` keeps one member until it is
+used up or unavailable, then moves to the next in listed order. `fit` (small
+context first) is a group's only: it keeps Smart's order, then stably sorts
+by band and by known context window, smallest first, with an unknown window
+last. A member set to be used first stays ahead while it still has room, and
+a member all but used up stays behind the others. Unknown strategy names are
+configuration errors.
 
 The measurement strategies work as follows:
 
@@ -180,6 +185,18 @@ The measurement strategies work as follows:
 - `cheap` puts the lowest current input-plus-output catalog price first, breaks
   ties by cache-read price, and leaves unpriced members last. It is accepted
   only for a multi-upstream route or a subscription account group.
+- `fit` is accepted on the same kinds of route. It does not change a route
+  that is not a group. Config also accepts `small-first` and
+  `small-context-first` as names for it. A member whose known window is no
+  larger than the request estimate is left out of the ask list. It is asked
+  only when the final try is out of quota or credit, no earlier fitting
+  member failed for another reason, and that try was not a refusal, a passing
+  retry, or an overflow. A passing failure of the member that is currently
+  last is asked again and does not by itself block that resort. A left-out
+  member already resting for quota or credit is not asked. An unknown window
+  stays in the ask list.
+  When every member is too small, the order is unchanged and those members
+  are asked.
 
 Set a mapped upstream's `weight` to an integer of at least 1. A missing weight
 or an explicit 1 is the default and is not retained as a separate setting.

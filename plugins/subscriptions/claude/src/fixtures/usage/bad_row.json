@@ -1,0 +1,1 @@
+[{"type":"assistant","usage_report":{"rate_limits":{"limits":[{"kind":"session","percent":"most"}],"extra_usage":{"is_enabled":true,"monthly_limit":50000,"used_credits":100,"currency":"USD"}}}},{"type":"result","is_error":false,"result":"You are currently using your subscription to power your Claude Code usage"}]
