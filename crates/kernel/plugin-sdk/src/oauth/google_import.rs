@@ -68,7 +68,9 @@ impl fmt::Debug for GoogleImport {
 /// # Errors
 ///
 /// Returns a config error when the input is empty, malformed JSON, has no
-/// accounts, or contains more than 200 entries.
+/// accounts, or contains more than 200 entries. A Claude setup-token paste
+/// is [`PluginErrorKind::Unsupported`](hofund_plugin_api::PluginErrorKind::Unsupported)
+/// and is not read as a refresh token.
 pub fn parse_google_import(
     agent: &str,
     app_name: &str,
@@ -77,6 +79,11 @@ pub fn parse_google_import(
     let text = data.strip_prefix('\u{feff}').unwrap_or(data).trim();
     if text.is_empty() {
         return Err(PluginError::config("nothing to import"));
+    }
+    if is_claude_setup_token_paste(text) {
+        return Err(PluginError::unsupported(
+            "a Claude setup-token is imported by the Claude subscription",
+        ));
     }
     let mut entries = Vec::new();
     if text.starts_with(['[', '{']) {
@@ -187,6 +194,53 @@ fn read_object(object: &Map<String, Value>, agent: &str, app_name: &str) -> Goog
         entry.error = Some(format!("a {kind} sign-in, not {app_name}'s"));
     }
     entry
+}
+
+/// Whether `text` is a Claude setup-token paste.
+///
+/// A line matches when, after one optional `export ` prefix, a
+/// `CLAUDE_CODE_OAUTH_TOKEN=` prefix, and surrounding quotes, it starts with
+/// `sk-ant-oat`. Any length and any following bytes still match, so another
+/// importer does not send the line to a token endpoint. A JSON string and a
+/// JSON array of strings match the same way. A paste that also contains
+/// another line still matches. The token is not copied into an error.
+#[must_use]
+pub fn is_claude_setup_token_paste(text: &str) -> bool {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text).trim();
+    if text.is_empty() {
+        return false;
+    }
+    if text.starts_with(['{', '[', '"'])
+        && let Ok(value) = serde_json::from_str::<Value>(text)
+    {
+        return json_setup_token(&value);
+    }
+    text.lines().any(|line| {
+        let line = line.trim();
+        !line.is_empty() && !line.starts_with('#') && is_setup_token_line(line)
+    })
+}
+
+fn json_setup_token(value: &Value) -> bool {
+    match value {
+        Value::String(text) => is_setup_token_line(text),
+        Value::Array(items) if !items.is_empty() && items.iter().all(Value::is_string) => items
+            .iter()
+            .any(|item| item.as_str().is_some_and(is_setup_token_line)),
+        _ => false,
+    }
+}
+
+fn is_setup_token_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    let without_export = trimmed.strip_prefix("export ").unwrap_or(trimmed).trim();
+    let token = without_export
+        .strip_prefix("CLAUDE_CODE_OAUTH_TOKEN=")
+        .unwrap_or(without_export);
+    let token = token
+        .trim()
+        .trim_matches(|character| character == '"' || character == '\'');
+    token.starts_with("sk-ant-oat")
 }
 
 fn invalid(reason: &str) -> GoogleImport {
@@ -306,5 +360,36 @@ mod tests {
         let error = parse_google_import("antigravity", "Antigravity", &oversized)
             .expect_err("too many accounts");
         assert!(error.message().contains("at most 200"));
+    }
+
+    #[test]
+    fn d226_setup_token_paste_is_not_a_google_refresh_token() {
+        use hofund_plugin_api::PluginErrorKind;
+
+        let token = "sk-ant-oat01-abcdefghijklmnopqrstuvwxyz0123456789";
+        for text in [
+            token,
+            &format!("CLAUDE_CODE_OAUTH_TOKEN={token}"),
+            &format!("export CLAUDE_CODE_OAUTH_TOKEN=\"{token}\""),
+            &format!("\"{token}\""),
+            &format!("[\"{token}\"]"),
+            &format!("# note\n{token}\n1//not-sent"),
+        ] {
+            let error = parse_google_import("gemini", "Gemini CLI", text).expect_err("setup");
+            assert_eq!(error.kind(), PluginErrorKind::Unsupported);
+            assert!(!error.to_string().contains(token), "{error}");
+        }
+        let parsed =
+            parse_google_import("gemini", "Gemini CLI", "1//refresh-token").expect("refresh");
+        assert!(parsed[0].error().is_none());
+        let long = format!("sk-ant-oat{}", "a".repeat(600));
+        assert!(long.len() > 512);
+        let non_ascii = "sk-ant-oat01-café";
+        for text in [long.as_str(), non_ascii] {
+            let error = parse_google_import("gemini", "Gemini CLI", text).expect_err("shape");
+            assert_eq!(error.kind(), PluginErrorKind::Unsupported);
+            assert!(!error.to_string().contains("café"), "{error}");
+            assert!(!error.to_string().contains(&"a".repeat(40)), "{error}");
+        }
     }
 }
