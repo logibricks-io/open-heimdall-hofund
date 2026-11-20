@@ -289,6 +289,7 @@ BuildError
 BuildError #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Error)
 BuildError::fn message (& self) -> & str
 BuildError::fn new (message : impl Into < String >) -> Self
+CATALOG_ENTRY_FIELD
 CallerLimit
 CallerScope
 CallerScope #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq)
@@ -687,6 +688,7 @@ ModelSpec::const fn with_free (mut self , free : bool) -> Self
 ModelSpec::const fn with_image_input (mut self , image_input : Option < bool >) -> Self
 ModelSpec::const fn with_prices (mut self , input : u64 , output : u64 , cache_read : u64) -> Self
 ModelSpec::const fn with_rate (mut self , rate : u64 , rate_was : u64) -> Self
+ModelSpec::fn catalog_entry (& self) -> Option < & str >
 ModelSpec::fn display_name (& self) -> Option < & str >
 ModelSpec::fn efforts (& self) -> & [String]
 ModelSpec::fn endpoints (& self) -> & [String]
@@ -694,16 +696,19 @@ ModelSpec::fn id (& self) -> & str
 ModelSpec::fn input_modalities (& self) -> & [String]
 ModelSpec::fn new (id : impl Into < String > , display_name : Option < String >) -> Result < Self , PluginError >
 ModelSpec::fn output_modalities (& self) -> & [String]
+ModelSpec::fn preferred_api (& self) -> Option < & str >
 ModelSpec::fn rate (& self) -> Option < f64 >
 ModelSpec::fn rate_was (& self) -> f64
 ModelSpec::fn service_tiers (& self) -> & [String]
 ModelSpec::fn web_search (& self) -> Option < & str >
+ModelSpec::fn with_catalog_entry (mut self , entry : impl Into < String >) -> Self
 ModelSpec::fn with_context (mut self , context : u64) -> Self
 ModelSpec::fn with_efforts (mut self , efforts : Vec < String >) -> Self
 ModelSpec::fn with_endpoints (mut self , endpoints : Vec < String >) -> Self
 ModelSpec::fn with_input_modalities (mut self , modalities : Vec < String >) -> Self
 ModelSpec::fn with_max_output (mut self , max_output : u64) -> Self
 ModelSpec::fn with_output_modalities (mut self , modalities : Vec < String >) -> Self
+ModelSpec::fn with_preferred_api (mut self , api : impl Into < String >) -> Self
 ModelSpec::fn with_service_tiers (mut self , service_tiers : Vec < String >) -> Self
 ModelSpec::fn with_web_search (mut self , web_search : impl Into < String >) -> Self
 ModelValue
@@ -731,6 +736,9 @@ OwnerTest::const fn key (& self) -> & 'static str
 OwnerTest::const fn prefix (key : & 'static str , text : & 'static str) -> Self
 OwnerTest::const fn text (& self) -> & 'static str
 OwnerTest::fn matches (& self , value : & str) -> bool
+PREFERRED_API_ASK
+PREFERRED_API_ASK_VALUE
+PREFERRED_API_FIELD
 PROBE_CAP
 PipedChild
 PipedChild #[non_exhaustive]
@@ -1362,6 +1370,8 @@ UpstreamProvider::async fn shutdown (& self , deadline : Duration) -> Result < (
 UpstreamProvider::fn attempt_base (& self) -> String
 UpstreamProvider::fn attempt_protocol (& self) -> String
 UpstreamProvider::fn close_idle_connections (& self)
+UpstreamProvider::fn learned_catalog_entry (& self , _model : & str) -> Option < String >
+UpstreamProvider::fn learned_preferred (& self , _model : & str) -> Option < String >
 UpstreamSpec
 UpstreamSpec #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 UpstreamSpec::const fn credential (& self) -> CredentialStyle
@@ -1402,8 +1412,14 @@ WriteCtx::fn new (home : impl Into < PathBuf >) -> Self
 const ANOTHER_ROUTING_CANDIDATE
 const API
 const BRIDGE_CALLBACK_PATH_PREFIX
+const CATALOG_ENTRY_FIELD
 const LOOPBACK_CANCEL_PATH
+const PREFERRED_API_ASK
+const PREFERRED_API_ASK_VALUE
+const PREFERRED_API_FIELD
 const PROBE_CAP
+fn preferred_api_name (raw : & str) -> Option < & 'static str >
+fn preferred_api_path (name : & str) -> Option < & 'static str >
 fn read_budget (request : & http :: Request < crate :: Body >) -> Option < Duration >
 fn redact_token (text : & str , secret : & str) -> String
 fn safe_url (url : & str) -> String
@@ -1483,6 +1499,8 @@ kernel::SecretsBackend::async fn get (& self , plugin : & PluginKey , id : & str
 kernel::fn expose_secret (secret : & SecretString) -> & str
 mod kernel
 mod responses_ws
+preferred_api_name
+preferred_api_path
 read_budget
 redact_token
 safe_url

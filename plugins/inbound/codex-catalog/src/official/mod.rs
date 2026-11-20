@@ -77,6 +77,51 @@ fn slug_matches(entry_slug: &str, slug: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('-'))
 }
 
+/// This computer's catalog row for an id that is `codex/<slug>` or ends in `/codex/<slug>`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct OwnedCatalog {
+    description: Option<String>,
+    base_instructions: String,
+    model_messages: Option<Value>,
+    context_window: Option<u64>,
+}
+
+impl OwnedCatalog {
+    /// Writes this computer's entry onto `entry`. The slug stays the gateway id.
+    pub(crate) fn write(self, entry: &mut Value) {
+        let object = entry.as_object_mut().expect("catalog entry object");
+        object.insert(
+            "base_instructions".to_owned(),
+            Value::String(self.base_instructions),
+        );
+        if let Some(model_messages) = self.model_messages {
+            object.insert("model_messages".to_owned(), model_messages);
+        }
+        if let Some(description) = self.description.filter(|text| !text.trim().is_empty()) {
+            object.insert("description".to_owned(), Value::String(description));
+        }
+        if let Some(window) = self.context_window {
+            object.insert("context_window".to_owned(), Value::Number(window.into()));
+        }
+    }
+}
+
+/// The slug after a trailing `codex/` segment, when `id` is that shape.
+pub(crate) fn own_codex_slug(id: &str) -> Option<&str> {
+    let slug = if let Some(rest) = id.strip_prefix("codex/") {
+        rest
+    } else {
+        let marker = "/codex/";
+        let at = id.rfind(marker)?;
+        &id[at + marker.len()..]
+    };
+    if slug.is_empty() || slug.contains('/') {
+        None
+    } else {
+        Some(slug)
+    }
+}
+
 /// Instructions chosen for a catalog model id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ModelInstructions {
@@ -144,6 +189,12 @@ impl Lookup {
         Self { cache: None }
     }
 
+    /// This computer's cache row when `id` ends in `codex/<slug>` and that slug is cached.
+    pub(crate) fn owned(&self, id: &str) -> Option<OwnedCatalog> {
+        let slug = own_codex_slug(id)?;
+        self.cache.as_ref()?.exact(slug)
+    }
+
     /// The instructions Codex should see for gateway model `id`.
     pub(crate) fn for_id(&self, id: &str) -> ModelInstructions {
         if is_routing_group(id) {
@@ -176,6 +227,8 @@ struct CacheRow {
     slug: String,
     base_instructions: String,
     model_messages: Option<Value>,
+    description: Option<String>,
+    context_window: Option<u64>,
 }
 
 impl CacheFile {
@@ -185,6 +238,16 @@ impl CacheFile {
         Some(ModelInstructions::Cached {
             base_instructions: row.base_instructions.clone(),
             model_messages: row.model_messages.clone(),
+        })
+    }
+
+    fn exact(&self, slug: &str) -> Option<OwnedCatalog> {
+        let row = self.slugs.iter().find(|row| row.slug == slug)?;
+        Some(OwnedCatalog {
+            description: row.description.clone(),
+            base_instructions: row.base_instructions.clone(),
+            model_messages: row.model_messages.clone(),
+            context_window: row.context_window,
         })
     }
 }
@@ -215,10 +278,18 @@ impl CacheFile {
                 .get("model_messages")
                 .filter(|value| !value.is_null())
                 .cloned();
+            let description = row
+                .get("description")
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+                .map(str::to_owned);
+            let context_window = row.get("context_window").and_then(Value::as_u64);
             slugs.push(CacheRow {
                 slug: slug.to_owned(),
                 base_instructions: base,
                 model_messages,
+                description,
+                context_window,
             });
         }
         if slugs.is_empty() {

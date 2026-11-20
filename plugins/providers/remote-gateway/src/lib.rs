@@ -1,7 +1,9 @@
 //! Remote gateway upstream: another computer's gateway, shared on its network.
 //!
-//! The other gateway serves every protocol this one does, so a request goes
-//! on in the protocol the client spoke:
+//! The other gateway serves every protocol this one does. With no preferred
+//! API on record, a request goes on in the protocol the client spoke. After
+//! a list, a model that names one is asked there when the client spoke an
+//! API that model does not serve. Chat the client itself sent stays Chat.
 //!
 //! - Chat Completions and Responses at `<address>/v1`.
 //! - Messages at `<address>`, so the SDK posts `<address>/v1/messages`.
@@ -23,13 +25,14 @@
 
 mod list;
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use hofund_plugin_api::{
     BuildContext, BuildError, Completion, ConfigError, CountOutcome, CredentialStyle, HostContext,
-    ListKind, ListQuery, ModelList, PluginError, PluginId, ProbeQuery, ProbeReport, ProtocolId,
-    RawTable, RawValue, Request, Schema, SecretString, UpstreamFactory, UpstreamProvider,
-    UpstreamSpec, ValidConfig,
+    ListKind, ListQuery, ModelList, ModelSpec, PluginError, PluginId, ProbeQuery, ProbeReport,
+    ProtocolId, RawTable, RawValue, Request, Schema, SecretString, UpstreamFactory,
+    UpstreamProvider, UpstreamSpec, ValidConfig, preferred_api_name,
 };
 use hofund_plugin_sdk::json::{Value, json};
 use hofund_plugin_sdk::oauth::secret_text;
@@ -178,6 +181,7 @@ impl UpstreamFactory for RemoteGatewayFactory {
             root,
             headers: cfg.headers.clone(),
             host: host.clone(),
+            listed: Mutex::new(HashMap::new()),
         }))
     }
 }
@@ -195,6 +199,15 @@ struct RemoteGateway {
     root: String,
     headers: Vec<(String, String)>,
     host: HostContext,
+    /// Preferred API, endpoints, and a catalog entry learned from the last list.
+    listed: Mutex<HashMap<String, ListedFact>>,
+}
+
+#[derive(Clone)]
+struct ListedFact {
+    preferred: String,
+    endpoints: Vec<String>,
+    catalog_entry: Option<String>,
 }
 
 impl RemoteGateway {
@@ -203,13 +216,68 @@ impl RemoteGateway {
         self.host.secrets().get("api_key").await
     }
 
-    /// The protocol a request in `inbound` goes on: the client's own when
-    /// the other gateway is asked in it, else the built protocol.
-    fn forward(&self, inbound: ProtocolId) -> ProtocolId {
+    /// The protocol a request in `inbound` for `model` goes on.
+    ///
+    /// Chat the client sent stays Chat. An inbound protocol the model's
+    /// listed endpoints include is relayed. Anything else, once a list has
+    /// named a preferred API, goes on that API. With no preference on record
+    /// the client's own protocol is used when this gateway speaks it.
+    fn forward(&self, inbound: ProtocolId, model: &str) -> ProtocolId {
+        let Some(fact) = self.fact(model) else {
+            return self.plain(inbound);
+        };
+        let Some(preferred) = protocol_of(&fact.preferred) else {
+            return self.plain(inbound);
+        };
+        if inbound == ProtocolId::OPENAI_CHAT {
+            return ProtocolId::OPENAI_CHAT;
+        }
+        if endpoint_serves(&fact.endpoints, inbound) || inbound == preferred {
+            return inbound;
+        }
+        if served(preferred) {
+            return preferred;
+        }
+        self.plain(inbound)
+    }
+
+    fn plain(&self, inbound: ProtocolId) -> ProtocolId {
         if served(inbound) {
             inbound
         } else {
             self.protocol
+        }
+    }
+
+    fn fact(&self, model: &str) -> Option<ListedFact> {
+        let listed = self
+            .listed
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(fact) = listed.get(model) {
+            return Some(fact.clone());
+        }
+        listed
+            .iter()
+            .find(|(id, _)| id_matches(id, model))
+            .map(|(_, fact)| fact.clone())
+    }
+
+    fn remember(&self, models: &[ModelSpec]) {
+        let mut listed = self
+            .listed
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        listed.clear();
+        for model in models {
+            listed.insert(
+                model.id().to_owned(),
+                ListedFact {
+                    preferred: model.preferred_api().unwrap_or("").to_owned(),
+                    endpoints: model.endpoints().to_vec(),
+                    catalog_entry: model.catalog_entry().map(str::to_owned),
+                },
+            );
         }
     }
 
@@ -278,9 +346,10 @@ impl UpstreamProvider for RemoteGateway {
         inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
         let secret = self.secret().await?;
+        let protocol = self.forward(inbound, request.model.as_str());
         wire::execute(
             self.host.http(),
-            &self.target(self.forward(inbound)),
+            &self.target(protocol),
             secret.as_ref(),
             request,
             inbound,
@@ -293,7 +362,7 @@ impl UpstreamProvider for RemoteGateway {
         request: Request,
         inbound: ProtocolId,
     ) -> Result<CountOutcome, PluginError> {
-        let protocol = self.forward(inbound);
+        let protocol = self.forward(inbound, request.model.as_str());
         if protocol != ProtocolId::ANTHROPIC_MESSAGES {
             return Ok(CountOutcome::Unsupported);
         }
@@ -310,14 +379,40 @@ impl UpstreamProvider for RemoteGateway {
 
     async fn list_models(&self, _query: &ListQuery) -> Result<ModelList, PluginError> {
         let secret = self.secret().await?;
-        list::Lister {
+        let lister = list::Lister {
             http: self.host.http(),
             url: format!("{}/v1/models", self.root),
             headers: &self.headers,
             secret: secret.as_ref(),
+        };
+        let list = lister.list().await?;
+        let entries = lister.codex_catalog().await;
+        let models = list
+            .models()
+            .iter()
+            .cloned()
+            .map(|model| match entries.get(model.id()) {
+                Some(entry) => model.with_catalog_entry(entry.clone()),
+                None => model,
+            })
+            .collect::<Vec<_>>();
+        self.remember(&models);
+        let mut rebuilt = ModelList::new(models, list.next().map(str::to_owned))
+            .with_dropped(list.dropped().to_vec())
+            .with_kind(list.kind());
+        if let Some(url) = list.source_url() {
+            rebuilt = rebuilt.with_source_url(url);
         }
-        .list()
-        .await
+        Ok(rebuilt)
+    }
+
+    fn learned_preferred(&self, model: &str) -> Option<String> {
+        self.fact(model)
+            .and_then(|fact| preferred_api_name(&fact.preferred).map(str::to_owned))
+    }
+
+    fn learned_catalog_entry(&self, model: &str) -> Option<String> {
+        self.fact(model).and_then(|fact| fact.catalog_entry)
     }
 
     async fn probe(&self, query: &ProbeQuery) -> Result<ProbeReport, PluginError> {
@@ -325,6 +420,33 @@ impl UpstreamProvider for RemoteGateway {
             .await
             .unwrap_or_else(|| Err(PluginError::timeout("provider probe exceeded 20 seconds")))
     }
+}
+
+fn protocol_of(name: &str) -> Option<ProtocolId> {
+    match preferred_api_name(name)? {
+        "chat" => Some(ProtocolId::OPENAI_CHAT),
+        "responses" => Some(ProtocolId::OPENAI_RESPONSES),
+        "anthropic" => Some(ProtocolId::ANTHROPIC_MESSAGES),
+        _ => None,
+    }
+}
+
+fn endpoint_serves(endpoints: &[String], protocol: ProtocolId) -> bool {
+    let Some(wanted) = preferred_api_name(protocol.as_str()) else {
+        return false;
+    };
+    endpoints
+        .iter()
+        .any(|endpoint| preferred_api_name(endpoint) == Some(wanted))
+}
+
+fn id_matches(listed: &str, asked: &str) -> bool {
+    asked
+        .strip_suffix(listed)
+        .is_some_and(|prefix| prefix.ends_with('/'))
+        || listed
+            .strip_suffix(asked)
+            .is_some_and(|prefix| prefix.ends_with('/'))
 }
 
 #[cfg(test)]

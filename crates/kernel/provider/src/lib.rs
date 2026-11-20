@@ -189,4 +189,14 @@ pub trait Provider: Send + Sync {
 
     /// Drops idle keep-alive connections before the next upstream attempt.
     fn close_idle_connections(&self) {}
+
+    /// `chat`, `responses`, or `anthropic` when a list named the API `model` is asked on best.
+    fn learned_preferred(&self, _model: &str) -> Option<String> {
+        None
+    }
+
+    /// A coding-agent catalog entry learned for `model`, as a JSON object.
+    fn learned_catalog_entry(&self, _model: &str) -> Option<String> {
+        None
+    }
 }

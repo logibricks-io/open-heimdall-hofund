@@ -68,6 +68,8 @@ pub(crate) struct ListedModel {
     pub id: String,
     pub context_window: Option<u64>,
     pub service_tiers: Vec<String>,
+    /// A catalog object a remote handed over on `/v1/models`.
+    pub catalog_entry: Option<Value>,
 }
 
 const CATALOG_PATH: &str = "/v1/codex/models";
@@ -254,6 +256,11 @@ pub(crate) fn catalog(models: &[ListedModel], cap: bool) -> (String, usize) {
     let lookup = official::Lookup::with_codex_home();
     let entries = models.iter().enumerate().map(|(rank, model)| {
         let mut value = entry(&model.id, rank + 1, &lookup, model.context_window);
+        if lookup.owned(&model.id).is_none()
+            && let Some(handed) = &model.catalog_entry
+        {
+            apply_handed_catalog(&mut value, handed, &model.id);
+        }
         attach_service_tiers(&mut value, &model.id, &model.service_tiers);
         value
     });
@@ -315,9 +322,69 @@ pub(crate) fn entry(
         "supports_parallel_tool_calls": true,
         "supports_reasoning_summaries": false,
     });
-    lookup.for_id(id).apply(&mut value);
+    if let Some(owned) = lookup.owned(id) {
+        owned.write(&mut value);
+    } else {
+        lookup.for_id(id).apply(&mut value);
+    }
     apply_auto_compact(&mut value, context_window);
     value
+}
+
+/// Copies a remote catalog row onto `entry` and says ` via hofund` once.
+fn apply_handed_catalog(entry: &mut Value, handed: &Value, id: &str) {
+    let Some(handed) = handed.as_object() else {
+        return;
+    };
+    let Some(object) = entry.as_object_mut() else {
+        return;
+    };
+    for key in [
+        "base_instructions",
+        "model_messages",
+        "shell_type",
+        "supported_reasoning_levels",
+        "default_reasoning_level",
+        "context_window",
+        "service_tiers",
+        "display_name",
+        "description",
+    ] {
+        if let Some(value) = handed.get(key)
+            && !value.is_null()
+        {
+            object.insert(key.to_owned(), value.clone());
+        }
+    }
+    let description = object
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let display = object
+        .get("display_name")
+        .and_then(Value::as_str)
+        .unwrap_or(id);
+    let source = if description.trim().is_empty() {
+        display
+    } else {
+        description
+    };
+    object.insert("description".to_owned(), Value::String(via_hofund(source)));
+    object.insert("slug".to_owned(), Value::String(id.to_owned()));
+}
+
+/// `text` with one trailing ` via hofund`.
+fn via_hofund(text: &str) -> String {
+    let trimmed = text.trim();
+    let base = trimmed
+        .strip_suffix(" via hofund")
+        .unwrap_or(trimmed)
+        .trim();
+    if base.is_empty() {
+        "via hofund".to_owned()
+    } else {
+        format!("{base} via hofund")
+    }
 }
 
 /// Copies the tiers `/v1/models` already listed onto `entry`.
@@ -400,6 +467,10 @@ async fn listed_models(kernel: &dyn Kernel) -> Result<Vec<ListedModel>, PluginEr
                 id: id.to_owned(),
                 context_window,
                 service_tiers: tier_ids(model),
+                catalog_entry: model
+                    .get(hofund_plugin_api::CATALOG_ENTRY_FIELD)
+                    .filter(|value| value.is_object())
+                    .cloned(),
             })
         })
         .collect())
@@ -455,6 +526,9 @@ mod tests;
 
 #[cfg(test)]
 mod d34_tests;
+
+#[cfg(test)]
+mod d241_tests;
 
 #[cfg(test)]
 mod backend_tests;

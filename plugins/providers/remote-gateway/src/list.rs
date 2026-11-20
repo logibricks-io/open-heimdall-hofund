@@ -3,17 +3,22 @@
 //! One URL, `<root>/v1/models`, with the gateway key as a bearer token.
 //! Pages follow `after_id`. Each row is read as the kernel's
 //! OpenAI-compatible list read it, keeping the protocols the model is served
-//! on (`native_endpoints`).
+//! on (`native_endpoints`) and the API the remote asks that model on best.
 //!
-//! The reference also asks the other gateway for its image, video and
-//! decision models and its prices, under headers and row fields that carry
-//! the reference product's name. They wait on a naming ruling and are not
-//! sent here.
+//! The ask header and the preferred-API field keep the reference list's
+//! spelling, as string constants. Image, video, decision, and price fields
+//! that carry the same kind of name still wait on a naming ruling and are
+//! not read.
+//!
+//! After a non-empty list, one `GET <root>/v1/codex/models` asks for Codex's
+//! own catalog rows. A failure there keeps the model list and adds no entry.
+
+use std::collections::HashMap;
 
 use hofund_plugin_api::HttpHandle;
 use hofund_plugin_api::{
-    ListKind, ModelList, ModelSpec, PluginError, PluginErrorKind, SecretString, redact_token,
-    safe_url,
+    ListKind, ModelList, ModelSpec, PREFERRED_API_ASK, PREFERRED_API_ASK_VALUE,
+    PREFERRED_API_FIELD, PluginError, PluginErrorKind, SecretString, redact_token, safe_url,
 };
 use hofund_plugin_sdk::classify::classify_model;
 use hofund_plugin_sdk::json::Value;
@@ -29,6 +34,12 @@ pub(crate) struct Lister<'a> {
     pub(crate) headers: &'a [(String, String)],
     pub(crate) secret: Option<&'a SecretString>,
 }
+
+/// Codex's `client_version` on the remote catalog request.
+///
+/// The same floor the Codex subscription speaks. This plugin does not depend
+/// on that crate.
+const CODEX_CLIENT_VERSION: &str = "0.169.1";
 
 /// A list failure carried through [`after_id`].
 struct ListFailure(PluginError);
@@ -72,15 +83,14 @@ impl Lister<'_> {
             .iter()
             .any(|(header, _)| header.eq_ignore_ascii_case("authorization"));
         let mut call = Call::get(url).header("accept", "application/json");
-        if let Some(secret) = self.secret.filter(|secret| !secret_text(secret).is_empty())
-            && !configured
+        if !self
+            .headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case(PREFERRED_API_ASK))
         {
-            call =
-                call.sensitive_header("authorization", format!("Bearer {}", secret_text(secret)));
+            call = call.header(PREFERRED_API_ASK, PREFERRED_API_ASK_VALUE);
         }
-        for (name, value) in self.headers {
-            call = call.sensitive_header(name.to_ascii_lowercase(), value.clone());
-        }
+        call = self.authed(call, configured);
         let mut response = call.open_raw(self.http, 1).await?;
         let status = response.status().as_u16();
         let retry_after =
@@ -118,6 +128,53 @@ impl Lister<'_> {
             error = error.with_retry_after(after);
         }
         Err(error)
+    }
+
+    /// Codex catalog rows from `<root>/v1/codex/models`, keyed by model id and slug.
+    ///
+    /// A transport error, a non-success status, or a body that is not that
+    /// catalog leaves the map empty. The model list still stands.
+    pub(crate) async fn codex_catalog(&self) -> HashMap<String, String> {
+        let url = codex_catalog_url(&self.url);
+        let configured = self
+            .headers
+            .iter()
+            .any(|(header, _)| header.eq_ignore_ascii_case("authorization"));
+        let call = self.authed(
+            Call::get(&url).header("accept", "application/json"),
+            configured,
+        );
+        let Ok(mut response) = call.open_raw(self.http, 1).await else {
+            return HashMap::new();
+        };
+        let status = response.status().as_u16();
+        let mut body = Vec::new();
+        while let Some(chunk) = response.body_mut().next_chunk().await {
+            let Ok(chunk) = chunk else {
+                return HashMap::new();
+            };
+            body.extend_from_slice(&chunk);
+            if body.len() > BODY_CAP {
+                return HashMap::new();
+            }
+        }
+        if status != 200 {
+            return HashMap::new();
+        }
+        codex_entries(&body)
+    }
+
+    fn authed(&self, mut call: Call, authorization_configured: bool) -> Call {
+        if let Some(secret) = self.secret.filter(|secret| !secret_text(secret).is_empty())
+            && !authorization_configured
+        {
+            call =
+                call.sensitive_header("authorization", format!("Bearer {}", secret_text(secret)));
+        }
+        for (name, value) in self.headers {
+            call = call.sensitive_header(name.to_ascii_lowercase(), value.clone());
+        }
+        call
     }
 
     fn redact(&self, text: &str) -> String {
@@ -247,6 +304,9 @@ fn model_spec(row: &Value) -> Result<Option<ModelSpec>, PluginError> {
     } else {
         string_array(row.get("type_target"))
     };
+    if let Some(raw) = row.get(PREFERRED_API_FIELD).and_then(Value::as_str) {
+        model = model.with_preferred_api(raw);
+    }
     Ok(Some(model.with_endpoints(endpoints)))
 }
 
@@ -273,6 +333,69 @@ fn string_array(value: Option<&Value>) -> Vec<String> {
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// `<list-url without /models>/codex/models?client_version=...`
+fn codex_catalog_url(list_url: &str) -> String {
+    let path = list_url.split('?').next().unwrap_or(list_url);
+    let root = path.trim_end_matches('/').trim_end_matches("/models");
+    format!("{root}/codex/models?client_version={CODEX_CLIENT_VERSION}")
+}
+
+/// Rows that are Codex catalog entries, keyed by id and by slug.
+fn codex_entries(body: &[u8]) -> HashMap<String, String> {
+    let Ok(value) = hofund_plugin_sdk::json::from_slice::<Value>(body) else {
+        return HashMap::new();
+    };
+    let rows = value
+        .get("models")
+        .and_then(Value::as_array)
+        .or_else(|| value.get("data").and_then(Value::as_array));
+    let Some(rows) = rows else {
+        return HashMap::new();
+    };
+    let mut entries = HashMap::new();
+    for row in rows {
+        let Some(object) = row.as_object() else {
+            continue;
+        };
+        if !codex_entry(object) {
+            continue;
+        }
+        let Ok(text) = hofund_plugin_sdk::json::to_string(row) else {
+            continue;
+        };
+        let slug = object.get("slug").and_then(Value::as_str).unwrap_or("");
+        let id = object
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .unwrap_or(slug);
+        if !id.is_empty() {
+            entries.insert(id.to_owned(), text.clone());
+        }
+        if !slug.is_empty() {
+            entries.insert(slug.to_owned(), text);
+        }
+    }
+    entries
+}
+
+/// A Codex entry has a slug, reasoning levels, a shell, and base instructions.
+fn codex_entry(row: &hofund_plugin_sdk::json::Map<String, Value>) -> bool {
+    let slug = row.get("slug").and_then(Value::as_str).unwrap_or("");
+    let levels = row
+        .get("supported_reasoning_levels")
+        .and_then(Value::as_array);
+    let shell = row.get("shell_type").and_then(Value::as_str).unwrap_or("");
+    let instructions = row
+        .get("base_instructions")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    !slug.is_empty()
+        && levels.is_some_and(|levels| !levels.is_empty())
+        && !shell.is_empty()
+        && !instructions.is_empty()
 }
 
 fn named_values(value: Option<&Value>, key: &str) -> Vec<String> {

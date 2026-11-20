@@ -58,6 +58,16 @@ pub trait Member: Send + Sync {
     /// Codec id this member speaks. Compared with the inbound protocol.
     fn protocol(&self) -> &str;
 
+    /// `chat`, `responses`, or `anthropic` when a list named the API `model` is asked on best.
+    fn learned_preferred(&self, _model: &str) -> Option<String> {
+        None
+    }
+
+    /// A coding-agent catalog entry learned for `model`, as a JSON object.
+    fn learned_catalog_entry(&self, _model: &str) -> Option<String> {
+        None
+    }
+
     /// Stable account ids or provider-key fingerprints usable in account scopes.
     fn account_refs(&self) -> Vec<String> {
         vec![self.id().to_string()]

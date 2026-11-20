@@ -2219,6 +2219,14 @@ fn merge_model(left: &ModelSpec, right: &ModelSpec) -> ModelSpec {
         .with_decides(left.decides() || right.decides())
         .with_efforts(first_slice(left.efforts(), right.efforts()))
         .with_service_tiers(first_slice(left.service_tiers(), right.service_tiers()));
+    let model = match left.preferred_api().or_else(|| right.preferred_api()) {
+        Some(api) => model.with_preferred_api(api),
+        None => model,
+    };
+    let model = match left.catalog_entry().or_else(|| right.catalog_entry()) {
+        Some(entry) => model.with_catalog_entry(entry),
+        None => model,
+    };
     let model = match left.web_search().or_else(|| right.web_search()) {
         Some(search) => model.with_web_search(search),
         None => model,

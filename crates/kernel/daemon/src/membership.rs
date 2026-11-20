@@ -721,6 +721,14 @@ impl Member for LiveMember {
         self.protocol
     }
 
+    fn learned_preferred(&self, model: &str) -> Option<String> {
+        self.stack.inner.inner.provider.learned_preferred(model)
+    }
+
+    fn learned_catalog_entry(&self, model: &str) -> Option<String> {
+        self.stack.inner.inner.provider.learned_catalog_entry(model)
+    }
+
     fn account_refs(&self) -> Vec<String> {
         let mut refs = vec![self.id.to_string(), self.fingerprint.clone()];
         if let Some(account) = self.id.account() {

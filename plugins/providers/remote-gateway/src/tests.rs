@@ -240,10 +240,11 @@ fn the_list_is_the_gateway_v1_list_with_its_endpoints() {
         assert_eq!(models[0].endpoints(), ["anthropic"]);
         assert_eq!(list.dropped(), ["text-embedding-3"]);
         let calls = host.http().calls();
-        assert_eq!(calls.len(), 1);
+        assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].method(), "GET");
         assert_eq!(calls[0].uri(), format!("{ROOT}/v1/models"));
         assert_eq!(calls[0].sensitive_headers(), ["authorization"]);
+        assert!(calls[1].uri().contains("/v1/codex/models"));
     });
 }
 
@@ -435,4 +436,114 @@ fn the_spec_serves_three_protocols_with_a_bearer_key_and_a_live_list() {
         ]
     );
     assert_eq!(spec.list_kind(), ListKind::Live);
+}
+
+#[test]
+fn d241_preferred_api_is_read_and_codex_entries_are_asked_once() {
+    with_host(|host| {
+        let provider = build(host, &raw(ROOT), ProtocolId::OPENAI_CHAT);
+        let mut astra = json!({
+            "id": "openai/gpt-6-astra",
+            "native_endpoints": ["/v1/chat/completions", "/v1/responses"],
+        });
+        astra[hofund_plugin_api::PREFERRED_API_FIELD] = json!("/v1/responses");
+        let mut kimi = json!({
+            "id": "kimi/kimi-k3",
+            "native_endpoints": ["/v1/chat/completions"],
+        });
+        kimi[hofund_plugin_api::PREFERRED_API_FIELD] = json!("/v1/chat/completions");
+        let mut group = json!({"id": "group/auto"});
+        group[hofund_plugin_api::PREFERRED_API_FIELD] = json!("/v1/responses");
+        let deepseek = json!({"id": "deepseek/deepseek-v4"});
+        host.http()
+            .enqueue(json!({"data": [astra, kimi, group, deepseek]}).to_string());
+        host.http().enqueue(
+            json!({"models": [{
+                "slug": "openai/gpt-6-astra",
+                "supported_reasoning_levels": [{"effort": "max"}],
+                "shell_type": "unified_exec",
+                "base_instructions": "BASE",
+                "description": "Astra",
+                "model_messages": {"instructions_template": "T"},
+                "service_tiers": [{"id": "priority"}]
+            }]})
+            .to_string(),
+        );
+        let list = block_on(provider.list_models(&ListQuery::new())).expect("list");
+        let model = |id: &str| {
+            list.models()
+                .iter()
+                .find(|model| model.id() == id)
+                .unwrap_or_else(|| panic!("missing {id}"))
+        };
+        assert_eq!(
+            model("openai/gpt-6-astra").preferred_api(),
+            Some("responses")
+        );
+        assert_eq!(model("kimi/kimi-k3").preferred_api(), Some("chat"));
+        assert_eq!(model("group/auto").preferred_api(), Some("responses"));
+        assert_eq!(model("deepseek/deepseek-v4").preferred_api(), None);
+        let entry = model("openai/gpt-6-astra").catalog_entry().expect("entry");
+        assert!(entry.contains("BASE"), "{entry}");
+        assert!(entry.contains("\"instructions_template\":\"T\""), "{entry}");
+        assert!(model("deepseek/deepseek-v4").catalog_entry().is_none());
+        assert_eq!(
+            provider.learned_preferred("openai/gpt-6-astra").as_deref(),
+            Some("responses")
+        );
+        assert!(provider.learned_catalog_entry("kimi/kimi-k3").is_none());
+
+        let calls = host.http().calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].uri(), format!("{ROOT}/v1/models"));
+        assert_eq!(
+            calls[0].header(hofund_plugin_api::PREFERRED_API_ASK),
+            Some(hofund_plugin_api::PREFERRED_API_ASK_VALUE)
+        );
+        assert!(has(calls[0].sensitive_headers(), "authorization"));
+        assert!(calls[1].uri().contains("/v1/codex/models?"));
+        assert!(calls[1].uri().contains("client_version=0.169.1"));
+        assert!(has(calls[1].sensitive_headers(), "authorization"));
+        assert!(!calls[1].uri().contains("gw-test-key"));
+
+        host.http().enqueue(RESPONSES_REPLY);
+        block_on(provider.execute(
+            user_request("openai/gpt-6-astra"),
+            ProtocolId::ANTHROPIC_MESSAGES,
+        ))
+        .expect("messages");
+        host.http().enqueue(CHAT_REPLY);
+        block_on(provider.execute(user_request("openai/gpt-6-astra"), ProtocolId::OPENAI_CHAT))
+            .expect("chat");
+        host.http().enqueue(CHAT_REPLY);
+        block_on(provider.execute(user_request("kimi/kimi-k3"), ProtocolId::ANTHROPIC_MESSAGES))
+            .expect("kimi");
+        host.http().enqueue(CHAT_REPLY);
+        block_on(provider.execute(user_request("group/auto"), ProtocolId::OPENAI_CHAT))
+            .expect("group chat");
+        host.http().enqueue(RESPONSES_REPLY);
+        block_on(provider.execute(user_request("group/auto"), ProtocolId::ANTHROPIC_MESSAGES))
+            .expect("group messages");
+        let calls = host.http().calls();
+        assert_eq!(calls[2].uri(), format!("{ROOT}/v1/responses"));
+        assert_eq!(calls[3].uri(), format!("{ROOT}/v1/chat/completions"));
+        assert_eq!(calls[4].uri(), format!("{ROOT}/v1/chat/completions"));
+        assert_eq!(calls[5].uri(), format!("{ROOT}/v1/chat/completions"));
+        assert_eq!(calls[6].uri(), format!("{ROOT}/v1/responses"));
+    });
+}
+
+#[test]
+fn d241_a_codex_catalog_failure_keeps_the_model_list() {
+    with_host(|host| {
+        let provider = build(host, &raw(ROOT), ProtocolId::OPENAI_CHAT);
+        let mut row = json!({"id": "openai/gpt-6-astra"});
+        row[hofund_plugin_api::PREFERRED_API_FIELD] = json!("/v1/responses");
+        host.http().enqueue(json!({"data": [row]}).to_string());
+        host.http().enqueue_response(404, &[], "missing");
+        let list = block_on(provider.list_models(&ListQuery::new())).expect("list");
+        assert_eq!(list.models()[0].preferred_api(), Some("responses"));
+        assert!(list.models()[0].catalog_entry().is_none());
+        assert_eq!(host.http().calls().len(), 2);
+    });
 }

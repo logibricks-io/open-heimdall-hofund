@@ -52,6 +52,14 @@ impl Provider for ProviderAdapter {
         }
     }
 
+    fn learned_preferred(&self, model: &str) -> Option<String> {
+        self.inner.learned_preferred(model)
+    }
+
+    fn learned_catalog_entry(&self, model: &str) -> Option<String> {
+        self.inner.learned_catalog_entry(model)
+    }
+
     async fn count_input(
         &self,
         request: Request,

@@ -525,6 +525,22 @@ pub trait UpstreamProvider: Send + Sync + 'static {
     fn attempt_protocol(&self) -> String {
         String::new()
     }
+
+    /// `chat`, `responses`, or `anthropic` when a list named the API `model` is asked on best.
+    ///
+    /// The default is unknown. A remote gateway fills this from the list it fetched.
+    #[must_use]
+    fn learned_preferred(&self, _model: &str) -> Option<String> {
+        None
+    }
+
+    /// A coding-agent catalog entry learned for `model`, as a JSON object.
+    ///
+    /// The default is none.
+    #[must_use]
+    fn learned_catalog_entry(&self, _model: &str) -> Option<String> {
+        None
+    }
 }
 
 #[cfg(test)]

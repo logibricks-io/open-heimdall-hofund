@@ -375,6 +375,10 @@ pub(super) struct ModelRow {
     rate: Option<u64>,
     #[serde(default)]
     rate_was: u64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    preferred_api: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    catalog_entry: Option<String>,
 }
 
 impl From<&ModelSpec> for ModelRow {
@@ -402,6 +406,8 @@ impl From<&ModelSpec> for ModelRow {
             cache_read_price,
             rate,
             rate_was,
+            preferred_api: model.preferred_api().unwrap_or("").to_owned(),
+            catalog_entry: model.catalog_entry().map(str::to_owned),
         }
     }
 }
@@ -435,8 +441,17 @@ impl ModelRow {
             Some(rate) => model.with_rate(rate, self.rate_was),
             None => model,
         };
-        Some(match &self.web_search {
+        let model = match &self.web_search {
             Some(search) => model.with_web_search(search),
+            None => model,
+        };
+        let model = if self.preferred_api.is_empty() {
+            model
+        } else {
+            model.with_preferred_api(&self.preferred_api)
+        };
+        Some(match &self.catalog_entry {
+            Some(entry) => model.with_catalog_entry(entry),
             None => model,
         })
     }
@@ -687,7 +702,9 @@ mod tests {
             .with_web_search("native")
             .with_service_tiers(vec!["flex".to_owned()])
             .with_free(true)
-            .with_prices(0, 0, 0);
+            .with_prices(0, 0, 0)
+            .with_preferred_api("responses")
+            .with_catalog_entry(r#"{"base_instructions":"stay"}"#);
         let mut store = StateStore::new(Some(root.to_path_buf()));
         store.update("Primary", |state| {
             state.fetched_at = Some(100);
