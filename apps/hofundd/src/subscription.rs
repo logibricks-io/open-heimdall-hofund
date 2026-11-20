@@ -223,6 +223,9 @@ pub(crate) fn list_table(listings: &[SubscriptionListing]) -> String {
                 listing.id, listing.flow, account.id, account.label
             ));
         }
+        if let Some(notice) = &listing.notice {
+            table.push_str(&format!("warning: {notice}\n"));
+        }
     }
     table
 }
@@ -267,7 +270,9 @@ pub(crate) fn quota_table(listings: &[QuotaListing]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use hofund_daemon::{AccountListing, QuotaLine, QuotaListing, SubscriptionListing};
+    use hofund_daemon::{
+        AccountListing, QuotaLine, QuotaListing, SubscriptionListing, subscriptions_json,
+    };
 
     use std::ffi::OsString;
     use std::path::PathBuf;
@@ -281,6 +286,7 @@ mod tests {
                 id: "codex-sub".to_owned(),
                 name: "Codex".to_owned(),
                 flow: "pkce",
+                notice: None,
                 accounts: vec![
                     AccountListing {
                         id: "a-1".to_owned(),
@@ -298,6 +304,7 @@ mod tests {
                 id: "empty".to_owned(),
                 name: "Empty".to_owned(),
                 flow: "device",
+                notice: None,
                 accounts: Vec::new(),
             },
         ];
@@ -308,6 +315,38 @@ mod tests {
              codex-sub\tpkce\ta-2\thome\tneeds sign-in: token expired\n\
              empty\tdevice\t-\t-\tno account\n"
         );
+    }
+
+    #[test]
+    fn d221_list_table_prints_the_risk_line_for_a_saved_account() {
+        let listings = vec![
+            SubscriptionListing {
+                id: "antigravity".to_owned(),
+                name: "Google Antigravity".to_owned(),
+                flow: "pkce",
+                notice: Some("saved-account risk line".to_owned()),
+                accounts: vec![AccountListing {
+                    id: "saved".to_owned(),
+                    label: "saved".to_owned(),
+                    needs_sign_in: None,
+                }],
+            },
+            SubscriptionListing {
+                id: "gemini".to_owned(),
+                name: "Gemini CLI".to_owned(),
+                flow: "pkce",
+                notice: None,
+                accounts: Vec::new(),
+            },
+        ];
+        let table = list_table(&listings);
+        assert!(table.contains("antigravity\tpkce\tsaved\tsaved\tready\n"));
+        assert!(table.contains("warning: saved-account risk line\n"));
+        assert_eq!(table.matches("warning:").count(), 1);
+        assert!(table.contains("gemini\tpkce\t-\t-\tno account\n"));
+        let json = subscriptions_json(&listings);
+        assert!(json.contains("\"notice\":\"saved-account risk line\""));
+        assert_eq!(json.matches("\"notice\"").count(), 1);
     }
 
     #[test]

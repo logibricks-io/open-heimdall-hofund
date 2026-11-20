@@ -14,6 +14,46 @@ use crate::records::{
     AccountStatus, ModelList, QuotaPoll, QuotaWindow, SignInChallenge, SignInCtx, SignInFlow,
     SignInProof, SubscriptionSpec,
 };
+
+/// Whether new accounts may be created for a subscription.
+///
+/// Saved accounts keep their refresh, quota, model list, and upstream when
+/// enrollment is withdrawn. Sign-in, file import, and discovered-account add
+/// use [`AccountEnrollment::refusal`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AccountEnrollment {
+    /// Sign-in, import, and add are available.
+    #[default]
+    Open,
+    /// New accounts are refused. Saved accounts stay usable.
+    Withdrawn {
+        /// Shown when at least one account is already stored.
+        risk: &'static str,
+        /// Returned when a caller tries to create an account.
+        refusal: &'static str,
+    },
+}
+
+impl AccountEnrollment {
+    /// The message for a refused sign-in, import, or add.
+    #[must_use]
+    pub const fn refusal(self) -> Option<&'static str> {
+        match self {
+            Self::Open => None,
+            Self::Withdrawn { refusal, .. } => Some(refusal),
+        }
+    }
+
+    /// The message for a subscription that already has a saved account.
+    #[must_use]
+    pub const fn risk(self) -> Option<&'static str> {
+        match self {
+            Self::Open => None,
+            Self::Withdrawn { risk, .. } => Some(risk),
+        }
+    }
+}
 use crate::upstream::UpstreamProvider;
 
 /// Builds a [`Subscription`] from validated config.
@@ -107,6 +147,11 @@ pub trait Subscription: Send + Sync + 'static {
 
     /// How the UI should sign in. The HTTP steps stay in the plugin.
     fn flow(&self) -> &SignInFlow;
+
+    /// Whether new accounts may be created. The default is open.
+    fn account_enrollment(&self) -> AccountEnrollment {
+        AccountEnrollment::Open
+    }
 
     /// Starts sign-in.
     ///

@@ -225,14 +225,33 @@ pub(crate) fn escape_model(model: &str) -> Result<String, ProviderError> {
     if model.is_empty() {
         return Err(ProviderError::status(400, "model is empty"));
     }
-    Ok(path_segment(model))
+    Ok(model_path(model))
+}
+
+/// Escapes each `/`-separated segment and keeps the slashes.
+///
+/// An empty segment, `.`, or `..` escapes the whole remaining id as one
+/// segment, so the path cannot leave `models/`.
+fn model_path(model: &str) -> String {
+    let segments: Vec<&str> = model.split('/').collect();
+    if segments
+        .iter()
+        .any(|segment| segment.is_empty() || *segment == "." || *segment == "..")
+    {
+        return path_segment(model);
+    }
+    segments
+        .into_iter()
+        .map(path_segment)
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Percent-encoding for one URL path segment.
 ///
 /// Unreserved characters and `$&+:=@` stay literal, matching the encoding
-/// used for a path segment that may contain a colon (a tag) but must not
-/// contain a slash.
+/// used for a path segment that may contain a colon (a tag). A slash is
+/// encoded. A model id keeps slashes between its segments.
 pub(crate) fn path_segment(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for byte in text.bytes() {
@@ -356,7 +375,7 @@ mod tests {
         );
         assert_eq!(
             method_path("vendor/model", false).expect("path"),
-            "/models/vendor%2Fmodel:generateContent"
+            "/models/vendor/model:generateContent"
         );
         assert_eq!(
             count_path("models/gemini-2.5-flash").expect("count"),
@@ -364,5 +383,49 @@ mod tests {
         );
         assert!(method_path("  ", false).is_err());
         assert!(method_path("models/", true).is_err());
+    }
+
+    #[test]
+    fn d225_model_path_escapes_each_segment_and_keeps_slashes() {
+        let cases = [
+            ("gemini-2.5-pro", "/models/gemini-2.5-pro:generateContent"),
+            (
+                "claude-sonnet-4-5@20250929",
+                "/models/claude-sonnet-4-5@20250929:generateContent",
+            ),
+            ("qwen3:8b", "/models/qwen3:8b:generateContent"),
+            (
+                "example/model-demo",
+                "/models/example/model-demo:generateContent",
+            ),
+            ("a/b/c", "/models/a/b/c:generateContent"),
+            (
+                "models/publishers/x/models/y",
+                "/models/publishers/x/models/y:generateContent",
+            ),
+            (
+                "ex ample/model?x#y",
+                "/models/ex%20ample/model%3Fx%23y:generateContent",
+            ),
+            ("ns/100%", "/models/ns/100%25:generateContent"),
+            ("../secret", "/models/..%2Fsecret:generateContent"),
+            ("a/../b", "/models/a%2F..%2Fb:generateContent"),
+            ("a/./b", "/models/a%2F.%2Fb:generateContent"),
+            ("a//b", "/models/a%2F%2Fb:generateContent"),
+            ("/abs", "/models/%2Fabs:generateContent"),
+            ("trail/", "/models/trail%2F:generateContent"),
+            ("%2e%2e/x", "/models/%252e%252e/x:generateContent"),
+        ];
+        for (model, want) in cases {
+            assert_eq!(method_path(model, false).expect(model), want, "{model}");
+        }
+        assert_eq!(
+            method_path("models/publishers/x/models/y", true).expect("stream"),
+            "/models/publishers/x/models/y:streamGenerateContent?alt=sse"
+        );
+        assert_eq!(
+            count_path("models/publishers/x/models/y").expect("count"),
+            "/models/publishers/x/models/y:countTokens"
+        );
     }
 }
