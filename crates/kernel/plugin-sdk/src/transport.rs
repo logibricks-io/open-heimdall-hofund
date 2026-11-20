@@ -508,9 +508,20 @@ fn status_failure(
         PluginError::status_error(status, message)
     };
     let credit = error.is_credit();
-    let error = match named_reset.filter(|_| credit) {
-        Some(after) => error.with_reset_after(after),
-        None => error,
+    let error = if credit {
+        match named_reset {
+            Some(after) => error.with_reset_after(after),
+            None => error,
+        }
+    } else if error.kind() == PluginErrorKind::Quota {
+        // A duration written in the body is the reset. Header hints stay on
+        // retry_after, which the router still caps at one hour.
+        match reset_after_from_body(body, std::time::SystemTime::now()) {
+            Some(after) => error.with_reset_after(after),
+            None => error,
+        }
+    } else {
+        error
     };
     let error = if credit && credit_soon(body) {
         error.with_credit_soon()
@@ -1185,6 +1196,7 @@ fn span_written(text: &str, prefixes: &[&str]) -> Option<Duration> {
             "d" | "day" | "days" => (86_400, 1),
             "h" | "hr" | "hrs" | "hour" | "hours" => (3_600, 2),
             "m" | "min" | "mins" | "minute" | "minutes" => (60, 3),
+            "s" | "sec" | "secs" | "second" | "seconds" => (1, 4),
             _ => break,
         };
         if rank <= previous_rank {
@@ -2293,5 +2305,40 @@ mod tests {
         )
         .expect_err("quota");
         assert_eq!(quota.kind(), PluginErrorKind::Quota);
+    }
+
+    #[test]
+    fn d222_written_reset_keeps_seconds_on_the_quota_error() {
+        assert_eq!(
+            retry_after_from_body(
+                b"Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 1h18m40s.",
+            ),
+            Some(Duration::from_secs(4_720))
+        );
+        assert_eq!(
+            retry_after_from_body(b"Resets in 45m2s"),
+            Some(Duration::from_secs(2_702))
+        );
+        assert_eq!(
+            retry_after_from_body(b"Resets in 26s"),
+            Some(Duration::from_secs(26))
+        );
+        assert_eq!(
+            retry_after_from_body(b"Resets in 120h5m0s"),
+            Some(Duration::from_hours(120) + Duration::from_mins(5))
+        );
+        assert_eq!(
+            retry_after_from_body(b"Resets in 4h"),
+            Some(Duration::from_hours(4))
+        );
+        assert_eq!(retry_after_from_body(b"Individual quota reached"), None);
+        let error = classify(
+            429,
+            None,
+            b"Individual quota reached. Resets in 1h18m40s.".to_vec(),
+        )
+        .expect_err("quota");
+        assert_eq!(error.kind(), PluginErrorKind::Quota);
+        assert_eq!(error.reset_after(), Some(Duration::from_secs(4_720)));
     }
 }

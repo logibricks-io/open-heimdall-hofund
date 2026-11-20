@@ -115,7 +115,9 @@ impl UpstreamProvider for AntigravityUpstream {
             }
             other => other,
         };
-        result.map_err(|error| classify_turned_away(&original, error))
+        result.map_err(|error| {
+            hofund_plugin_sdk::note_google_sign_in(classify_turned_away(&original, error))
+        })
     }
 
     async fn probe(&self, query: &ProbeQuery) -> Result<ProbeReport, PluginError> {
@@ -249,11 +251,15 @@ fn classify_turned_away(request: &Request, error: PluginError) -> PluginError {
         if error.status() == Some(429) && error.kind() != hofund_plugin_api::PluginErrorKind::Quota
         {
             let retry = error.retry_after();
-            let error = PluginError::quota_status(429, error.message());
-            return match retry {
-                Some(after) => error.with_retry_after(after),
-                None => error,
-            };
+            let reset = error.reset_after();
+            let mut error = PluginError::quota_status(429, error.message());
+            if let Some(after) = retry {
+                error = error.with_retry_after(after);
+            }
+            if let Some(after) = reset {
+                error = error.with_reset_after(after);
+            }
+            return error;
         }
         return error;
     }
