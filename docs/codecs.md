@@ -128,12 +128,30 @@ come back as a one-element array, and a string `stop` comes back as an array.
 The IR keeps every message, including system and developer messages, in order.
 
 Anthropic Messages has one system channel. Decode turns a top-level `system`
-string or block array into a leading `Role::System` message. Encode hoists
-every `Role::System` and `Role::Developer` message into that channel, in
-encounter order, and removes them from `messages`. One plain text message with
-an empty bag is a string. Anything else is an array of blocks, and message-level
-fields on that channel are folded onto the first block. Developer and system
-become the same role. Several system messages become one message.
+string or block array into a leading `Role::System` message, and accepts a
+`developer` role in `messages`. Encode hoists the leading run of
+`Role::System` and `Role::Developer` messages into that channel, in encounter
+order, and removes that run from `messages`. A system or developer message
+after the conversation has started stays in `messages` with its role. One
+plain text message with an empty bag is a string. Anything else is an array
+of blocks, and message-level fields on that channel are folded onto the first
+block. Developer and system in the leading run become the same channel.
+Several leading messages become one message.
+
+After encode, `pair_messages_tool_blocks` mends the tool exchange on the
+bytes. A call the next message does not answer gets a synthetic error result
+whose text is `[The result of this tool call is unavailable: the turn was
+interrupted.]` and whose `is_error` is true, first in the following user
+message or in a user message of its own. A result that names no call of the
+message before becomes the text it said. A second answer to one call is
+dropped. A result that follows other content of its message moves first.
+Blocks an assistant message wrote after its first `tool_use` move before that
+call; thinking stays where it was, and empty text is dropped. A system or
+developer message between a call and its results is placed after the results,
+and the real result stays a result. Two `tool_use` blocks in one message that
+share an id become two ids, and each result is kept with its call. A body
+that is already in shape is not written again. Create, token counting, and a
+translated build share this pass.
 
 Chat Completions keeps `system` and `developer` in the message array.
 

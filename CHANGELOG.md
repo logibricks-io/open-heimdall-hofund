@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- D-228: A Messages body whose `tool_use` and `tool_result` blocks do not pair is
+  mended before it is sent to a Messages upstream. An unanswered call gets a
+  synthetic error result, a result with no call becomes the text it said, a
+  second answer is dropped, and a result after other content moves first. A
+  body that already pairs keeps its bytes.
+- D-236: That same mend moves blocks an assistant wrote after its first
+  `tool_use` to before the call (thinking stays, empty text is dropped), moves
+  a system or developer message that sits between a call and its results to
+  after the results, and keeps two calls that share an id as two ids, each
+  answered. Passthrough, `count_tokens`, and translated Messages builds use
+  this one pass. A body that is already in shape is not serialized again.
 - D-231: ChatGPT model-list asks, the `version` header, the User-Agent, and
   device sign-in name the newest plain `x.y.z` among a `0.169.1` floor, npm's
   latest `@openai/codex` release (read at most every six hours on the host
