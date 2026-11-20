@@ -126,6 +126,10 @@ pub(crate) fn body(body: &mut Map<String, Value>, codex: Option<&str>) -> Vec<(S
         .or_insert_with(|| json::json!({"verbosity": "medium"}));
     reasoning(body, lite);
     hofund_plugin_sdk::codex_tool_names::codex_tool_names_object(body);
+    // A function tool is given a strict flag the ChatGPT backend can compile.
+    // Left out, that flag is false. Asked for, oneOf is written as anyOf when
+    // the schema still compiles, and otherwise the flag is false.
+    crate::strict::tool_strict(body);
     session_headers(body)
 }
 

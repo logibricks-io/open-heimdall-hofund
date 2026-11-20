@@ -29,6 +29,7 @@ mod refusal;
 mod resets;
 mod shape;
 mod sign_in;
+mod strict;
 mod tokens;
 mod upstream;
 mod usage;
