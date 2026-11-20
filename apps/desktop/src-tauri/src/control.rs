@@ -465,6 +465,11 @@ mod tests {
         catalog(agent_descriptions()).expect("agent catalog")
     }
 
+    /// Serializes tests that start a gateway. Without a Unix socket the
+    /// control listener binds the fixed default TCP address, so two started
+    /// gateways in one test binary would collide.
+    static GATEWAY_START: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     fn scratch() -> tempfile::TempDir {
         tempfile::tempdir().expect("temp dir")
     }
@@ -476,6 +481,7 @@ mod tests {
 
     #[tokio::test]
     async fn start_and_stop_report_the_bound_address() {
+        let _gateway = GATEWAY_START.lock().await;
         let dir = scratch();
         let path = dir.path().join("hofund.toml");
         fs::write(&path, "listen = \"127.0.0.1:0\"\n").expect("config");
@@ -665,6 +671,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn snapshot_does_not_build_plugins_or_run_account_hooks() {
+        let _gateway = GATEWAY_START.lock().await;
         let dir = scratch();
         let path = dir.path().join("hofund.toml");
         fs::write(
