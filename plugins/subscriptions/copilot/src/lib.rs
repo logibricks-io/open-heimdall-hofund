@@ -21,6 +21,7 @@ use hofund_plugin_sdk::oauth::{SecretObject, TokenCache};
 
 mod auto;
 mod discover;
+mod image_cap;
 mod models;
 mod quota;
 mod session;
@@ -329,6 +330,8 @@ fn needs_sign_in(reason: &str) -> AccountStatus {
 mod auto_tests;
 #[cfg(test)]
 mod conformance;
+#[cfg(test)]
+mod d229_image_cap_tests;
 #[cfg(test)]
 mod entitlement_tests;
 #[cfg(test)]
