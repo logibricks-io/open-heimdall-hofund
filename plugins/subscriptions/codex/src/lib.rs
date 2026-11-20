@@ -32,6 +32,7 @@ mod sign_in;
 mod tokens;
 mod upstream;
 mod usage;
+mod version;
 mod warmup;
 
 /// The OAuth client Codex CLI signs in as.
@@ -43,9 +44,6 @@ pub(crate) const SIGN_IN_SCOPE: &str =
 
 /// The scopes asked for at refresh, as Codex CLI sends them.
 pub(crate) const REFRESH_SCOPE: &str = "openid profile email";
-
-/// The Codex CLI version the backend is told it talks to.
-pub(crate) const CODEX_VERSION: &str = "0.159.0";
 
 /// The fixed loopback port Codex CLI's client is registered with.
 const LOOPBACK_PORT: u16 = 1455;
@@ -81,6 +79,9 @@ pub struct Endpoints {
     pub base: String,
     /// The loopback port, or `None` for one the system picks.
     pub port: Option<u16>,
+    /// npm document for the latest `@openai/codex` release, or `None` to skip
+    /// that read. Tests leave it empty so they never call the registry.
+    pub npm_latest: Option<String>,
 }
 
 impl Default for Endpoints {
@@ -91,6 +92,7 @@ impl Default for Endpoints {
             device_issuer: "https://auth.openai.com".to_owned(),
             base: "https://chatgpt.com/backend-api/codex".to_owned(),
             port: Some(LOOPBACK_PORT),
+            npm_latest: Some(version::NPM_LATEST.to_owned()),
         }
     }
 }
@@ -150,6 +152,7 @@ impl SubscriptionFactory for CodexFactory {
             pending: Mutex::new(HashMap::new()),
             reset_redeems: Mutex::new(HashMap::new()),
             prompts: Arc::default(),
+            versions: Arc::default(),
         }))
     }
 }
@@ -173,6 +176,8 @@ struct Codex {
     reset_redeems: resets::RedeemLedger,
     /// The instructions each model is sent with.
     prompts: Arc<models::Prompts>,
+    /// Floor, npm release, and Codex clients seen on routed requests.
+    versions: Arc<version::ClientVersion>,
 }
 
 impl Codex {
@@ -200,9 +205,14 @@ impl Subscription for Codex {
         host: &HostContext,
     ) -> Result<SignInChallenge, PluginError> {
         if ctx.option(device_sign_in::SITE_OPTION) == Some(device_sign_in::DEVICE_SITE) {
-            let pending =
-                device_sign_in::start(host, &self.endpoints.device_issuer, &self.endpoints.token)
-                    .await?;
+            let client_version = version::prepare(host, &self.endpoints, &self.versions).await;
+            let pending = device_sign_in::start(
+                host,
+                &self.endpoints.device_issuer,
+                &self.endpoints.token,
+                &client_version,
+            )
+            .await?;
             let page = device_sign_in::device_page(&pending.issuer);
             let challenge = SignInChallenge::device_code(pending.user_code.clone(), page.clone())?;
             self.pending
@@ -264,7 +274,8 @@ impl Subscription for Codex {
                         "ChatGPT device sign-in completes once the code is entered on ChatGPT",
                     ));
                 };
-                let signed_in = device_sign_in::finish(host, &device).await?;
+                let client_version = version::prepare(host, &self.endpoints, &self.versions).await;
+                let signed_in = device_sign_in::finish(host, &device, &client_version).await?;
                 let account = host
                     .accounts()
                     .account(signed_in.id.clone(), signed_in.label)?;
@@ -340,7 +351,7 @@ impl Subscription for Codex {
     ) -> Result<Vec<QuotaWindow>, PluginError> {
         let access =
             tokens::access(host, &self.endpoints, account, tokens::Need::IfExpiring).await?;
-        usage::read(host, &self.endpoints, &access).await
+        usage::read(host, &self.endpoints, &access, &self.versions).await
     }
 
     async fn quota_reset_credits(
@@ -350,7 +361,7 @@ impl Subscription for Codex {
     ) -> Result<Option<QuotaResetCredits>, PluginError> {
         let access =
             tokens::access(host, &self.endpoints, account, tokens::Need::IfExpiring).await?;
-        resets::read(host, &self.endpoints, &access).await
+        resets::read(host, &self.endpoints, &access, &self.versions).await
     }
 
     async fn consume_quota_reset(
@@ -368,6 +379,7 @@ impl Subscription for Codex {
             &access,
             credit_id,
             &self.reset_redeems,
+            &self.versions,
         )
         .await
     }
@@ -379,7 +391,14 @@ impl Subscription for Codex {
     ) -> Result<ModelList, PluginError> {
         let access =
             tokens::access(host, &self.endpoints, account, tokens::Need::IfExpiring).await?;
-        models::list(host, &self.endpoints, &access, &self.prompts).await
+        models::list(
+            host,
+            &self.endpoints,
+            &access,
+            &self.prompts,
+            &self.versions,
+        )
+        .await
     }
 
     fn upstream(
@@ -392,6 +411,7 @@ impl Subscription for Codex {
             host.clone(),
             Arc::clone(&self.endpoints),
             Arc::clone(&self.prompts),
+            Arc::clone(&self.versions),
         )))
     }
 
@@ -409,7 +429,14 @@ impl Subscription for Codex {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<(), PluginError> {
-        warmup::run(&self.endpoints, &self.prompts, account, host).await
+        warmup::run(
+            &self.endpoints,
+            &self.prompts,
+            &self.versions,
+            account,
+            host,
+        )
+        .await
     }
 
     async fn discover_agent_sign_in(

@@ -8,9 +8,9 @@ use hofund_plugin_api::{HostContext, PluginError, SecretString};
 use hofund_plugin_sdk::json::{self, Map, Value};
 use hofund_plugin_sdk::{Call, sleep};
 
+use crate::CLIENT_ID;
 use crate::sign_in;
 use crate::upstream;
-use crate::{CLIENT_ID, CODEX_VERSION};
 
 /// Sign-in context option selecting the device-code flow.
 pub(crate) const SITE_OPTION: &str = "site";
@@ -49,11 +49,12 @@ pub(crate) async fn start(
     host: &HostContext,
     issuer: &str,
     oauth_token: &str,
+    version: &str,
 ) -> Result<DevicePending, PluginError> {
     let base = issuer.trim_end_matches('/');
     let url = format!("{base}{USERCODE_PATH}");
     let body = json::json!({ "client_id": CLIENT_ID });
-    let reply = device_post(url, body).fetch(host.http()).await?;
+    let reply = device_post(url, body, version).fetch(host.http()).await?;
     if reply.status() == 404 {
         return Err(PluginError::auth(
             "ChatGPT doesn't take a device code for this sign-in now; use the browser sign-in",
@@ -95,6 +96,7 @@ pub(crate) fn device_page(issuer: &str) -> String {
 pub(crate) async fn finish(
     host: &HostContext,
     pending: &DevicePending,
+    version: &str,
 ) -> Result<sign_in::SignedIn, PluginError> {
     let clock = host.clock();
     let deadline = clock.monotonic().saturating_add(DEVICE_WAIT);
@@ -109,7 +111,7 @@ pub(crate) async fn finish(
             "device_auth_id": pending.device_auth_id,
             "user_code": pending.user_code,
         });
-        let reply = match device_post(pending.poll_url.clone(), body)
+        let reply = match device_post(pending.poll_url.clone(), body, version)
             .fetch(host.http())
             .await
         {
@@ -196,16 +198,16 @@ fn poll_interval(object: &Map<String, Value>) -> Duration {
     }
 }
 
-fn device_post(url: String, body: Value) -> Call {
+fn device_post(url: String, body: Value, version: &str) -> Call {
     let bytes = json::to_vec(&body).unwrap_or_default();
     Call::post(url)
         .header("content-type", "application/json")
         .header("accept", "application/json")
         .header("originator", "codex_cli_rs")
-        .header("version", CODEX_VERSION)
+        .header("version", version)
         .sensitive_header(
             "user-agent",
-            upstream::user_agent(std::env::consts::OS, std::env::consts::ARCH),
+            upstream::user_agent(std::env::consts::OS, std::env::consts::ARCH, version),
         )
         .bytes(bytes)
 }

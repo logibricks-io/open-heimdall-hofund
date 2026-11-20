@@ -16,7 +16,8 @@ use hofund_plugin_sdk::json::{self, Value};
 use crate::models::{self, Prompts};
 use crate::refusal;
 use crate::tokens::{self, Access, Need};
-use crate::{CODEX_VERSION, Endpoints, limits, shape};
+use crate::version::{self, ClientVersion};
+use crate::{Endpoints, limits, shape};
 
 /// Body fields the Codex backend refuses or ignores, dropped before
 /// encoding; [`shape::body`] reshapes what the codec then writes.
@@ -37,6 +38,7 @@ pub(crate) struct CodexUpstream {
     host: HostContext,
     endpoints: Arc<Endpoints>,
     prompts: Arc<Prompts>,
+    versions: Arc<ClientVersion>,
 }
 
 impl CodexUpstream {
@@ -45,12 +47,14 @@ impl CodexUpstream {
         host: HostContext,
         endpoints: Arc<Endpoints>,
         prompts: Arc<Prompts>,
+        versions: Arc<ClientVersion>,
     ) -> Self {
         Self {
             account,
             host,
             endpoints,
             prompts,
+            versions,
         }
     }
 
@@ -58,17 +62,26 @@ impl CodexUpstream {
     /// list, else from the account's list asked for now, at most once per
     /// [`models::ASK_AGAIN`].
     async fn instructions(&self, access: &Access, model: &str) -> Option<String> {
+        let client_version = version::prepare(&self.host, &self.endpoints, &self.versions).await;
         if let Some(text) = self.prompts.get(&self.host, model) {
             return Some(text);
         }
-        if !self
-            .prompts
-            .may_ask(&self.account, self.host.clock().monotonic())
-        {
+        if !self.prompts.may_ask(
+            &self.account,
+            self.host.clock().monotonic(),
+            &client_version,
+        ) {
             return None;
         }
         // A list that fails leaves the client's instructions in place.
-        let _ = models::list(&self.host, &self.endpoints, access, &self.prompts).await;
+        let _ = models::list(
+            &self.host,
+            &self.endpoints,
+            access,
+            &self.prompts,
+            &self.versions,
+        )
+        .await;
         self.prompts.get(&self.host, model)
     }
 
@@ -169,7 +182,7 @@ impl CodexUpstream {
         let mut target = Target::new(ProtocolId::OPENAI_RESPONSES, self.endpoints.base.clone())
             .credential(CredentialStyle::Bearer)
             .chatgpt_codex_zstd(true)
-            .headers(headers(access.account.as_deref()))
+            .headers(headers(access.account.as_deref(), &self.versions.current()))
             .rewrite(Arc::new(move |body| {
                 if let Some(raw) = trimmed_body
                     .lock()
@@ -212,6 +225,7 @@ impl UpstreamProvider for CodexUpstream {
         mut request: Request,
         inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
+        self.versions.note_request(&request);
         shape(&mut request);
         let access =
             tokens::access(&self.host, &self.endpoints, &self.account, Need::IfExpiring).await?;
@@ -252,7 +266,7 @@ pub(crate) fn shape(request: &mut Request) {
 }
 
 /// The headers Codex CLI sends, besides the bearer token.
-pub(crate) fn headers(account: Option<&str>) -> Vec<(String, String)> {
+pub(crate) fn headers(account: Option<&str>, version: &str) -> Vec<(String, String)> {
     let mut headers = Vec::with_capacity(6);
     if let Some(account) = account.filter(|account| !account.is_empty()) {
         headers.push(("chatgpt-account-id".to_owned(), account.to_owned()));
@@ -261,10 +275,10 @@ pub(crate) fn headers(account: Option<&str>) -> Vec<(String, String)> {
         [
             ("OpenAI-Beta", "responses=experimental".to_owned()),
             ("originator", "codex_cli_rs".to_owned()),
-            ("version", CODEX_VERSION.to_owned()),
+            ("version", version.to_owned()),
             (
                 "User-Agent",
-                user_agent(std::env::consts::OS, std::env::consts::ARCH),
+                user_agent(std::env::consts::OS, std::env::consts::ARCH, version),
             ),
             ("Accept", "text/event-stream".to_owned()),
         ]
@@ -275,22 +289,22 @@ pub(crate) fn headers(account: Option<&str>) -> Vec<(String, String)> {
 
 /// A `GET` of `url` as Codex CLI sends one for the account: the bearer
 /// token and [`headers`], asking for JSON.
-pub(crate) fn account_call(url: String, access: &Access) -> Call {
-    account_request("GET", url, access)
+pub(crate) fn account_call(url: String, access: &Access, version: &str) -> Call {
+    account_request("GET", url, access, version)
 }
 
 /// A `POST` with the same bearer, account headers, and JSON accept line.
-pub(crate) fn account_post(url: String, access: &Access) -> Call {
-    account_request("POST", url, access)
+pub(crate) fn account_post(url: String, access: &Access, version: &str) -> Call {
+    account_request("POST", url, access, version)
 }
 
-fn account_request(method: &'static str, url: String, access: &Access) -> Call {
+fn account_request(method: &'static str, url: String, access: &Access, version: &str) -> Call {
     let start = if method == "POST" {
         Call::post(url)
     } else {
         Call::get(url)
     };
-    headers(access.account.as_deref())
+    headers(access.account.as_deref(), version)
         .into_iter()
         .filter(|(name, _)| !name.eq_ignore_ascii_case("accept"))
         .fold(
@@ -304,7 +318,7 @@ fn account_request(method: &'static str, url: String, access: &Access) -> Call {
 }
 
 /// The Codex CLI User-Agent for `os` on `arch`.
-pub(crate) fn user_agent(os: &str, arch: &str) -> String {
+pub(crate) fn user_agent(os: &str, arch: &str, version: &str) -> String {
     let os = match os {
         "macos" => "Mac OS",
         "windows" => "Windows",
@@ -320,7 +334,7 @@ pub(crate) fn user_agent(os: &str, arch: &str) -> String {
         .ok()
         .filter(|term| !term.is_empty() && term.is_ascii())
         .unwrap_or_else(|| "unknown".to_owned());
-    format!("codex_cli_rs/{CODEX_VERSION} ({os}; {arch}) {terminal}")
+    format!("codex_cli_rs/{version} ({os}; {arch}) {terminal}")
 }
 
 /// Says an error message is the backend calling the access token expired.
