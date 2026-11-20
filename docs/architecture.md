@@ -459,16 +459,23 @@ use body reset, header reset, full-window reset, a retry hint longer than five
 hours, then five hours; a later renewed-window observation lifts the rest.
 Other subscription accounts stay at 30 minutes. Named credit resets cap at 35
 days, generic/rate/quota header hints cap at one hour, and passive window resets
-cap at eight days. New events never shorten a longer active rest.
+cap at eight days. New events never shorten a longer active rest. A vendor-restricted account,
+signaled by a plugin flag rather than by words in the router, rests the whole
+member for two hours and does not climb a ladder. The group still asks the
+next member, including that provider's other accounts. A 400 carries that
+flag only when the plugin that knows the account set it. The same sentences
+from any other host are a separate ordinary-failure mark: the group moves on
+and the member takes the generic failure rest.
 
 Only API-key credit-ladder rests persist. The daemon writes their wall-clock
 deadlines and rungs to `rests.json` beside the configuration through a
 same-directory temporary file and rename, only when the snapshot changes. It
 restores configured members at startup, keeps ended rungs for 35 days, ignores
 corrupt files without failing startup, and lets in-process state win. Rate,
-quota, generic, observation, flat-credit, and subscription rests remain
+quota, generic, restricted, observation, flat-credit, and subscription rests remain
 in-memory. The daemon records call and stream outcomes, but counts never record
-success and cool only on 429 or transport-class failures.
+success and cool only on 429, a transport-class failure, or a plugin mark that
+the account is restricted or that the failure is ordinary.
 
 A failure that says no connection was made (a connect error, or a 502,
 transport, or I/O error naming a refused dial or failed lookup) does not rest
@@ -505,7 +512,11 @@ the next member is asked. The order is fixed:
    error status, a credit reply on any 4xx, and quota, unserved-model,
    refusal, request-shape, unsupported-parameter, wrong-endpoint, or region
    wording on a 400 or 422. Narrowing `statuses` does not turn these off.
-   Escaped (`\u`) JSON text is read decoded as well.
+   Escaped (`\u`) JSON text is read decoded as well. A 400 or 403 the plugin
+   marked as an account restriction also fails over, and rests that account
+   for two hours. A 400 the plugin marked as an ordinary failure fails over
+   and takes the generic failure rest. The router does not match the vendor's
+   sentences itself.
 4. A response-protection refusal skips every member of the same provider, and
    a request-shape refusal asks the next member, whatever the status list
    says. Neither rests the member, nor does a refusal of the prompt.

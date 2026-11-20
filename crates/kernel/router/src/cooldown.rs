@@ -13,9 +13,12 @@
 //! | Passive observation | Zero remaining uses the window reset capped at 8 days, the retry hint capped at 1 hour, or 15 minutes without either. Positive remaining at least 98% used with a known positive limit rests only for a positive window reset capped at 8 days. Accounts spending credits and all other observations record nothing. Observations do not advance either failure ladder. |
 //! | Account verification | Rests the whole account for 30 minutes when the error asks for verification. It does not climb the generic ladder. The message is kept, including any link, and is not rewritten. |
 //! | Contained panic | Uses the generic failure ladder with [`CooldownCause::Panic`]. |
+//! | Vendor account restriction | Rests the whole member for 2 hours, flat, and does not climb a ladder or count a generic failure. A plugin sets the mark when it knows the account. The next member, including that provider's other accounts, is still asked. |
+//! | Ordinary failure mark | A plugin may mark a status the group should leave, including a 400, as an ordinary failure. It takes the generic failure ladder and is not a restricted rest. |
 //!
 //! Cancelled, unsupported, configuration, internal, unknown future, and other
-//! request-shaped HTTP 4xx errors do not cool a member. A new failure, panic,
+//! request-shaped HTTP 4xx errors do not cool a member, unless the plugin
+//! marked the failure as an ordinary failure or an account restriction. A new failure, panic,
 //! or passive observation keeps whichever rest ends later, so a shorter one
 //! never cuts a longer rest short; a deadline tie replaces it. A quota or
 //! credit rest guessed without a vendor time gives way to a same-cause
@@ -41,6 +44,7 @@ use serde::{Deserialize, Serialize};
 const RECOVERY_CAPACITY: usize = 1_024;
 const CREDIT_RESET_MAX: Duration = Duration::from_secs(35 * 24 * 60 * 60);
 const WINDOWED_CREDIT_DEFAULT: Duration = Duration::from_secs(5 * 60 * 60);
+const RESTRICTED_REST: Duration = Duration::from_secs(2 * 60 * 60);
 const CREDIT_LADDER: [Duration; 6] = [
     Duration::from_secs(30 * 60),
     Duration::from_secs(2 * 60 * 60),
@@ -154,6 +158,8 @@ pub enum CooldownCause {
     Overload,
     /// The account must be verified before it serves again.
     Verify,
+    /// The vendor restricted the account. Flat two-hour rest.
+    Restricted,
 }
 
 impl CooldownCause {
@@ -167,6 +173,7 @@ impl CooldownCause {
         Self::Panic,
         Self::Overload,
         Self::Verify,
+        Self::Restricted,
     ];
 
     /// Stable label used by metrics.
@@ -181,6 +188,7 @@ impl CooldownCause {
             Self::Panic => "panic",
             Self::Overload => "overload",
             Self::Verify => "verify",
+            Self::Restricted => "restricted",
         }
     }
 }
@@ -1134,6 +1142,10 @@ impl Cooldowns {
                 ladder = Some(on_ladder);
                 (candidate, named)
             }
+            Failure::Restricted => (
+                cooling(now, RESTRICTED_REST, CooldownCause::Restricted, 0),
+                false,
+            ),
         };
         candidate.status = error.status();
         candidate.error = error.message().trim().chars().take(300).collect();
@@ -1438,6 +1450,7 @@ enum Failure {
     Quota,
     Credit,
     Verify,
+    Restricted,
 }
 
 fn note_probe_failure(book: &mut Book, id: &MemberId, now: Instant) {
@@ -1472,7 +1485,18 @@ fn probe_error(error: &PluginError) -> bool {
 }
 
 fn failure_kind(error: &PluginError) -> Option<Failure> {
-    if !error.cools() || !crate::decision::rests(error) {
+    if !error.cools() {
+        return None;
+    }
+    // Before `rests`: a refusal or policy sentence would otherwise hide a
+    // mark the plugin already made.
+    if error.is_account_restricted() {
+        return Some(Failure::Restricted);
+    }
+    if error.is_ordinary_failure() {
+        return Some(Failure::Generic(CooldownCause::Failure));
+    }
+    if !crate::decision::rests(error) {
         return None;
     }
     if error.is_credit() {
@@ -1658,6 +1682,7 @@ mod tests {
                 CooldownCause::Panic => 5,
                 CooldownCause::Overload => 6,
                 CooldownCause::Verify => 7,
+                CooldownCause::Restricted => 8,
             })
             .collect::<Vec<_>>();
         assert_eq!(indices, (0..CooldownCause::ALL.len()).collect::<Vec<_>>());

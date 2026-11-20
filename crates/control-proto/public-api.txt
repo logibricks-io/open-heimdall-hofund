@@ -215,6 +215,7 @@ CooldownReason::Overload
 CooldownReason::Panic
 CooldownReason::Quota
 CooldownReason::RateLimit
+CooldownReason::Restricted
 CooldownReason::Unknown #[serde(other)]
 CooldownReason::Verify
 CooldownReason::const fn as_str (self) -> & 'static str

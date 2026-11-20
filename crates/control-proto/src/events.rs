@@ -331,6 +331,8 @@ pub enum CooldownReason {
     Overload,
     /// The account must be verified before it serves again.
     Verify,
+    /// The vendor restricted the account.
+    Restricted,
     /// A newer peer supplied an unknown reason.
     #[serde(other)]
     Unknown,
@@ -349,6 +351,7 @@ impl CooldownReason {
             Self::Panic => "panic",
             Self::Overload => "overload",
             Self::Verify => "verify",
+            Self::Restricted => "restricted",
             Self::Unknown => "unknown",
         }
     }
