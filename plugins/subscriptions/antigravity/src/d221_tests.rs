@@ -301,10 +301,6 @@ fn d221_a_stored_account_can_be_signed_in_and_imported_again() {
         .enqueue(br#"{"access_token":"acc-other","token_type":"Bearer","expires_in":3600,"refresh_token":"refresh-other"}"#.to_vec());
     host.http()
         .enqueue(br#"{"email":"other@example.test"}"#.to_vec());
-    host.http().enqueue(
-        br#"{"currentTier":{"id":"free-tier","name":"Free"},"cloudaicompanionProject":"proj-2"}"#
-            .to_vec(),
-    );
     let refused = block_on(sub.complete_sign_in(
         &ctx(),
         SignInProof::callback("code-2", state),
@@ -318,7 +314,23 @@ fn d221_a_stored_account_can_be_signed_in_and_imported_again() {
             .expect("read")
             .is_none()
     );
-    assert!(host.http().calls().len() > calls);
+    let learned: Vec<_> = host.http().calls().into_iter().skip(calls).collect();
+    assert!(
+        learned.iter().any(|call| call.uri() == TOKEN_URL),
+        "token exchange learns the refresh token"
+    );
+    assert!(
+        learned
+            .iter()
+            .any(|call| call.uri() == "https://oauth.test/userinfo"),
+        "userinfo learns the account id"
+    );
+    assert!(
+        learned.iter().all(|call| {
+            !call.uri().contains("loadCodeAssist") && !call.uri().contains("onboardUser")
+        }),
+        "a refused account makes no Code Assist setup call: {learned:?}"
+    );
 
     let before = host.http().calls().len();
     let same = block_on(sub.import_accounts(
@@ -356,6 +368,62 @@ fn d221_a_stored_account_can_be_signed_in_and_imported_again() {
             .expect("list")
             .iter()
             .all(|account| account.id() != &missing)
+    );
+}
+
+#[test]
+fn d221_an_unverified_refresh_is_not_written_onto_a_stored_email() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let email = "u@example.test";
+    let id = account_id_from(&["antigravity", email]);
+    let blob = SecretObject::new()
+        .with_number("v", 1)
+        .with_secret(
+            "refresh_token",
+            &SecretString::from("old-refresh".to_owned()),
+        )
+        .with_text("email", email)
+        .with_text(project::PROJECT, "proj-1");
+    block_on(async {
+        let accounts = host.context().accounts();
+        let account = accounts.account(id.clone(), email).expect("account");
+        accounts
+            .upsert(account, blob.to_secret())
+            .await
+            .expect("seed");
+    });
+    let sub = build(&host, false);
+    let before = host.http().calls().len();
+    host.http()
+        .enqueue(br#"{"access_token":"acc-bad","token_type":"Bearer","expires_in":3600}"#.to_vec());
+    host.http().enqueue_response(401, &[], b"nope");
+    let error = block_on(sub.import_accounts(
+        r#"{"type":"antigravity","refresh_token":"refresh-other","email":"u@example.test"}"#,
+        host.context(),
+    ))
+    .expect_err("unverified refresh");
+    assert!(
+        error
+            .message()
+            .contains("Google didn't say which account signed in"),
+        "{}",
+        error.message()
+    );
+    let stored = block_on(host.context().accounts().secret(&id))
+        .expect("read")
+        .expect("secret");
+    let stored = SecretObject::parse(&stored).expect("blob");
+    assert_eq!(
+        stored.secret("refresh_token").as_ref().map(secret_text),
+        Some("old-refresh")
+    );
+    let calls: Vec<_> = host.http().calls().into_iter().skip(before).collect();
+    assert!(
+        calls.iter().all(|call| {
+            !call.uri().contains("loadCodeAssist") && !call.uri().contains("onboardUser")
+        }),
+        "an unverified refresh makes no Code Assist call: {calls:?}"
     );
 }
 

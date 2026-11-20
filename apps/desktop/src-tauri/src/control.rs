@@ -17,6 +17,15 @@ use serde::Serialize;
 
 use crate::open::open_config_file;
 
+/// Builds stopped-gateway risk lines off the control mutex.
+///
+/// Plugin builds happen here. Account hooks do not.
+pub(crate) async fn load_stopped_risks(path: PathBuf) -> Vec<String> {
+    tokio::task::spawn_blocking(move || configured_subscription_risks(&path).unwrap_or_default())
+        .await
+        .unwrap_or_default()
+}
+
 /// One row in the agent list.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct AgentRow {
@@ -214,18 +223,19 @@ impl Control {
         }
     }
 
-    /// Rebuilds the stopped-gateway risk cache. A running gateway reads the
-    /// live enrollment lines in [`Self::snapshot`] instead.
-    pub(crate) async fn refresh_stopped_risks(&mut self) {
-        if self.server.is_some() {
-            return;
-        }
-        let path = self.config_path.clone();
-        let risks = tokio::task::spawn_blocking(move || {
-            configured_subscription_risks(&path).unwrap_or_default()
-        })
-        .await
-        .unwrap_or_default();
+    /// Config path for a stopped-gateway risk refresh.
+    ///
+    /// `None` while the gateway is running. The caller builds the lines
+    /// without holding the control mutex, then [`Self::store_stopped_risks`].
+    pub(crate) fn stopped_risk_path(&self) -> Option<PathBuf> {
+        self.server.is_none().then(|| self.config_path.clone())
+    }
+
+    /// Stores lines built while the gateway was stopped.
+    ///
+    /// A gateway that started during the build keeps the live enrollment
+    /// lines. The cache is left unchanged in that case.
+    pub(crate) fn store_stopped_risks(&mut self, risks: Vec<String>) {
         if self.server.is_none() {
             self.stopped_risks = risks;
         }
@@ -449,7 +459,7 @@ mod tests {
     use hofund_agent::{Session, catalog};
     use hofund_daemon::agent_descriptions;
 
-    use super::{Control, Snapshot, menu_entries};
+    use super::{Control, Snapshot, load_stopped_risks, menu_entries};
 
     fn agent_catalog() -> hofund_agent::Catalog {
         catalog(agent_descriptions()).expect("agent catalog")
@@ -653,7 +663,7 @@ mod tests {
         assert!(error.contains("unknown agent"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn snapshot_does_not_build_plugins_or_run_account_hooks() {
         let dir = scratch();
         let path = dir.path().join("hofund.toml");
@@ -680,7 +690,9 @@ mod tests {
         assert_eq!(hofund_daemon::subscription_account_hooks(), hooks);
         assert!(!dir.path().join(".hofund").exists());
 
-        control.refresh_stopped_risks().await;
+        let path = control.stopped_risk_path().expect("stopped");
+        let risks = load_stopped_risks(path).await;
+        control.store_stopped_risks(risks);
         let cached = control.snapshot(&session);
         assert!(cached.risks.iter().any(|line| line.contains("Antigravity")));
         assert!(hofund_daemon::subscription_plugin_builds() > builds);

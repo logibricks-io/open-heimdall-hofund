@@ -210,6 +210,7 @@ impl SubscriptionState {
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
+        crate::sign_in::note_account_hook();
         if let Err(error) = self
             .instance
             .prepare_accounts(&config_dir, &self.host)
@@ -258,6 +259,7 @@ impl SubscriptionState {
                     continue;
                 }
             }
+            crate::sign_in::note_account_hook();
             match self.instance.account_status(account.id(), &self.host).await {
                 Ok(AccountStatus::Ready) => ready.push(account),
                 Ok(_) => {}

@@ -93,10 +93,22 @@ pub fn run() -> Result<(), String> {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
                 loop {
                     interval.tick().await;
+                    let refresh_path = {
+                        let state = handle.state::<AppState>();
+                        let control = state.control.lock().await;
+                        control.stopped_risk_path()
+                    };
+                    let risks = if let Some(path) = refresh_path {
+                        Some(control::load_stopped_risks(path).await)
+                    } else {
+                        None
+                    };
                     let snapshot = {
                         let state = handle.state::<AppState>();
                         let mut control = state.control.lock().await;
-                        control.refresh_stopped_risks().await;
+                        if let Some(risks) = risks {
+                            control.store_stopped_risks(risks);
+                        }
                         control.refresh_tray().await;
                         control.snapshot(&hofund_daemon::agent_session())
                     };

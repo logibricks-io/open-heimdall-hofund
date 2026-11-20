@@ -478,6 +478,7 @@ pub(crate) async fn list_in(opened: &[Opened]) -> Result<Vec<SubscriptionListing
     for entry in opened {
         let mut accounts = Vec::new();
         for account in sorted_accounts(entry).await? {
+            note_account_hook();
             let needs_sign_in = match entry.instance.account_status(&account.0, &entry.host).await {
                 Ok(AccountStatus::Ready) => None,
                 Ok(AccountStatus::NeedsSignIn { reason }) => Some(reason),
@@ -509,20 +510,24 @@ pub(crate) async fn list_in(opened: &[Opened]) -> Result<Vec<SubscriptionListing
 /// Account ids and labels, ordered by label and then id.
 static ACCOUNT_HOOKS: AtomicU64 = AtomicU64::new(0);
 
-/// How many listing passes have run account hooks in this process.
+/// How many `prepare_accounts` and `account_status` calls this process has made.
 ///
 /// A menu snapshot must not move this. The count is process-wide so a
-/// desktop test can see a call into [`sorted_accounts`].
+/// desktop test can see a direct hook, not only a listing pass.
 #[doc(hidden)]
 #[must_use]
 pub fn subscription_account_hooks() -> u64 {
     ACCOUNT_HOOKS.load(Ordering::SeqCst)
 }
 
+pub(crate) fn note_account_hook() {
+    ACCOUNT_HOOKS.fetch_add(1, Ordering::SeqCst);
+}
+
 pub(crate) async fn sorted_accounts(
     entry: &Opened,
 ) -> Result<Vec<(AccountId, String)>, DaemonError> {
-    ACCOUNT_HOOKS.fetch_add(1, Ordering::SeqCst);
+    note_account_hook();
     if let Err(error) = entry
         .instance
         .prepare_accounts(&entry.config_dir, &entry.host)

@@ -81,6 +81,10 @@ pub(crate) async fn store(
             .map_err(|error| PluginError::decode(error.message()))?;
         let email = match sign_in::who(host, &endpoints.userinfo, set.access()).await {
             Ok(email) => email,
+            // The export email is caller-controlled. When new accounts are
+            // refused, a failed userinfo must not attach this refresh token
+            // to a stored account, and must not call Code Assist.
+            Err(error) if !allow_new => return Err(error),
             Err(_) if !entry.email().is_empty() => entry.email().to_owned(),
             Err(error) => return Err(error),
         };

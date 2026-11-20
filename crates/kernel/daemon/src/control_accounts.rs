@@ -410,6 +410,7 @@ impl AccountOps {
                     row.subscription = line.subscription;
                     row.label = line.label;
                     row.already_stored = line.already_stored;
+                    row.refused = line.refused;
                     row
                 })
                 .collect(),
@@ -486,6 +487,7 @@ impl From<DiscoveryOutcome> for AccountDiscoverImportResponse {
     fn from(outcome: DiscoveryOutcome) -> Self {
         let mut response = Self::default();
         response.imported = outcome.imported;
+        response.found = outcome.found;
         response
     }
 }

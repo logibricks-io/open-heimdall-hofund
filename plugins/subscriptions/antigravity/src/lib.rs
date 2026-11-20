@@ -332,16 +332,23 @@ impl Subscription for Antigravity {
             &code,
             &pending.verifier,
             &pending.redirect_uri,
-            self.project.as_deref(),
         )
         .await?;
         if !self.stored_account(host, &signed_in.id).await? {
             return Err(PluginError::config(ENROLLMENT_REFUSAL));
         }
+        let blob = project::settle(
+            host,
+            &self.endpoints,
+            &signed_in.access,
+            self.project.as_deref(),
+            signed_in.blob,
+        )
+        .await;
         let account = host
             .accounts()
             .account(signed_in.id.clone(), signed_in.label)?;
-        host.accounts().upsert(account, signed_in.secret).await?;
+        host.accounts().upsert(account, blob.to_secret()).await?;
         self.tokens.remove(&signed_in.id);
         self.catalog.forget(&signed_in.id);
         Ok(signed_in.id)
