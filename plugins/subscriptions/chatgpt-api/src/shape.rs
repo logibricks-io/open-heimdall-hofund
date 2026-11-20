@@ -1,4 +1,8 @@
 //! Reshapes Responses bodies for Sign in with ChatGPT.
+//!
+//! The agent's instructions stay on top, except on GPT-6.2 and later, which
+//! read that field after `input`. Those models get the text as the first
+//! developer input item and no top-level `instructions`.
 
 use hofund_plugin_sdk::json::{Map, Value, json};
 
@@ -76,6 +80,29 @@ pub(crate) fn body(body: &mut Map<String, Value>) -> Vec<(String, String)> {
             body.insert("prompt_cache_key".to_owned(), Value::String(key));
         }
     }
+    // GPT-6.2 reads top-level instructions after the input, uncached every
+    // turn, so they go first in it. The cache key above still names the
+    // conversation from the instructions the client sent.
+    let own = body
+        .get("instructions")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned);
+    let after_input = body
+        .get("model")
+        .and_then(Value::as_str)
+        .is_some_and(hofund_plugin_sdk::instructions_after_input);
+    if let Some(own) = own
+        && after_input
+    {
+        let mut input = match body.remove("input") {
+            Some(Value::Array(items)) => items,
+            _ => Vec::new(),
+        };
+        input.insert(0, developer_message(&own));
+        body.insert("input".to_owned(), Value::Array(input));
+        body.remove("instructions");
+    }
     if let Some(Value::Array(tools)) = body.get_mut("tools") {
         let kept = own_tools(std::mem::take(tools));
         if kept.is_empty() {
@@ -86,6 +113,17 @@ pub(crate) fn body(body: &mut Map<String, Value>) -> Vec<(String, String)> {
         }
     }
     session_headers(body)
+}
+
+fn developer_message(text: &str) -> Value {
+    json!({
+        "type": "message",
+        "role": "developer",
+        "content": [{
+            "type": "input_text",
+            "text": text,
+        }],
+    })
 }
 
 fn json_message(text: &str) -> Value {

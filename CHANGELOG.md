@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- D-232: GPT-6.2 and later send Codex instructions, the client's instructions,
+  and a translated system prompt as leading `developer` input items, with no
+  top-level `instructions`. Older models stay unchanged. This applies to the
+  Codex subscription, the ChatGPT API subscription, and translated Chat and
+  Anthropic Responses encodes.
+- D-223: A Codex Responses Lite turn (an `additional_tools` input item, or
+  `reasoning.context` of `all_turns`, and no client instructions) is sent
+  without added instructions and without `reasoning.summary`. A Lite turn on
+  GPT-6.2 keeps those Lite rules.
+
 ## [0.2.0-rc.2] - 2026-11-18
 
 This is a second preview (prerelease) of v0.2.0. It exists so the tag

@@ -1188,6 +1188,142 @@ fn instructions_ride_first_unless_they_are_codex() {
     assert_eq!(out["input"].as_array().map(Vec::len), Some(1));
 }
 
+fn developer_text(item: &Value) -> &str {
+    item["content"][0]["text"].as_str().unwrap_or("")
+}
+
+#[test]
+fn d232_gpt_6_2_puts_instructions_first_in_input() {
+    let codex = "You are Codex, based on GPT-6.2.\nMore.";
+    let user = json!([{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}]);
+    let cases = [
+        (
+            "gpt-6.2-sol",
+            Some("You are Pi."),
+            vec![codex, "You are Pi."],
+        ),
+        ("gpt-6.2-sol", Some(codex), vec![codex]),
+        ("gpt-6.10", None::<&str>, vec![codex]),
+        ("gpt-7", Some("You are Pi."), vec![codex, "You are Pi."]),
+        (
+            "openai/gpt-6.2-sol",
+            Some("You are Pi."),
+            vec![codex, "You are Pi."],
+        ),
+    ];
+    for (model, own, want) in cases {
+        let mut body = json!({"model": model, "input": user.clone()});
+        if let Some(own) = own {
+            body["instructions"] = json!(own);
+        }
+        let (out, _) = shaped(body, Some(codex));
+        assert!(
+            out.get("instructions").is_none(),
+            "{model}: instructions stayed on top: {out}"
+        );
+        let input = out["input"].as_array().expect("input");
+        assert_eq!(input.len(), want.len() + 1, "{model}: {out}");
+        for (index, text) in want.iter().enumerate() {
+            assert_eq!(
+                input[index]["role"],
+                json!("developer"),
+                "{model} [{index}]"
+            );
+            assert_eq!(input[index]["type"], json!("message"), "{model} [{index}]");
+            assert_eq!(developer_text(&input[index]), *text, "{model} [{index}]");
+        }
+        assert_eq!(input[want.len()]["role"], json!("user"), "{model}");
+    }
+
+    for model in ["gpt-6.1", "gpt-6.1-sol", "gpt-5.5", "gpt-6-sol", "o3"] {
+        let (out, _) = shaped(
+            json!({"model": model, "instructions": "You are Pi.", "input": user.clone()}),
+            Some(codex),
+        );
+        assert_eq!(out["instructions"], json!(codex), "{model}");
+        assert_eq!(out["input"].as_array().map(Vec::len), Some(2), "{model}");
+        assert_eq!(developer_text(&out["input"][0]), "You are Pi.", "{model}");
+        assert_eq!(out["input"][1]["role"], json!("user"), "{model}");
+    }
+
+    let (out, _) = shaped(
+        json!({"model": "gpt-6.2", "reasoning": {"effort": "high"}, "input": "hi"}),
+        Some(codex),
+    );
+    assert!(out.get("instructions").is_none());
+    assert_eq!(out["reasoning"]["summary"], json!("auto"));
+    assert_eq!(developer_text(&out["input"][0]), codex);
+}
+
+#[test]
+fn d223_lite_omits_instructions_and_summary() {
+    let tools = json!({
+        "model": "gpt-6-astra",
+        "reasoning": {"effort": "high"},
+        "input": [
+            {"type": "additional_tools", "tools": [{"type": "function", "name": "exec_command"}]},
+            {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "You are Codex, a coding agent."}]},
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}
+        ]
+    });
+    let (out, _) = shaped(tools, Some(CODEX_PROMPT));
+    assert!(out.get("instructions").is_none(), "{out}");
+    assert!(out["reasoning"].get("summary").is_none(), "{out}");
+    assert_eq!(out["input"].as_array().map(Vec::len), Some(3));
+
+    let turns = json!({
+        "model": "gpt-6-astra",
+        "reasoning": {"effort": "high", "context": "all_turns"},
+        "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
+    });
+    let (out, _) = shaped(turns, Some(CODEX_PROMPT));
+    assert!(out.get("instructions").is_none(), "{out}");
+    assert!(out["reasoning"].get("summary").is_none(), "{out}");
+    assert!(out["include"].as_array().is_some_and(|include| {
+        include
+            .iter()
+            .any(|entry| entry == "reasoning.encrypted_content")
+    }));
+
+    let (out, _) = shaped(
+        json!({"model": "gpt-6-astra", "reasoning": {"effort": "high"}, "input": "hi"}),
+        Some(CODEX_PROMPT),
+    );
+    assert_eq!(out["instructions"], json!(CODEX_PROMPT));
+    assert_eq!(out["reasoning"]["summary"], json!("auto"));
+
+    let codex = "You are Codex, based on GPT-6.2.\nMore.";
+    let (out, _) = shaped(
+        json!({
+            "model": "gpt-6.2-sol",
+            "reasoning": {"effort": "high", "context": "all_turns"},
+            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
+        }),
+        Some(codex),
+    );
+    assert!(out.get("instructions").is_none(), "{out}");
+    assert!(out["reasoning"].get("summary").is_none(), "{out}");
+    assert_eq!(out["input"].as_array().map(Vec::len), Some(1));
+    assert_eq!(out["input"][0]["role"], json!("user"));
+
+    let (out, _) = shaped(
+        json!({
+            "model": "gpt-6-astra",
+            "instructions": "Be a pirate.",
+            "reasoning": {"effort": "high"},
+            "input": [
+                {"type": "additional_tools", "tools": [{"type": "function", "name": "exec"}]},
+                {"type": "message", "role": "user", "content": "hi"}
+            ]
+        }),
+        Some(CODEX_PROMPT),
+    );
+    assert_eq!(out["instructions"], json!(CODEX_PROMPT));
+    assert_eq!(out["reasoning"]["summary"], json!("auto"));
+    assert_eq!(out["input"][0]["role"], json!("developer"));
+    assert_eq!(developer_text(&out["input"][0]), "Be a pirate.");
+}
+
 #[test]
 fn long_call_id_hashed_to_64() {
     let fits = "c".repeat(64);
