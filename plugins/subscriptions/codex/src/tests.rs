@@ -1019,6 +1019,10 @@ fn body_drops_sampling_and_forces_store_false() {
         out["input"],
         json!([{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}])
     );
+    let (fast, _) = shaped(json!({"service_tier": "fast"}), None);
+    assert_eq!(fast["service_tier"], json!("priority"));
+    let (capital, _) = shaped(json!({"service_tier": "Fast"}), None);
+    assert!(capital.get("service_tier").is_none());
     for tier in ["priority", "ultrafast"] {
         let (out, _) = shaped(
             json!({"service_tier": tier, "parallel_tool_calls": false, "text": {"verbosity": "low"}}),
@@ -1030,6 +1034,19 @@ fn body_drops_sampling_and_forces_store_false() {
         assert_eq!(out["input"], json!([]));
         assert!(out.get("prompt_cache_key").is_none());
     }
+}
+
+#[test]
+fn d224_codex_body_sends_fast_as_priority() {
+    let (out, _) = shaped(
+        json!({"service_tier": "fast", "model": "gpt-6.2-sol"}),
+        None,
+    );
+    assert_eq!(out["service_tier"], json!("priority"));
+    let (kept, _) = shaped(json!({"service_tier": "ultrafast"}), None);
+    assert_eq!(kept["service_tier"], json!("ultrafast"));
+    let (dropped, _) = shaped(json!({"service_tier": "flex"}), None);
+    assert!(dropped.get("service_tier").is_none());
 }
 
 #[test]

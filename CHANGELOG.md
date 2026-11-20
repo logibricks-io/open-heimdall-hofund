@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- D-224: an inbound Chat or Responses `service_tier` of `fast` is sent upstream as `priority`. Ultrafast is offered for GPT Sol, Astra, and Terra models. Responses to `api.openai.com` send `ultrafast` only for the models that host accepts; Chat Completions to that host send `priority` instead. Usage prices Fast and `priority` at 2x, Ultrafast at 6x, and Flex at 0.5x. GPT-6.2 Astra and Sol Ultrafast is 3x through 2027-02-28 Pacific and 6x from 2027-03-01, using the call's day. `/v1/models` and the written Codex catalog list Ultrafast where the route or a group member supports it. A member sent Ultrafast is labelled Ultrafast.
+
 ### Fixed
 
 - D-233: Claude bridge plans set `CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS=0` and `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT=0` unless the process environment already sets that name, and a WSL plan lists both on `WSLENV`, so a client tool is waited on instead of being moved to the background or aborted at the idle limit. One-off runs are unchanged.

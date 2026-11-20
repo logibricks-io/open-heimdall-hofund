@@ -160,6 +160,9 @@ pub struct Hop {
     pub fallback: bool,
     /// Fixed reasoning effort for affinity identity, empty when not fixed.
     pub effort: String,
+    /// Service tier this member sends. Empty keeps the client's tier.
+    /// `priority` is Fast. `ultrafast` is Ultrafast.
+    pub service_tier: String,
     /// How long this member's unread prompt cache stays warm.
     pub cold_after: Duration,
     /// Unit boundaries from the outermost direct member to the innermost
@@ -193,6 +196,7 @@ impl Hop {
             nearly_spent: false,
             fallback: false,
             effort: String::new(),
+            service_tier: String::new(),
             cold_after: affinity::CACHE_COLD,
             units: Vec::new(),
         }
@@ -507,6 +511,35 @@ impl Router {
     #[must_use]
     pub const fn cooldowns(&self) -> Option<&Arc<Cooldowns>> {
         self.cooldowns.as_ref()
+    }
+
+    /// Service tier ids `/v1/models` should offer for `model`.
+    ///
+    /// Ultrafast is offered when `model` is a GPT Sol, Astra, or Terra family,
+    /// when a hop sends Ultrafast, or when a hop's wire model is that family.
+    /// Fast (`priority`) is listed beside it. Other models offer no tier here.
+    #[must_use]
+    pub fn service_tier_ids(&self, model: &str) -> Vec<&'static str> {
+        let mut ultra = hofund_codec::service_tier::offers_ultra_family(model);
+        if let Some(route) = self.routes.get(model) {
+            for hop in &route.hops {
+                if hop.service_tier == "ultrafast" {
+                    ultra = true;
+                }
+                if hop
+                    .wire_model
+                    .as_deref()
+                    .is_some_and(hofund_codec::service_tier::offers_ultra_family)
+                {
+                    ultra = true;
+                }
+            }
+        }
+        if ultra {
+            hofund_codec::service_tier::ULTRA_OFFER.to_vec()
+        } else {
+            Vec::new()
+        }
     }
 
     /// Member ids on the current routes, in first-seen order.
@@ -826,6 +859,7 @@ impl Router {
                 .as_ref()
                 .map_or_else(Instant::now, |hook| hook.now()),
             group_walk_budget: self.group_walk_budget,
+            tier_sent: String::new(),
         }
         .run(0)
         .await;
@@ -1623,6 +1657,7 @@ struct DispatchState {
     drain_moves: Vec<RoundMove>,
     walk_started: Instant,
     group_walk_budget: Duration,
+    tier_sent: String,
 }
 
 /// One member's answer within a dispatch round.
@@ -1632,6 +1667,7 @@ struct Answered {
     provider_key_id: String,
     upstream_model: String,
     completion: Completion,
+    tier_sent: String,
 }
 
 fn region_key(provider: &str, model: &str) -> String {
@@ -1744,6 +1780,7 @@ impl DispatchState {
                             upstream_model: answered.upstream_model,
                             completion: answered.completion,
                             affinity_reason,
+                            service_tier_sent: answered.tier_sent,
                             continuation: Some(continuation),
                         });
                     }
@@ -1762,6 +1799,7 @@ impl DispatchState {
                         upstream_id: answered.upstream_id,
                         provider_key_id: answered.provider_key_id,
                         upstream_model: answered.upstream_model,
+                        service_tier_sent: answered.tier_sent,
                         completion: answered.completion,
                         affinity_reason,
                         continuation: None,
@@ -1860,6 +1898,7 @@ impl DispatchState {
             let hop = self.resolved.hops[index].clone();
             let mut attempt = self.request.clone();
             apply_wire(&mut attempt, &hop, &self.resolved.bare);
+            self.tier_sent = hofund_codec::service_tier::extension_tier(&attempt.extensions);
             let upstream_model = attempt.model.clone();
             let plugin_id = hop.member.plugin_id();
             if self.refused_providers.contains(hop.member.route_id())
@@ -2017,6 +2056,7 @@ impl DispatchState {
                         provider_key_id: hop.member.provider_key_id().to_owned(),
                         upstream_model,
                         completion,
+                        tier_sent: self.tier_sent.clone(),
                     }));
                 }
                 Err(error) => {
@@ -2160,14 +2200,17 @@ impl DispatchState {
         let Some(trace) = self.trace.as_mut() else {
             return;
         };
-        trace.push_try(RouteTry::new(
-            hop.member.id().to_string(),
-            hop.member.route_id(),
-            upstream_model,
-            done,
-            status,
-            fail,
-        ));
+        trace.push_try(
+            RouteTry::new(
+                hop.member.id().to_string(),
+                hop.member.route_id(),
+                upstream_model,
+                done,
+                status,
+                fail,
+            )
+            .with_tier(hofund_control_proto::sent_tier_label(&self.tier_sent)),
+        );
         trace.sync_open();
     }
 
@@ -2223,6 +2266,8 @@ pub struct Routed {
     /// The completion. A stream has produced its first content event, a raw
     /// body its first chunk, or either ended empty. An earlier failure is not returned here.
     pub completion: Completion,
+    /// Service tier sent to the member that answered.
+    pub service_tier_sent: String,
     continuation: Option<RouteContinuation>,
 }
 
@@ -2364,6 +2409,13 @@ fn apply_wire(request: &mut Request, hop: &Hop, bare: &str) {
     if request.params.max_tokens.is_none() {
         request.params.max_tokens = hop.max_output_tokens;
     }
+    let attempt = hop.member.attempt();
+    hofund_codec::service_tier::apply_outbound(
+        request,
+        &hop.service_tier,
+        &attempt.base_url,
+        attempt.protocol.as_str(),
+    );
 }
 
 fn candidates(found: &[(String, Hop, affinity::Stays, Option<at_once::AtOnceMember>)]) -> String {

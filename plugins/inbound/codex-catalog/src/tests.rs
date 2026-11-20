@@ -205,6 +205,7 @@ fn a_catalog_past_codexs_limit_leaves_out_the_last() {
         .map(|id| ListedModel {
             id: id.clone(),
             context_window: None,
+            service_tiers: Vec::new(),
         })
         .collect();
     let (body, left_out) = catalog(&listed, true);
@@ -318,4 +319,44 @@ fn failure_messages_take_the_most_specific_text() {
     );
     assert_eq!(failure_message(b"  plain  "), "plain");
     assert_eq!(failure_message(b""), "the model list failed");
+}
+
+#[test]
+fn d224_catalog_offers_ultrafast_for_the_family() {
+    let listed = [
+        ListedModel {
+            id: "gpt-6.2-sol".to_owned(),
+            context_window: None,
+            service_tiers: Vec::new(),
+        },
+        ListedModel {
+            id: "pool".to_owned(),
+            context_window: None,
+            service_tiers: vec!["priority".to_owned(), "ultrafast".to_owned()],
+        },
+        ListedModel {
+            id: "glm-4.6".to_owned(),
+            context_window: None,
+            service_tiers: Vec::new(),
+        },
+    ];
+    let (body, _) = catalog(&listed, false);
+    let models: Value = json::from_str(&body).expect("json");
+    let tiers = |slug: &str| {
+        models["models"]
+            .as_array()
+            .expect("models")
+            .iter()
+            .find(|row| row["slug"] == slug)
+            .expect(slug)["service_tiers"]
+            .clone()
+    };
+    let sol = tiers("gpt-6.2-sol");
+    assert_eq!(sol[0]["id"], "priority");
+    assert_eq!(sol[0]["name"], "Fast");
+    assert_eq!(sol[1]["id"], "ultrafast");
+    assert_eq!(sol[1]["name"], "Ultrafast");
+    let pool = tiers("pool");
+    assert_eq!(pool[1]["name"], "Ultrafast");
+    assert!(tiers("glm-4.6").as_array().expect("tiers").is_empty());
 }

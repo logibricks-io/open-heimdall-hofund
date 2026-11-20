@@ -275,6 +275,7 @@ rsa::PrivateKey::fn public_key_pkcs1_base64url (& self) -> Result < String , Plu
 rsa::fn encrypt_oaep_for_test (public_key : & str , plaintext : & str) -> Result < String , PluginError >
 rsa::fn encrypt_pkcs1_for_test (public_key : & str , plaintext : & str) -> Result < String , PluginError >
 serde
+service_tier
 sigv4::AwsSigner derives(Clone)
 sigv4::AwsSigner::fn fixed (mut self , unix_secs : u64 , host : impl Into < String >) -> Self
 sigv4::AwsSigner::fn new (region : impl Into < String > , access_key_id : impl Into < String > , secret_access_key : secrecy :: SecretString ,) -> Self

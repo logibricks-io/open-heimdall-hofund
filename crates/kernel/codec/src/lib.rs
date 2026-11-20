@@ -25,6 +25,7 @@ mod passthrough;
 mod reasoning_tidy;
 mod refusal;
 pub mod responses_empty;
+pub mod service_tier;
 mod session;
 mod sse;
 

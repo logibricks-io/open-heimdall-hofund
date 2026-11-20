@@ -469,11 +469,23 @@ pub(crate) fn prepare_body(
         },
         &mut request,
     );
+    let saved_tier = request
+        .extensions
+        .get("service_tier")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
     let cross_protocol = codec.id() != inbound_protocol;
     if cross_protocol {
         warn_unmapped(&request);
         crate::billing::strip_billing_header(&mut request);
         request.strip_extensions();
+        if matches!(codec.id(), "openai-chat" | "openai-responses")
+            && let Some(tier) = saved_tier.filter(|tier| !tier.is_empty())
+        {
+            request
+                .extensions
+                .insert("service_tier", serde_json::Value::String(tier));
+        }
     }
     let mut body = codec.encode_request(&request).map_err(|error| {
         // The client omitted or sent something this protocol cannot encode.
@@ -483,6 +495,7 @@ pub(crate) fn prepare_body(
     if let Some(prepare) = prepare {
         body = prepare(&body).map_err(|error| ProviderError::decode(error.to_string()))?;
     }
+    body = hofund_codec::service_tier::adjust_encoded_body(&upstream.base_url, codec.id(), &body);
     Ok(hofund_quirks::apply_encoded_with_state(
         hofund_quirks::EncodedContext {
             base_url: &upstream.base_url,

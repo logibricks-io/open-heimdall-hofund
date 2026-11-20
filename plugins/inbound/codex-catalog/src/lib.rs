@@ -8,9 +8,10 @@
 //! `{"models": [...]}`, one entry per model `/v1/models` lists.
 //!
 //! None of it opens a socket: the list is the gateway's own, read in
-//! process. The kernel knows no window, effort levels, image support or
-//! service tiers per model yet, so each entry takes text only, offers no
-//! effort level and no tier, and leaves the window to Codex. Codex before
+//! process. Effort levels and images still come from the model catalog when
+//! that catalog has them. Service tiers are copied from `/v1/models`, and a
+//! GPT Sol, Astra, or Terra model is offered Fast and Ultrafast when the list
+//! omitted them. Codex before
 //! 0.166.0 reads at most [`MOST`] bytes of a catalog and loads none of it
 //! past that, so entries that would go past are left out, the last first, and
 //! the `x-hofund-left-out` header says how many. From 0.166.0 on, Codex
@@ -65,6 +66,7 @@ pub const DEFAULT_AUTO_COMPACT_TOKEN_LIMIT: u64 = 272_000;
 pub(crate) struct ListedModel {
     pub id: String,
     pub context_window: Option<u64>,
+    pub service_tiers: Vec<String>,
 }
 
 const CATALOG_PATH: &str = "/v1/codex/models";
@@ -249,10 +251,11 @@ fn json_response(status: u16, body: String) -> HttpResponse {
 /// when `cap` is true.
 pub(crate) fn catalog(models: &[ListedModel], cap: bool) -> (String, usize) {
     let lookup = official::Lookup::with_codex_home();
-    let entries = models
-        .iter()
-        .enumerate()
-        .map(|(rank, model)| entry(&model.id, rank + 1, &lookup, model.context_window));
+    let entries = models.iter().enumerate().map(|(rank, model)| {
+        let mut value = entry(&model.id, rank + 1, &lookup, model.context_window);
+        attach_service_tiers(&mut value, &model.id, &model.service_tiers);
+        value
+    });
     capped_models(entries, cap)
 }
 
@@ -316,6 +319,29 @@ pub(crate) fn entry(
     value
 }
 
+/// Writes Fast and Ultrafast onto `entry` when the list or the model family offers them.
+fn attach_service_tiers(entry: &mut Value, id: &str, listed: &[String]) {
+    let mut ids = listed.to_vec();
+    if hofund_plugin_sdk::service_tier::offers_ultra_family(id) {
+        if !ids.iter().any(|tier| tier == "priority") {
+            ids.insert(0, "priority".to_owned());
+        }
+        if !ids.iter().any(|tier| tier == "ultrafast") {
+            ids.push("ultrafast".to_owned());
+        }
+    }
+    if ids.is_empty() {
+        return;
+    }
+    let borrowed: Vec<&str> = ids.iter().map(String::as_str).collect();
+    if let Some(object) = entry.as_object_mut() {
+        object.insert(
+            "service_tiers".to_owned(),
+            hofund_plugin_sdk::service_tier::named_tiers(&borrowed),
+        );
+    }
+}
+
 fn apply_auto_compact(entry: &mut Value, known_window: Option<u64>) {
     let object = entry.as_object_mut().expect("catalog entry object");
     if object.contains_key("context_window") {
@@ -337,6 +363,22 @@ fn apply_auto_compact(entry: &mut Value, known_window: Option<u64>) {
         "auto_compact_token_limit".to_owned(),
         Value::Number(DEFAULT_AUTO_COMPACT_TOKEN_LIMIT.into()),
     );
+}
+
+fn tier_ids(model: &Value) -> Vec<String> {
+    model
+        .get("service_tiers")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| {
+                    row.as_str()
+                        .map(str::to_owned)
+                        .or_else(|| row.get("id").and_then(Value::as_str).map(str::to_owned))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The ids the gateway's `/v1/models` lists, in its order.
@@ -364,6 +406,7 @@ async fn listed_models(kernel: &dyn Kernel) -> Result<Vec<ListedModel>, PluginEr
             Some(ListedModel {
                 id: id.to_owned(),
                 context_window,
+                service_tiers: tier_ids(model),
             })
         })
         .collect())

@@ -79,6 +79,7 @@ fn hop(
         fallback: false,
         effort: String::new(),
         cold_after: hofund_router::affinity::CACHE_COLD,
+        service_tier: String::new(),
         units: Vec::new(),
     }
 }
@@ -286,6 +287,7 @@ async fn a_member_without_forward_is_passed_over_as_unsupported() {
             fallback: false,
             effort: String::new(),
             cold_after: hofund_router::affinity::CACHE_COLD,
+            service_tier: String::new(),
             units: Vec::new(),
         }],
     );

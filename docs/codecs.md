@@ -16,6 +16,13 @@ Implemented:
 - `GenerativeLanguage` (`generative-language`)
 - `Converse` (`bedrock-converse`)
 
+Chat Completions and Responses read a top-level string `service_tier`. The word
+`fast` is stored and sent as `priority`. Other values, including `Fast`, are
+kept. On `api.openai.com`, Chat Completions never send `ultrafast` (they send
+`priority`), and Responses send `ultrafast` only for `gpt-6.2-astra`,
+`gpt-6.2-sol`, `gpt-6-astra`, and `gpt-6.1-sol`, including dated snapshots of
+those ids. Other hosts keep the tier they were given.
+
 There is no HTTP server here. The codec crate does not open sockets, and its
 tests do not use the network. `GenerativeLanguage` is both an inbound client
 protocol and the body an upstream adapter posts. The adapter removes `model`

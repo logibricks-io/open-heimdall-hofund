@@ -1,0 +1,432 @@
+//! Service-tier words shared by Chat Completions, Responses, and the catalog.
+//!
+//! The inbound word `fast` is the same tier as `priority`. Ultrafast is a
+//! family of GPT Sol, Astra, and Terra models. The public OpenAI API accepts
+//! `ultrafast` only on Responses, and only for a short list of those models.
+
+use hofund_ir::{Extensions, Request};
+use serde_json::{Map, Value};
+
+/// Service tiers a Codex catalog names when a model offers Ultrafast.
+pub const ULTRA_OFFER: [&str; 2] = ["priority", "ultrafast"];
+
+/// Rewrites a top-level string `service_tier` of `fast` to `priority`.
+///
+/// Any other value, including `Fast`, a non-string, or a nested field, is left
+/// as it arrived.
+pub fn rewrite_fast_word(object: &mut Map<String, Value>) {
+    if object.get("service_tier").and_then(Value::as_str) == Some("fast") {
+        object.insert(
+            "service_tier".to_owned(),
+            Value::String("priority".to_owned()),
+        );
+    }
+}
+
+/// The tier a group member is configured to send.
+///
+/// Ultrafast wins when both flags are set. An unconfigured member leaves the
+/// client's tier in place.
+#[must_use]
+pub fn configured_tier(fast: bool, ultra: bool) -> String {
+    if ultra {
+        "ultrafast".to_owned()
+    } else if fast {
+        "priority".to_owned()
+    } else {
+        String::new()
+    }
+}
+
+/// Whether `model` is a versioned GPT Sol, Astra, or Terra model.
+///
+/// The check is the family, not a fixed id list. A provider prefix, a leading
+/// bracket tag, a `:suffix`, and a dated snapshot suffix are ignored. Mini,
+/// fast, and pro variants are not the family.
+#[must_use]
+pub fn offers_ultra_family(model: &str) -> bool {
+    family_tail(&comparable_model(model))
+}
+
+/// Whether Responses on `api.openai.com` accepts `ultrafast` for `model`.
+///
+/// The public API accepts that word for four model ids and their dated
+/// snapshots. Other Sol, Astra, and Terra models are still the Ultra family,
+/// but that host rejects `ultrafast` for them.
+#[must_use]
+pub fn openai_responses_ultrafast(model: &str) -> bool {
+    matches!(
+        comparable_model(model).as_str(),
+        "gpt-6.2-astra" | "gpt-6.2-sol" | "gpt-6-astra" | "gpt-6.1-sol"
+    )
+}
+
+/// `true` when `base_url` is the public OpenAI API host.
+#[must_use]
+pub fn is_openai_api_host(base_url: &str) -> bool {
+    host_of(base_url).eq_ignore_ascii_case("api.openai.com")
+}
+
+/// The replacement tier when `api.openai.com` must not be sent `ultrafast`.
+///
+/// Chat Completions never carries `ultrafast`. Responses carries it only for
+/// [`openai_responses_ultrafast`]. Other hosts are left alone.
+#[must_use]
+pub fn downgrade_openai_ultrafast(
+    base_url: &str,
+    protocol: &str,
+    model: &str,
+    tier: &str,
+) -> Option<&'static str> {
+    if tier != "ultrafast" || !is_openai_api_host(base_url) {
+        return None;
+    }
+    if protocol == "openai-chat" {
+        return Some("priority");
+    }
+    if protocol == "openai-responses" && !openai_responses_ultrafast(model) {
+        return Some("priority");
+    }
+    None
+}
+
+/// Applies a member's configured tier, then the public API downgrade.
+///
+/// An empty `member_tier` keeps the tier already on the request.
+pub fn apply_outbound(request: &mut Request, member_tier: &str, base_url: &str, protocol: &str) {
+    if !member_tier.is_empty() {
+        request
+            .extensions
+            .insert("service_tier", Value::String(member_tier.to_owned()));
+    }
+    let current = extension_tier(&request.extensions);
+    if let Some(next) = downgrade_openai_ultrafast(base_url, protocol, &request.model, &current) {
+        request
+            .extensions
+            .insert("service_tier", Value::String(next.to_owned()));
+    }
+}
+
+/// The `service_tier` string on `extensions`, or empty.
+#[must_use]
+pub fn extension_tier(extensions: &Extensions) -> String {
+    extensions
+        .get("service_tier")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned()
+}
+
+/// Rewrites `ultrafast` inside an encoded JSON object when the host requires it.
+///
+/// A body that is not a JSON object is returned unchanged.
+#[must_use]
+pub fn adjust_encoded_body(base_url: &str, protocol: &str, body: &[u8]) -> Vec<u8> {
+    let Ok(Value::Object(mut object)) = serde_json::from_slice::<Value>(body) else {
+        return body.to_vec();
+    };
+    let model = object
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let tier = object
+        .get("service_tier")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let Some(next) = downgrade_openai_ultrafast(base_url, protocol, &model, &tier) else {
+        return body.to_vec();
+    };
+    object.insert("service_tier".to_owned(), Value::String(next.to_owned()));
+    serde_json::to_vec(&object).unwrap_or_else(|_| body.to_vec())
+}
+
+/// Catalog objects for `ids`, using the names Codex's picker shows.
+#[must_use]
+pub fn named_tiers(ids: &[&str]) -> Value {
+    Value::Array(ids.iter().copied().map(named_tier).collect())
+}
+
+fn named_tier(id: &str) -> Value {
+    let name = match id {
+        "priority" => "Fast",
+        "ultrafast" => "Ultrafast",
+        other => other,
+    };
+    serde_json::json!({"id": id, "name": name})
+}
+
+/// Model id used for family and public-API checks.
+#[must_use]
+pub fn comparable_model(model: &str) -> String {
+    let mut id = model.trim().to_ascii_lowercase();
+    if let Some((_, tail)) = id.rsplit_once('/') {
+        id = tail.to_owned();
+    }
+    while let Some(rest) = id.strip_prefix('[') {
+        let Some(end) = rest.find(']') else {
+            break;
+        };
+        id = rest[end + 1..].to_owned();
+    }
+    if let Some((base, _)) = id.split_once(':') {
+        id = base.to_owned();
+    }
+    strip_dated(&id).to_owned()
+}
+
+fn family_tail(id: &str) -> bool {
+    let Some(rest) = id.strip_prefix("gpt-") else {
+        return false;
+    };
+    let Some((version, family)) = rest.rsplit_once('-') else {
+        return false;
+    };
+    if !matches!(family, "sol" | "astra" | "terra") || version.is_empty() {
+        return false;
+    }
+    version
+        .split(['.', '-'])
+        .all(|part| !part.is_empty() && part.chars().all(|character| character.is_ascii_digit()))
+}
+
+fn strip_dated(id: &str) -> &str {
+    let bytes = id.as_bytes();
+    if bytes.len() >= 12 && bytes[bytes.len() - 11] == b'-' {
+        let tail = &id[bytes.len() - 10..];
+        if calendar_day(tail) {
+            return &id[..bytes.len() - 11];
+        }
+    }
+    if bytes.len() >= 9 && bytes[bytes.len() - 9] == b'-' {
+        let tail = &id[bytes.len() - 8..];
+        if tail.len() == 8 && tail.chars().all(|character| character.is_ascii_digit()) {
+            return &id[..bytes.len() - 9];
+        }
+    }
+    id
+}
+
+fn calendar_day(tail: &str) -> bool {
+    let bytes = tail.as_bytes();
+    bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && tail[..4]
+            .chars()
+            .all(|character| character.is_ascii_digit())
+        && tail[5..7]
+            .chars()
+            .all(|character| character.is_ascii_digit())
+        && tail[8..10]
+            .chars()
+            .all(|character| character.is_ascii_digit())
+}
+
+fn host_of(base_url: &str) -> &str {
+    let rest = base_url.split("://").nth(1).unwrap_or(base_url);
+    let rest = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let rest = rest.rsplit('@').next().unwrap_or(rest);
+    rest.split(':').next().unwrap_or(rest)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        adjust_encoded_body, apply_outbound, comparable_model, configured_tier,
+        downgrade_openai_ultrafast, offers_ultra_family, openai_responses_ultrafast,
+        rewrite_fast_word,
+    };
+    use hofund_ir::Request;
+    use serde_json::{Map, Value};
+
+    #[test]
+    fn d224_fast_word_becomes_priority() {
+        let mut object = Map::new();
+        object.insert("service_tier".to_owned(), Value::String("fast".to_owned()));
+        rewrite_fast_word(&mut object);
+        assert_eq!(object["service_tier"], Value::String("priority".to_owned()));
+
+        for kept in ["priority", "ultrafast", "flex", "Fast", "auto"] {
+            let mut object = Map::new();
+            object.insert("service_tier".to_owned(), Value::String(kept.to_owned()));
+            rewrite_fast_word(&mut object);
+            assert_eq!(
+                object["service_tier"],
+                Value::String(kept.to_owned()),
+                "{kept}"
+            );
+        }
+
+        let mut nested = Map::new();
+        nested.insert(
+            "metadata".to_owned(),
+            serde_json::json!({"service_tier": "fast"}),
+        );
+        rewrite_fast_word(&mut nested);
+        assert_eq!(nested["metadata"]["service_tier"], "fast");
+
+        let mut number = Map::new();
+        number.insert("service_tier".to_owned(), Value::from(1));
+        rewrite_fast_word(&mut number);
+        assert_eq!(number["service_tier"], Value::from(1));
+    }
+
+    #[test]
+    fn d224_ultra_family_matches_any_gpt_version() {
+        for model in [
+            "gpt-6.1-sol",
+            "openai/gpt-6.1-sol",
+            "GPT-6.1-Sol",
+            "gpt-6.1-sol-2026-09-14",
+            "gpt-6-astra",
+            "gpt-6-sol",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-6.1-terra",
+            "relay/gpt-6.2-sol",
+            "gpt-6.2-astra",
+            "gpt-6.3-terra",
+            "gpt-6.2-sol:official",
+            "[A]gpt-6.2-sol",
+            "gpt-6-1-sol",
+        ] {
+            assert!(offers_ultra_family(model), "{model}");
+        }
+        for model in [
+            "gpt-6-luna",
+            "gpt-6.2-astra-mini",
+            "gpt-6-sol-fast",
+            "gpt-6-sol-pro",
+            "gpt-5.5",
+            "claude-opus-4",
+            "",
+            "gpt-sol",
+        ] {
+            assert!(!offers_ultra_family(model), "{model}");
+        }
+    }
+
+    #[test]
+    fn d224_openai_responses_ultrafast_is_a_short_list() {
+        for model in [
+            "gpt-6.2-astra",
+            "gpt-6.2-sol",
+            "gpt-6-astra",
+            "gpt-6.1-sol",
+            "openai/gpt-6.2-sol",
+            "GPT-6-Astra-2026-09-14",
+            "gpt-6.1-sol-20261001",
+        ] {
+            assert!(openai_responses_ultrafast(model), "{model}");
+        }
+        for model in [
+            "gpt-6-sol",
+            "gpt-6.1-terra",
+            "gpt-6.2-astra-mini",
+            "gpt-6.2",
+            "claude-opus-5-5",
+            "gpt-5.6-sol",
+            "gpt-6.3-terra",
+        ] {
+            assert!(!openai_responses_ultrafast(model), "{model}");
+        }
+        assert_eq!(
+            comparable_model("openai/GPT-6.2-Sol:official"),
+            "gpt-6.2-sol"
+        );
+    }
+
+    #[test]
+    fn d224_chat_on_the_public_api_never_sends_ultrafast() {
+        assert_eq!(
+            downgrade_openai_ultrafast(
+                "https://api.openai.com/v1",
+                "openai-chat",
+                "gpt-6.2-sol",
+                "ultrafast"
+            ),
+            Some("priority")
+        );
+        assert_eq!(
+            downgrade_openai_ultrafast(
+                "https://api.openai.com/v1",
+                "openai-responses",
+                "gpt-6.2-sol",
+                "ultrafast"
+            ),
+            None
+        );
+        assert_eq!(
+            downgrade_openai_ultrafast(
+                "https://api.openai.com/v1",
+                "openai-responses",
+                "gpt-6-sol",
+                "ultrafast"
+            ),
+            Some("priority")
+        );
+        assert_eq!(
+            downgrade_openai_ultrafast(
+                "https://relay.example/v1",
+                "openai-chat",
+                "gpt-6.2-sol",
+                "ultrafast"
+            ),
+            None
+        );
+        let body = adjust_encoded_body(
+            "https://api.openai.com/v1",
+            "openai-chat",
+            br#"{"model":"gpt-6.2-sol","service_tier":"ultrafast"}"#,
+        );
+        let value: Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(value["service_tier"], "priority");
+        let kept = adjust_encoded_body(
+            "https://api.openai.com/v1",
+            "openai-responses",
+            br#"{"model":"gpt-6.1-sol","service_tier":"ultrafast"}"#,
+        );
+        let value: Value = serde_json::from_slice(&kept).expect("json");
+        assert_eq!(value["service_tier"], "ultrafast");
+    }
+
+    #[test]
+    fn d224_member_tier_replaces_the_client_tier_before_the_host_rule() {
+        let mut request = Request::new("gpt-6-sol");
+        request
+            .extensions
+            .insert("service_tier", Value::String("priority".to_owned()));
+        apply_outbound(
+            &mut request,
+            &configured_tier(false, true),
+            "https://api.openai.com/v1",
+            "openai-responses",
+        );
+        assert_eq!(
+            request
+                .extensions
+                .get("service_tier")
+                .and_then(Value::as_str),
+            Some("priority")
+        );
+
+        let mut listed = Request::new("gpt-6.2-sol");
+        apply_outbound(
+            &mut listed,
+            "ultrafast",
+            "https://api.openai.com/v1",
+            "openai-responses",
+        );
+        assert_eq!(
+            listed
+                .extensions
+                .get("service_tier")
+                .and_then(Value::as_str),
+            Some("ultrafast")
+        );
+        assert_eq!(configured_tier(true, false), "priority");
+        assert_eq!(configured_tier(false, false), "");
+    }
+}

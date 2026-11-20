@@ -125,6 +125,9 @@ pub struct RouteTry {
     /// Why the attempt failed, when it did.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub fail: String,
+    /// Shown tier for this attempt. `Ultrafast` or `fast`, empty when unset.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tier: String,
 }
 
 impl RouteTry {
@@ -145,7 +148,15 @@ impl RouteTry {
             done,
             status,
             fail: fail.into(),
+            tier: String::new(),
         }
+    }
+
+    /// Sets the shown tier label for this attempt.
+    #[must_use]
+    pub fn with_tier(mut self, tier: impl Into<String>) -> Self {
+        self.tier = tier.into();
+        self
     }
 }
 
@@ -213,6 +224,18 @@ pub struct RoutingDecision {
 
 fn default_routing() -> String {
     "smart".to_owned()
+}
+
+/// Label shown for a tier that was sent.
+///
+/// Ultrafast stays `Ultrafast`. Fast and `priority` are shown as `fast`.
+#[must_use]
+pub fn sent_tier_label(tier: &str) -> &'static str {
+    match tier {
+        "ultrafast" => "Ultrafast",
+        "priority" | "fast" => "fast",
+        _ => "",
+    }
 }
 
 const fn is_false(value: &bool) -> bool {

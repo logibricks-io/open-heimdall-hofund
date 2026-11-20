@@ -1715,9 +1715,17 @@ async fn models(State(app): State<Arc<Inner>>, request: Request) -> Response {
         &app.model_catalog,
     );
     let models = Gateway::filtered_models(&app, request.headers(), &identity, scoped);
+    let router = app.snapshot.load();
     let data: Vec<_> = models
         .into_iter()
-        .map(|id| model_list_entry(&app.model_catalog, &id))
+        .map(|id| {
+            let mut value = model_list_entry(&app.model_catalog, &id);
+            let tiers = router.service_tier_ids(&id);
+            if !tiers.is_empty() {
+                value["service_tiers"] = hofund_codec::service_tier::named_tiers(&tiers);
+            }
+            value
+        })
         .collect();
     json_response(
         StatusCode::OK,
@@ -2192,6 +2200,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
                 &routed.upstream_id,
                 &routed.upstream_model,
                 &routed.provider_key_id,
+                &routed.service_tier_sent,
                 routed.completion,
                 continuation,
                 routed.affinity_reason,
@@ -2340,6 +2349,7 @@ fn held_response(
                                 &routed.upstream_id,
                                 &routed.upstream_model,
                                 &routed.provider_key_id,
+                                &routed.service_tier_sent,
                                 routed.completion,
                                 continuation,
                                 routed.affinity_reason,
@@ -2810,6 +2820,7 @@ async fn success(
     upstream: &str,
     upstream_model: &str,
     provider_key_id: &str,
+    service_tier_sent: &str,
     completion: Completion,
     continuation: Option<hofund_router::RouteContinuation>,
     affinity_reason: Option<String>,
@@ -2830,11 +2841,15 @@ async fn success(
         client_agent,
     )
     .with_ledger(ledger);
+    if !service_tier_sent.is_empty() {
+        meta.tier_sent = service_tier_sent.to_owned();
+    }
     meta.provider_key_id = provider_key_id.to_owned();
     let member = Some(upstream.to_owned());
     let capture = prev_response::ReplyCapture::new(capture);
     let response = match completion {
         Completion::Unary(response) => {
+            note_served_tier(&response.extensions, &mut meta);
             if let Some(usage) = response.usage.as_ref() {
                 limits::observe_usage(
                     &mut meta,
@@ -3258,6 +3273,9 @@ struct UsageMeta {
     details: hofund_usage::UsageDetails,
     saw_reasoning: bool,
     stream_timing: stream_timing::StreamTiming,
+    tier_asked: String,
+    tier_sent: String,
+    tier_served: String,
 }
 
 impl UsageMeta {
@@ -3288,6 +3306,9 @@ impl UsageMeta {
             details: hofund_usage::UsageDetails::default(),
             saw_reasoning: false,
             stream_timing: stream_timing::StreamTiming::new(started),
+            tier_asked: hofund_codec::service_tier::extension_tier(&request.extensions),
+            tier_sent: hofund_codec::service_tier::extension_tier(&request.extensions),
+            tier_served: String::new(),
         }
     }
 
@@ -3684,7 +3705,17 @@ fn frame_closed(bytes: &[u8]) -> bool {
     bytes.ends_with(b"\n\n") || bytes.ends_with(b"\r\n\r\n") || bytes.ends_with(b"\r\r")
 }
 
+fn note_served_tier(extensions: &hofund_ir::Extensions, meta: &mut UsageMeta) {
+    let tier = hofund_codec::service_tier::extension_tier(extensions);
+    if hofund_usage::meaningful_served_tier(&tier) {
+        meta.tier_served = tier;
+    }
+}
+
 fn note_usage(event: &StreamEvent, record: &mut RecordOnEnd) {
+    if let StreamEvent::MessageStart(start) = event {
+        note_served_tier(&start.extensions, &mut record.meta);
+    }
     let saw_reasoning = matches!(event, StreamEvent::ThinkingDelta(_))
         || matches!(
             event,
@@ -3821,6 +3852,9 @@ fn write_usage(
         endpoint: meta.endpoint.clone(),
         kind: meta.kind.clone(),
         served_model: meta.served_model.clone(),
+        tier_asked: meta.tier_asked.clone(),
+        tier_sent: meta.tier_sent.clone(),
+        tier_served: meta.tier_served.clone(),
         first_text_ms: details.first_text_ms,
         first_reasoning_ms: details.first_reasoning_ms,
         flow_ms: details.flow_ms,
@@ -3836,13 +3870,21 @@ fn write_usage(
         }
         let served = (!meta.served_model.is_empty()).then_some(meta.served_model.as_str());
         let list = pricer.resolve(&meta.upstream, &meta.wire_model, served, provider_free)?;
-        let token_price = hofund_usage::TokenPrice {
+        let mut token_price = hofund_usage::TokenPrice {
             input: list.input,
             output: list.output,
             cache_read: list.cache_read,
             cache_write: list.cache_write,
             cache_write_1h: list.cache_write_1h,
         };
+        let custom = pricer.uses_custom_price(&meta.upstream, &meta.wire_model)
+            || served.is_some_and(|name| pricer.uses_custom_price(&meta.upstream, name));
+        if !custom && !provider_free {
+            let priced_model = served.unwrap_or(meta.wire_model.as_str());
+            let billed = hofund_usage::billed_tier(&meta.tier_served, &meta.tier_sent);
+            token_price =
+                hofund_usage::price_at_tier(token_price, priced_model, billed, row.created_unix);
+        }
         let cost = token_price.cost_for_row(input_tokens, output_tokens, details);
         Some(hofund_usage::RowPricing {
             priced: true,
