@@ -158,6 +158,7 @@ pub(super) async fn path_guard(
     if wants_socket(request.method(), request.headers()) {
         let path = request.uri().path();
         let admitted = is_responses_path(path)
+            || crate::realtime::is_realtime_path(path)
             || app
                 .surfaces
                 .iter()
@@ -216,7 +217,7 @@ pub(super) async fn get(State(app): State<Arc<Inner>>, request: Request<Body>) -
 /// A browser page from another site may not open a socket: when the upgrade
 /// carries an `Origin`, its host (with port) must be the request's `Host`.
 /// A sandboxed frame sends `Origin: null`, which has no host and is refused.
-fn origin_matches_host(headers: &HeaderMap) -> bool {
+pub(super) fn origin_matches_host(headers: &HeaderMap) -> bool {
     let Some(origin) = headers.get(header::ORIGIN) else {
         return true;
     };

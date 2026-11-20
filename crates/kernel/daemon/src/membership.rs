@@ -60,6 +60,11 @@ pub(crate) struct BuiltProvider {
     pub http_profile: hofund_plugin_host::HttpProfile,
     /// Pooled HTTP limits for this provider's runtime host.
     pub http_limits: hofund_plugin_host::HttpLimits,
+    /// Absolute realtime endpoint before the model query. Empty when unset.
+    pub realtime_url: String,
+    /// `Bearer` value for the realtime dial. Empty when there is no key.
+    /// Never log this.
+    pub realtime_authorization: String,
 }
 
 pub(crate) struct Table {
@@ -112,6 +117,8 @@ struct LiveMember {
     kernel: bool,
     http_profile: hofund_plugin_host::HttpProfile,
     http_limits: hofund_plugin_host::HttpLimits,
+    realtime_url: String,
+    realtime_authorization: String,
     failed: Arc<AtomicU64>,
     stack: Cooldown<Guard<ProviderCall>>,
 }
@@ -672,6 +679,8 @@ impl LiveMember {
             kernel: built.kernel,
             http_profile: built.http_profile.clone(),
             http_limits: built.http_limits,
+            realtime_url: built.realtime_url.clone(),
+            realtime_authorization: built.realtime_authorization.clone(),
             failed,
             stack,
         }
@@ -752,6 +761,22 @@ impl Member for LiveMember {
             .iter()
             .find(|listed| listed.id().eq_ignore_ascii_case(model))
             .map(hofund_plugin_api::ModelSpec::costs_nothing)
+    }
+
+    fn realtime(&self, model: &str) -> Option<hofund_router::RealtimeDial> {
+        let url = hofund_provider::realtime_model_url(&self.realtime_url, model)?;
+        let mut headers = Vec::new();
+        if !self.realtime_authorization.is_empty() {
+            headers.push((
+                "authorization".to_owned(),
+                self.realtime_authorization.clone(),
+            ));
+        }
+        Some(hofund_router::RealtimeDial {
+            url,
+            headers,
+            proxy: self.http_profile.proxy().map(str::to_owned),
+        })
     }
 
     fn attempt(&self) -> MemberAttempt {
@@ -1498,6 +1523,8 @@ mod tests {
                 key_id: String::new(),
                 http_profile: hofund_plugin_host::HttpProfile::direct(),
                 http_limits: hofund_plugin_host::HttpLimits::default(),
+                realtime_url: String::new(),
+                realtime_authorization: String::new(),
             },
         );
         let mut routes = BTreeMap::new();
@@ -1606,6 +1633,8 @@ mod tests {
                 key_id: String::new(),
                 http_profile: hofund_plugin_host::HttpProfile::direct(),
                 http_limits: hofund_plugin_host::HttpLimits::default(),
+                realtime_url: String::new(),
+                realtime_authorization: String::new(),
             },
         );
         let mut routes = BTreeMap::new();
@@ -1705,6 +1734,8 @@ mod tests {
                 key_id: String::new(),
                 http_profile: hofund_plugin_host::HttpProfile::direct(),
                 http_limits: hofund_plugin_host::HttpLimits::default(),
+                realtime_url: String::new(),
+                realtime_authorization: String::new(),
             },
         );
         let mut routes = BTreeMap::new();
@@ -1803,6 +1834,8 @@ mod tests {
                 key_id: String::new(),
                 http_profile: hofund_plugin_host::HttpProfile::direct(),
                 http_limits: hofund_plugin_host::HttpLimits::default(),
+                realtime_url: String::new(),
+                realtime_authorization: String::new(),
             },
         );
         let mut routes = BTreeMap::new();
@@ -1871,6 +1904,8 @@ mod tests {
                     key_id: String::new(),
                     http_profile: hofund_plugin_host::HttpProfile::direct(),
                     http_limits: hofund_plugin_host::HttpLimits::default(),
+                    realtime_url: String::new(),
+                    realtime_authorization: String::new(),
                 },
             );
         }
@@ -1942,6 +1977,8 @@ mod tests {
             key_id: String::new(),
             http_profile: hofund_plugin_host::HttpProfile::direct(),
             http_limits: hofund_plugin_host::HttpLimits::default(),
+            realtime_url: String::new(),
+            realtime_authorization: String::new(),
         }
     }
 
