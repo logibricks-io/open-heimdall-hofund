@@ -83,17 +83,19 @@ pub(crate) fn body(body: &mut Map<String, Value>, codex: Option<&str>) -> Vec<(S
         body.insert("prompt_cache_key".to_owned(), Value::String(key));
     }
     // The client's instructions go first as a developer message and Codex's
-    // in their place, unless they are Codex's. Without Codex's, the
-    // client's stay where they are. A Lite turn already carries its prompt
-    // in the input and is left without instructions. GPT-6.2 and later read
-    // top-level instructions after the input, so both texts go first in the
-    // input, Codex's ahead of the client's, and the field is omitted.
+    // in their place, unless they are Codex's. A Lite turn already carries
+    // its prompt in the input and is left without instructions. GPT-6.2 and
+    // later read top-level instructions after the input, so both texts go
+    // first in the input, Codex's ahead of the client's, and the field is
+    // omitted. When Codex's instructions are unknown or blank on those
+    // models, the client's text still moves to the front of the input.
     let lite = own.trim().is_empty() && codex_lite(body, &input);
     let after_input = body
         .get("model")
         .and_then(Value::as_str)
         .is_some_and(hofund_plugin_sdk::instructions_after_input);
-    if let Some(codex) = codex.filter(|_| !lite) {
+    let known = codex.filter(|text| !text.trim().is_empty());
+    if let Some(codex) = known.filter(|_| !lite) {
         let mut instructions = codex.to_owned();
         if !own.trim().is_empty() {
             if first_line(&own) == first_line(codex) {
@@ -108,6 +110,9 @@ pub(crate) fn body(body: &mut Map<String, Value>, codex: Option<&str>) -> Vec<(S
         } else if !after_input {
             body.insert("instructions".to_owned(), Value::String(instructions));
         }
+    } else if after_input && !lite && !own.trim().is_empty() {
+        input.insert(0, message("developer", &own));
+        body.remove("instructions");
     }
     body.insert("input".to_owned(), Value::Array(input));
     body.insert("store".to_owned(), Value::Bool(false));

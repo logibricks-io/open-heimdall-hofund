@@ -1173,8 +1173,9 @@ fn leading_digits(text: &str) -> (&str, &str) {
     text.split_at(end)
 }
 
-/// Decimal `digits` as an integer. A value that does not fit is zero, the
-/// same as ignoring a parse error, which never qualifies as GPT-6.2 or later.
+/// Decimal `digits` as an integer. A value that does not fit is zero, so an
+/// absurd id does not qualify as GPT-6.2 or later. The reference parser
+/// clamps that overflow to the maximum integer, which would qualify.
 fn parse_version(digits: &str) -> i64 {
     digits.parse().unwrap_or(0)
 }

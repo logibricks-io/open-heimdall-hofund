@@ -1325,6 +1325,96 @@ fn d223_lite_omits_instructions_and_summary() {
 }
 
 #[test]
+fn d223_lite_keeps_a_client_summary() {
+    let (out, _) = shaped(
+        json!({
+            "model": "gpt-6-astra",
+            "reasoning": {"effort": "high", "summary": "detailed", "context": "all_turns"},
+            "input": "hi"
+        }),
+        Some(CODEX_PROMPT),
+    );
+    assert!(out.get("instructions").is_none(), "{out}");
+    assert_eq!(out["reasoning"]["summary"], json!("detailed"));
+}
+
+#[test]
+fn d223_lite_whitespace_instructions_stay_bare() {
+    let (out, _) = shaped(
+        json!({
+            "model": "gpt-6.2-sol",
+            "instructions": " \n",
+            "reasoning": {"effort": "high"},
+            "input": [
+                {"type": "additional_tools", "tools": []},
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}
+            ]
+        }),
+        Some(CODEX_PROMPT),
+    );
+    assert_eq!(out["instructions"], json!(" \n"));
+    assert!(out["reasoning"].get("summary").is_none(), "{out}");
+    assert_eq!(out["input"].as_array().map(Vec::len), Some(2));
+    assert_eq!(out["input"][0]["type"], json!("additional_tools"));
+}
+
+#[test]
+fn d232_unknown_or_blank_codex_prompt_moves_client_instructions() {
+    let user = json!([{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}]);
+    for codex in [None, Some(""), Some("  ")] {
+        let (out, _) = shaped(
+            json!({"model": "gpt-6.2-sol", "instructions": "You are Pi.", "input": user.clone()}),
+            codex,
+        );
+        assert!(out.get("instructions").is_none(), "{codex:?}: {out}");
+        assert_eq!(out["input"].as_array().map(Vec::len), Some(2), "{out}");
+        assert_eq!(developer_text(&out["input"][0]), "You are Pi.");
+        assert_eq!(out["input"][1]["role"], json!("user"));
+    }
+    let (out, _) = shaped(
+        json!({"model": "gpt-6.1", "instructions": "You are Pi.", "input": user}),
+        None,
+    );
+    assert_eq!(out["instructions"], json!("You are Pi."));
+    assert_eq!(out["input"].as_array().map(Vec::len), Some(1));
+}
+
+#[test]
+fn d232_translated_then_codex_body_orders_developer_messages() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    let codex = "You are Codex, based on GPT-6.2.\nMore.";
+    seed_prompts(&host, &[("gpt-6.2-sol", codex)]);
+    let mut request = ProbeQuery::new(ProtocolId::OPENAI_CHAT, "gpt-6.2-sol")
+        .expect("query")
+        .minimal_request();
+    request.stream = true;
+    request.messages = vec![
+        Message {
+            role: Role::System,
+            content: vec![ContentPart::text("You are Pi.")],
+            extensions: Extensions::new(),
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentPart::text("hi")],
+            extensions: Extensions::new(),
+        },
+    ];
+    host.http()
+        .enqueue(b"event: response.completed\ndata: {}\n\n".to_vec());
+    block_on(upstream_for(&host, &id).execute(request, ProtocolId::OPENAI_CHAT)).expect("execute");
+    let body: Value = json::from_slice(host.http().calls()[0].body()).expect("recorded JSON");
+    assert!(body.get("instructions").is_none(), "{body}");
+    let input = body["input"].as_array().expect("input");
+    assert_eq!(input.len(), 3, "{body}");
+    assert_eq!(developer_text(&input[0]), codex);
+    assert_eq!(developer_text(&input[1]), "You are Pi.");
+    assert_eq!(input[2]["role"], json!("user"));
+}
+
+#[test]
 fn long_call_id_hashed_to_64() {
     let fits = "c".repeat(64);
     assert_eq!(shape::bound_call_id(&fits), fits);
