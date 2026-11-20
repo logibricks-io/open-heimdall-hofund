@@ -720,4 +720,128 @@ mod tests {
             .expect("web_search");
         assert!(search.get("strict").is_none());
     }
+
+    /// Chat and Messages declare `strict` only in the tool extension bag.
+    /// `encode_outbound` is the body [`hofund_plugin_sdk::wire`] prepares
+    /// before a subscription rewrite, including the cross-protocol strip.
+    /// The encoder must still omit a flag the client left out. After
+    /// [`crate::shape::body`], a compiling `strict: true` stays true and
+    /// each `oneOf` is `anyOf`; a refused schema is unchanged with `strict`
+    /// false; an omitted flag becomes false with the schema unchanged.
+    #[test]
+    fn d242_cross_protocol_strict_reaches_shape() {
+        let compiles = closed(
+            r#"{"q":{"oneOf":[{"type":"string"},{"type":"number"}]}}"#,
+            r#"["q"]"#,
+        );
+        let refused = closed(r#"{"q":{"allOf":[{"type":"string"}]}}"#, r#"["q"]"#);
+        let chat = format!(
+            r#"{{"model":"gpt-5","messages":[{{"role":"user","content":"go"}}],"tools":[
+                {{"type":"function","function":{{"name":"compiles","strict":true,"parameters":{compiles}}}}},
+                {{"type":"function","function":{{"name":"refused","strict":true,"parameters":{refused}}}}},
+                {{"type":"function","function":{{"name":"omitted","parameters":{compiles}}}}}
+            ]}}"#
+        );
+        let messages = format!(
+            r#"{{"model":"gpt-5","max_tokens":16,"messages":[{{"role":"user","content":"go"}}],"tools":[
+                {{"name":"compiles","strict":true,"input_schema":{compiles}}},
+                {{"name":"refused","strict":true,"input_schema":{refused}}},
+                {{"name":"omitted","input_schema":{compiles}}}
+            ]}}"#
+        );
+        hop("chat", &chat, hofund_plugin_api::ProtocolId::OPENAI_CHAT);
+        hop(
+            "messages",
+            &messages,
+            hofund_plugin_api::ProtocolId::ANTHROPIC_MESSAGES,
+        );
+    }
+
+    fn hop(label: &str, raw: &str, inbound: hofund_plugin_api::ProtocolId) {
+        let request = hofund_plugin_sdk::wire::decode_inbound(inbound, raw.as_bytes())
+            .unwrap_or_else(|error| panic!("{label} decode: {error}"));
+        let encoded = hofund_plugin_sdk::wire::encode_outbound(
+            hofund_plugin_api::ProtocolId::OPENAI_RESPONSES,
+            inbound,
+            request,
+        )
+        .unwrap_or_else(|error| panic!("{label} encode: {error}"));
+        let mut body = object(&String::from_utf8(encoded).expect("utf8"));
+        let tool = |body: &Map<String, Value>, name: &str| {
+            body.get("tools")
+                .and_then(Value::as_array)
+                .unwrap_or_else(|| panic!("{label} tools"))
+                .iter()
+                .find(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
+                .unwrap_or_else(|| panic!("{label} no {name}"))
+                .as_object()
+                .unwrap_or_else(|| panic!("{label} {name} object"))
+                .clone()
+        };
+        let omitted = tool(&body, "omitted");
+        assert!(
+            omitted.get("strict").is_none(),
+            "{label} encoder invented strict"
+        );
+        let compiles_before = tool(&body, "compiles");
+        assert_eq!(
+            compiles_before.get("strict"),
+            Some(&Value::Bool(true)),
+            "{label} lost strict before shaping"
+        );
+        assert!(
+            Value::Object(compiles_before.clone())
+                .pointer("/parameters/properties/q/oneOf")
+                .is_some()
+        );
+        let refused_before = tool(&body, "refused");
+        assert_eq!(refused_before.get("strict"), Some(&Value::Bool(true)));
+        let refused_params = refused_before.get("parameters").cloned();
+        let omitted_params = omitted.get("parameters").cloned();
+
+        crate::shape::body(&mut body, None);
+
+        let compiles = tool(&body, "compiles");
+        assert_eq!(
+            compiles.get("strict"),
+            Some(&Value::Bool(true)),
+            "{label} compiling strict"
+        );
+        let compiles_value = Value::Object(compiles.clone());
+        assert!(
+            compiles_value
+                .pointer("/parameters/properties/q/oneOf")
+                .is_none()
+        );
+        assert_eq!(
+            compiles_value
+                .pointer("/parameters/properties/q/anyOf")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(2),
+            "{label} oneOf was not rewritten"
+        );
+        let refused = tool(&body, "refused");
+        assert_eq!(
+            refused.get("strict"),
+            Some(&Value::Bool(false)),
+            "{label} refused strict"
+        );
+        assert_eq!(
+            refused.get("parameters").cloned(),
+            refused_params,
+            "{label} refused schema changed"
+        );
+        let omitted = tool(&body, "omitted");
+        assert_eq!(
+            omitted.get("strict"),
+            Some(&Value::Bool(false)),
+            "{label} omitted strict"
+        );
+        assert_eq!(
+            omitted.get("parameters").cloned(),
+            omitted_params,
+            "{label} omitted schema changed"
+        );
+    }
 }

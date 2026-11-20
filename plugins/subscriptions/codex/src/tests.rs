@@ -1675,6 +1675,81 @@ fn replayed_search_declares_the_cached_tool() {
 }
 
 #[test]
+fn d242_wire_cross_protocol_strict_is_posted() {
+    let compiles = r#"{"type":"object","additionalProperties":false,"properties":{"q":{"oneOf":[{"type":"string"},{"type":"number"}]}},"required":["q"]}"#;
+    let refused = r#"{"type":"object","additionalProperties":false,"properties":{"q":{"allOf":[{"type":"string"}]}},"required":["q"]}"#;
+    let chat = format!(
+        r#"{{"model":"gpt-5","messages":[{{"role":"user","content":"go"}}],"tools":[
+            {{"type":"function","function":{{"name":"compiles","strict":true,"parameters":{compiles}}}}},
+            {{"type":"function","function":{{"name":"refused","strict":true,"parameters":{refused}}}}},
+            {{"type":"function","function":{{"name":"omitted","parameters":{compiles}}}}}
+        ]}}"#
+    );
+    let messages = format!(
+        r#"{{"model":"gpt-5","max_tokens":16,"messages":[{{"role":"user","content":"go"}}],"tools":[
+            {{"name":"compiles","strict":true,"input_schema":{compiles}}},
+            {{"name":"refused","strict":true,"input_schema":{refused}}},
+            {{"name":"omitted","input_schema":{compiles}}}
+        ]}}"#
+    );
+    for (label, inbound, raw) in [
+        ("chat", ProtocolId::OPENAI_CHAT, chat.as_str()),
+        (
+            "messages",
+            ProtocolId::ANTHROPIC_MESSAGES,
+            messages.as_str(),
+        ),
+    ] {
+        let mut request = hofund_plugin_sdk::wire::decode_inbound(inbound, raw.as_bytes())
+            .unwrap_or_else(|error| panic!("{label} decode: {error}"));
+        request.stream = true;
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let id = seed(&host, &access_token("first", 10_000));
+        host.http()
+            .enqueue(b"event: response.completed\ndata: {}\n\n".to_vec());
+        block_on(upstream_for(&host, &id).execute(request, inbound)).expect(label);
+        let body: Value = json::from_slice(host.http().calls()[0].body()).expect("json");
+        let tool = |name: &str| {
+            body["tools"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{label} tools"))
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap_or_else(|| panic!("{label} no {name}"))
+        };
+        let posted_compiles = tool("compiles");
+        assert_eq!(posted_compiles["strict"], json!(true), "{label}");
+        assert!(
+            posted_compiles["parameters"]["properties"]["q"]
+                .get("oneOf")
+                .is_none()
+        );
+        assert_eq!(
+            posted_compiles["parameters"]["properties"]["q"]["anyOf"]
+                .as_array()
+                .map(Vec::len),
+            Some(2),
+            "{label}"
+        );
+        let posted_refused = tool("refused");
+        assert_eq!(posted_refused["strict"], json!(false), "{label}");
+        assert_eq!(
+            posted_refused["parameters"],
+            json::from_str::<Value>(refused).expect("schema"),
+            "{label}"
+        );
+        let posted_omitted = tool("omitted");
+        assert_eq!(posted_omitted["strict"], json!(false), "{label}");
+        assert_eq!(
+            posted_omitted["parameters"],
+            json::from_str::<Value>(compiles).expect("schema"),
+            "{label}"
+        );
+    }
+}
+
+#[test]
 fn shaped_request_goes_out_with_session_headers() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);

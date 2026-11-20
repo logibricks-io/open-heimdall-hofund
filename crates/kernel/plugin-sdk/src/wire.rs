@@ -8,11 +8,13 @@
 //!
 //! - Quirks are applied first. When the inbound protocol differs from the
 //!   target, unmapped tools are logged once per name, the billing line is
-//!   removed from system text, and extension bags are dropped. A Chat or
-//!   Responses `service_tier` is put back, then adjusted for the target base
-//!   and codec before the body is posted. A served `service_tier` on the
-//!   reply is kept through a fold, a unary decode, and a cross-protocol
-//!   stream. The word on `response.completed` replaces an earlier word.
+//!   removed from system text, and extension bags are dropped. A function
+//!   tool's `strict` value is put back when the target is Responses, and a
+//!   tool that left `strict` out still leaves it out. A Chat or Responses
+//!   `service_tier` is put back, then adjusted for the target base and codec
+//!   before the body is posted. A served `service_tier` on the reply is kept
+//!   through a fold, a unary decode, and a cross-protocol stream. The word
+//!   on `response.completed` replaces an earlier word.
 //! - An encode failure is status 400: the client sent something the target
 //!   protocol cannot carry.
 //! - A Messages call carries the protocol version header, which a configured
@@ -1121,9 +1123,23 @@ fn prepare_body(
         .map(str::to_owned);
     let cross_protocol = codec.id() != inbound.as_str();
     if cross_protocol {
+        let tool_strict: Vec<Option<serde_json::Value>> = request
+            .tools
+            .iter()
+            .map(|tool| tool.extensions.get("strict").cloned())
+            .collect();
         warn_unmapped(&request);
         strip_billing_header(&mut request);
         request.strip_extensions();
+        // `strict` is the client's choice on a function tool. Other extension
+        // fields stay dropped. A missing value is not invented here.
+        if codec.id() == ProtocolId::OPENAI_RESPONSES.as_str() {
+            for (tool, strict) in request.tools.iter_mut().zip(tool_strict) {
+                if let Some(strict) = strict {
+                    tool.extensions.insert("strict", strict);
+                }
+            }
+        }
         if matches!(codec.id(), "openai-chat" | "openai-responses")
             && let Some(tier) = saved_tier.filter(|tier| !tier.is_empty())
         {
@@ -1800,6 +1816,19 @@ fn consume_fields(mut rest: &str) -> &str {
 
 fn is_key_byte(byte: u8) -> bool {
     byte.is_ascii_alphabetic() || byte == b'_'
+}
+
+/// Decodes `bytes` with the codec for `inbound`.
+///
+/// # Errors
+///
+/// Returns [`PluginError`] when the protocol has no SDK transport or `bytes`
+/// are not a request the codec accepts.
+pub fn decode_inbound(inbound: ProtocolId, bytes: &[u8]) -> Result<Request, PluginError> {
+    let (codec, _, _) = route(inbound)?;
+    codec
+        .decode_request(bytes)
+        .map_err(|error| PluginError::decode(error.to_string()))
 }
 
 /// Encodes `request` for `outbound` the way [`send`] would before it picks a URL.
