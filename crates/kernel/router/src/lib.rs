@@ -525,9 +525,13 @@ impl Router {
             for hop in &route.hops {
                 let attempt = hop.member.attempt();
                 let wire = hop.wire_model.as_deref().unwrap_or(model);
+                let protocol = hofund_codec::service_tier::spoken_protocol(
+                    attempt.protocol.as_str(),
+                    attempt.wire_protocol.as_str(),
+                );
                 for id in hofund_codec::service_tier::offered_tier_ids(
                     &attempt.base_url,
-                    attempt.protocol.as_str(),
+                    protocol,
                     wire,
                     hop.service_tier == "ultrafast",
                 ) {
@@ -2432,7 +2436,10 @@ fn apply_wire(request: &mut Request, hop: &Hop, bare: &str) {
         request,
         &hop.service_tier,
         &attempt.base_url,
-        attempt.protocol.as_str(),
+        hofund_codec::service_tier::spoken_protocol(
+            attempt.protocol.as_str(),
+            attempt.wire_protocol.as_str(),
+        ),
     );
 }
 

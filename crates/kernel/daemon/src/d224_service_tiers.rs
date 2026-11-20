@@ -12,16 +12,20 @@ use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use bytes::Bytes;
-use hofund_codec::{Codec, OpenAiResponses};
+use hofund_codec::{Codec, OpenAiChat, OpenAiResponses};
 use hofund_config::{CatalogSettings, UsageSettings};
 use hofund_gateway::Gateway;
 use hofund_model_catalog::{
     CatalogFetcher, EffectivePricer, FetchResponse, ListPriceLookup, ModelCatalog, Price,
 };
+use hofund_plugin_api::SecretString;
 use hofund_plugin_api::{
     AccountId, BodyStream, Completion, MemberId, PluginError, PluginId, ProtocolId,
-    UpstreamProvider,
+    SubscriptionFactory, UpstreamProvider,
 };
+use hofund_plugin_host::TestHost;
+use hofund_plugin_sdk::oauth::SecretObject;
+use hofund_provider::{Endpoint, OpenAiProtocol};
 use hofund_router::{CooldownPolicy, Cooldowns, FailoverPolicy};
 use hofund_usage::Ledger;
 use tempfile::TempDir;
@@ -162,6 +166,10 @@ fn router_for(
 ) -> axum::Router {
     let mut codecs = HashMap::new();
     codecs.insert(
+        "/v1/chat/completions".to_owned(),
+        Arc::new(OpenAiChat) as Arc<dyn Codec>,
+    );
+    codecs.insert(
         "/v1/responses".to_owned(),
         Arc::new(OpenAiResponses) as Arc<dyn Codec>,
     );
@@ -262,4 +270,347 @@ async fn d224_subscription_hop_uses_the_backend_the_plugin_calls() {
     let price = flex.price.expect("price");
     assert_eq!(price.input, 1.0);
     assert!((flex.cost_usd.expect("cost") - 1.0).abs() < 1e-9);
+}
+
+const PUBLIC_API: &str = "https://api.openai.com/v1";
+
+fn open_calling(
+    protocol: &'static str,
+    plugin_id: &'static str,
+    member_id: Option<MemberId>,
+    upstream: Arc<dyn UpstreamProvider>,
+    models: &[&str],
+) -> (hofund_router::Snapshot, Arc<crate::membership::Table>) {
+    let key = member_id
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| protocol.to_owned());
+    let adapter = ProviderAdapter::new(key.clone(), upstream);
+    let provider = BuiltProvider {
+        adapter: Arc::new(adapter),
+        protocol,
+        timeout: Duration::from_secs(60),
+        plugin_id: plugin_id.to_owned(),
+        preset_id: String::new(),
+        fingerprint: String::new(),
+        patience: None,
+        kernel: false,
+        base_url: String::new(),
+        key: None,
+        key_id: String::new(),
+        http_profile: hofund_plugin_host::HttpProfile::direct(),
+        http_limits: hofund_plugin_host::HttpLimits::default(),
+    };
+    assert!(provider.base_url.is_empty());
+    let mut built = BTreeMap::new();
+    built.insert(key.clone(), provider);
+    let mut routes = BTreeMap::new();
+    for model in models {
+        routes.insert(
+            (*model).to_owned(),
+            vec![PlannedHop {
+                provider: key.clone(),
+                subscription: None,
+                member_id: member_id.clone(),
+                at_once_group: String::new(),
+                at_once: 0,
+                rank: 0,
+                wire_model: None,
+                max_output_tokens: None,
+                context_window: None,
+                routing: "smart".to_owned(),
+                sink: false,
+                patience: Some(Duration::from_secs(60)),
+                weight: 1,
+                free: false,
+                stays: hofund_router::affinity::Stays::Auto,
+                cold_after: hofund_router::affinity::CACHE_COLD,
+                service_tier: String::new(),
+                units: Vec::new(),
+            }],
+        );
+    }
+    let cooldowns = Arc::new(Cooldowns::with_clock(
+        CooldownPolicy::default(),
+        Arc::new(|| tokio::time::Instant::now().into_std()),
+    ));
+    open_with_table(&built, routes, FailoverPolicy::default(), cooldowns).expect("snapshot")
+}
+
+fn public_endpoint() -> Endpoint {
+    let mut endpoint = Endpoint::new("public", PUBLIC_API);
+    endpoint.preset = Some("openai".to_owned());
+    endpoint.api_key = "test-key".to_owned();
+    endpoint
+}
+
+fn priced(dir: &TempDir) -> (Arc<Ledger>, Arc<EffectivePricer>) {
+    let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("ledger"));
+    let catalog = ModelCatalog::open(
+        dir.path(),
+        CatalogSettings::default(),
+        Arc::new(OfflineFetcher),
+    )
+    .expect("catalog");
+    let pricer = Arc::new(EffectivePricer::new(
+        UsageSettings::default(),
+        catalog,
+        Arc::new(SolList),
+    ));
+    (usage, pricer)
+}
+
+async fn ask(
+    snapshot: &hofund_router::Snapshot,
+    usage: &Arc<Ledger>,
+    pricer: &Arc<EffectivePricer>,
+    path: &str,
+    model: &str,
+    tier: &str,
+) {
+    let body = if path.ends_with("/chat/completions") {
+        format!(
+            r#"{{"model":"{model}","messages":[{{"role":"user","content":"hi"}}],"stream":true,"service_tier":"{tier}"}}"#
+        )
+    } else {
+        format!(r#"{{"model":"{model}","input":"hi","stream":true,"service_tier":"{tier}"}}"#)
+    };
+    let response = router_for(snapshot, Arc::clone(usage), Arc::clone(pricer))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("authorization", "Bearer secret")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let _ = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+}
+
+fn tier_named(json: &serde_json::Value, model: &str, id: &str) -> bool {
+    json["data"]
+        .as_array()
+        .expect("data")
+        .iter()
+        .find(|row| row["id"] == model)
+        .expect(model)
+        .get("service_tiers")
+        .and_then(|tiers| tiers.as_array())
+        .is_some_and(|tiers| {
+            tiers
+                .iter()
+                .any(|tier| tier["id"] == id && (id != "ultrafast" || tier["name"] == "Ultrafast"))
+        })
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn d224_openai_chat_key_downgrades_ultrafast() {
+    let dir = TempDir::new().expect("tempdir");
+    let host = TestHost::open(PluginId::from_static("openai"), dir.path());
+    let upstream = hofund_plugin_registry::openai_compat(
+        OpenAiProtocol::Chat,
+        public_endpoint(),
+        host.context(),
+    )
+    .expect("chat upstream");
+    let (snapshot, table) = open_calling("openai-chat", "openai", None, upstream, &["gpt-6.2-sol"]);
+    let hop = table
+        .members()
+        .into_iter()
+        .next()
+        .expect("member")
+        .attempt();
+    assert_eq!(hop.base_url, PUBLIC_API);
+    assert_eq!(hop.protocol, "openai-chat");
+    assert_eq!(hop.wire_protocol, "openai-chat");
+    let (usage, pricer) = priced(&dir);
+    ask(
+        &snapshot,
+        &usage,
+        &pricer,
+        "/v1/chat/completions",
+        "gpt-6.2-sol",
+        "ultrafast",
+    )
+    .await;
+    let row = usage.rows().expect("rows").pop().expect("row");
+    assert_eq!(row.tier_asked, "ultrafast");
+    assert_eq!(row.tier_sent, "priority");
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn d224_openai_responses_key_keeps_short_list_ultrafast() {
+    let dir = TempDir::new().expect("tempdir");
+    let host = TestHost::open(PluginId::from_static("openai"), dir.path());
+    let upstream = hofund_plugin_registry::openai_compat(
+        OpenAiProtocol::Responses,
+        public_endpoint(),
+        host.context(),
+    )
+    .expect("responses upstream");
+    let (snapshot, table) = open_calling(
+        "openai-responses",
+        "openai",
+        None,
+        upstream,
+        &["gpt-6.2-sol", "gpt-6-sol"],
+    );
+    let hop = table
+        .members()
+        .into_iter()
+        .next()
+        .expect("member")
+        .attempt();
+    assert_eq!(hop.base_url, PUBLIC_API);
+    assert_eq!(hop.wire_protocol, "openai-responses");
+    let (usage, pricer) = priced(&dir);
+    let listed = router_for(&snapshot, Arc::clone(&usage), Arc::clone(&pricer))
+        .oneshot(
+            Request::builder()
+                .uri("/v1/models")
+                .header("authorization", "Bearer secret")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(listed.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(listed.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert!(tier_named(&json, "gpt-6.2-sol", "ultrafast"));
+    assert!(!tier_named(&json, "gpt-6-sol", "ultrafast"));
+    ask(
+        &snapshot,
+        &usage,
+        &pricer,
+        "/v1/responses",
+        "gpt-6.2-sol",
+        "ultrafast",
+    )
+    .await;
+    ask(
+        &snapshot,
+        &usage,
+        &pricer,
+        "/v1/responses",
+        "gpt-6-sol",
+        "ultrafast",
+    )
+    .await;
+    let rows = usage.rows().expect("rows");
+    let sol = rows
+        .iter()
+        .find(|row| row.model == "gpt-6.2-sol")
+        .expect("sol");
+    assert_eq!(sol.tier_sent, "ultrafast");
+    let plain = rows
+        .iter()
+        .find(|row| row.model == "gpt-6-sol")
+        .expect("plain");
+    assert_eq!(plain.tier_sent, "priority");
+}
+
+#[tokio::test]
+async fn d224_chatgpt_api_subscription_uses_the_responses_host_rule() {
+    let dir = TempDir::new().expect("tempdir");
+    let host = TestHost::open(PluginId::from_static("chatgpt-api"), dir.path());
+    let subscription = hofund_plugin_subscription_chatgpt_api::factory_with_endpoints(
+        hofund_plugin_subscription_chatgpt_api::Endpoints::default(),
+    )
+    .build(
+        &hofund_plugin_subscription_chatgpt_api::ChatgptApiConfig,
+        host.context(),
+    )
+    .expect("subscription");
+    let account = AccountId::from_static("a-0000000000000001");
+    let upstream = subscription
+        .upstream(&account, host.context())
+        .expect("upstream");
+    let member = MemberId::from_parts(PluginId::from_static("chatgpt-api"), account.clone());
+    let (snapshot, table) = open_calling(
+        "subscription",
+        "chatgpt-api",
+        Some(member),
+        upstream,
+        &["gpt-6.2-sol", "gpt-6-sol"],
+    );
+    let hop = table
+        .members()
+        .into_iter()
+        .next()
+        .expect("member")
+        .attempt();
+    assert_eq!(hop.protocol, "subscription");
+    assert_eq!(hop.wire_protocol, "openai-responses");
+    assert_eq!(hop.base_url, PUBLIC_API);
+    assert!(hop.subscription);
+    let accounts = host.context().accounts();
+    let row = accounts
+        .account(account.clone(), "me@example.test")
+        .expect("account");
+    accounts
+        .upsert(
+            row,
+            SecretObject::new()
+                .with_secret("access_token", &SecretString::from("token".to_owned()))
+                .with_number("expires_at", 4_000_000_000)
+                .to_secret(),
+        )
+        .await
+        .expect("stored sign-in");
+    let (usage, pricer) = priced(&dir);
+    let listed = router_for(&snapshot, Arc::clone(&usage), Arc::clone(&pricer))
+        .oneshot(
+            Request::builder()
+                .uri("/v1/models")
+                .header("authorization", "Bearer secret")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let bytes = axum::body::to_bytes(listed.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert!(tier_named(&json, "gpt-6.2-sol", "ultrafast"));
+    ask(
+        &snapshot,
+        &usage,
+        &pricer,
+        "/v1/responses",
+        "gpt-6.2-sol",
+        "ultrafast",
+    )
+    .await;
+    ask(
+        &snapshot,
+        &usage,
+        &pricer,
+        "/v1/responses",
+        "gpt-6-sol",
+        "ultrafast",
+    )
+    .await;
+    let rows = usage.rows().expect("rows");
+    let sol = rows
+        .iter()
+        .find(|row| row.model == "gpt-6.2-sol")
+        .expect("sol");
+    assert_eq!(sol.tier_sent, "ultrafast");
+    let plain = rows
+        .iter()
+        .find(|row| row.model == "gpt-6-sol")
+        .expect("plain");
+    assert_eq!(plain.tier_sent, "priority");
 }

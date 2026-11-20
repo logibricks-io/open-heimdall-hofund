@@ -5,8 +5,12 @@
 pub struct MemberAttempt {
     /// Configured provider id used on routes and usage rows.
     pub provider_id: String,
-    /// Outbound protocol id.
+    /// Outbound protocol id. A subscription member keeps the label `subscription`.
     pub protocol: String,
+    /// Codec id the upstream speaks when [`Self::protocol`] is not that codec.
+    ///
+    /// Empty means the host rules use `protocol`.
+    pub wire_protocol: String,
     /// Configured upstream base URL, when available.
     pub base_url: String,
     /// Provider id and a one-way credential fingerprint, when available.

@@ -65,6 +65,14 @@ impl ChatgptApiUpstream {
 
 #[hofund_plugin_sdk::async_trait]
 impl UpstreamProvider for ChatgptApiUpstream {
+    fn attempt_base(&self) -> String {
+        self.endpoints.api.clone()
+    }
+
+    fn attempt_protocol(&self) -> String {
+        ProtocolId::OPENAI_RESPONSES.as_str().to_owned()
+    }
+
     async fn execute(
         &self,
         request: Request,

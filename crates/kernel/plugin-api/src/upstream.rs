@@ -517,6 +517,14 @@ pub trait UpstreamProvider: Send + Sync + 'static {
     fn attempt_base(&self) -> String {
         String::new()
     }
+
+    /// Codec id this upstream speaks, or empty when it has no fixed codec.
+    ///
+    /// Host rules use this when the member label is not the codec that is
+    /// called. The default is empty, so the member label stays the codec.
+    fn attempt_protocol(&self) -> String {
+        String::new()
+    }
 }
 
 #[cfg(test)]

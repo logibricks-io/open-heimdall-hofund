@@ -758,6 +758,7 @@ impl Member for LiveMember {
         MemberAttempt {
             provider_id: self.route_id.clone(),
             protocol: self.protocol.to_owned(),
+            wire_protocol: self.route.protocol.clone(),
             base_url: self.route.base_url.clone(),
             route: self.route.route.clone(),
             keeps_responses: self.route.keeps_responses,

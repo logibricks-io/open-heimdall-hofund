@@ -374,7 +374,9 @@ wire::Target derives(Clone)
 wire::Target::const fn allocation_quota_rate (mut self , enabled : bool) -> Self
 wire::Target::const fn chatgpt_codex_zstd (mut self , enabled : bool) -> Self
 wire::Target::const fn generate_in_body (mut self , enabled : bool) -> Self
+wire::Target::const fn protocol (& self) -> ProtocolId
 wire::Target::const fn request_body_gzip (mut self , enabled : bool) -> Self
+wire::Target::fn base_url (& self) -> & str
 wire::Target::fn classify_status (mut self , classify : StatusClassify) -> Self
 wire::Target::fn credential (mut self , credential : CredentialStyle) -> Self
 wire::Target::fn headers (mut self , headers : Vec < (String , String) >) -> Self

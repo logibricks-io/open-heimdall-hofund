@@ -76,6 +76,7 @@ impl Member for FakeMember {
         MemberAttempt {
             provider_id: "fake".to_owned(),
             protocol: self.protocol.to_owned(),
+            wire_protocol: String::new(),
             base_url: "http://upstream.test/v1".to_owned(),
             route: "fake\x000123456789abcdef".to_owned(),
             keeps_responses: self.keeps,

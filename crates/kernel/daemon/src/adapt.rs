@@ -47,6 +47,7 @@ impl Provider for ProviderAdapter {
     fn attempt_route(&self) -> AttemptRoute {
         AttemptRoute {
             base_url: self.inner.attempt_base(),
+            protocol: self.inner.attempt_protocol(),
             ..AttemptRoute::default()
         }
     }

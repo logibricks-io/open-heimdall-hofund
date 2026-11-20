@@ -79,6 +79,19 @@ pub fn chatgpt_backend(base_url: &str) -> bool {
     host.eq_ignore_ascii_case("chatgpt.com") || host.ends_with(".chatgpt.com")
 }
 
+/// The codec the host rules should use.
+///
+/// `spoken` is the codec the upstream calls. An empty `spoken` keeps
+/// `member_protocol`, so a member whose label is already that codec is unchanged.
+#[must_use]
+pub fn spoken_protocol<'a>(member_protocol: &'a str, spoken: &'a str) -> &'a str {
+    if spoken.is_empty() {
+        member_protocol
+    } else {
+        spoken
+    }
+}
+
 /// Whether `auto` and `default` on a reply are placeholders.
 ///
 /// The ChatGPT backend says those words whether a faster tier ran or not.
@@ -303,10 +316,19 @@ mod tests {
     use super::{
         adjust_encoded_body, apply_outbound, chatgpt_backend, clear_placeholder_served,
         comparable_model, configured_tier, downgrade_openai_ultrafast, offered_tier_ids,
-        offers_ultra_family, openai_responses_ultrafast, rewrite_fast_word,
+        offers_ultra_family, openai_responses_ultrafast, rewrite_fast_word, spoken_protocol,
     };
     use hofund_ir::Request;
     use serde_json::{Map, Value};
+
+    #[test]
+    fn d224_spoken_protocol_wins_over_the_member_label() {
+        assert_eq!(
+            spoken_protocol("subscription", "openai-responses"),
+            "openai-responses"
+        );
+        assert_eq!(spoken_protocol("openai-chat", ""), "openai-chat");
+    }
 
     #[test]
     fn d224_fast_word_becomes_priority() {

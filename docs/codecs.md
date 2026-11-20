@@ -25,7 +25,11 @@ those ids. A ChatGPT-backend hop drops every other word, including `flex`,
 before the sent tier is recorded; the Codex body filter repeats that
 keep-list. A subscription hop reports the backend base its plugin calls,
 including when the provider row stores no base URL, and these host rules
-read that attempt base. A Responses stream copies a top-level `service_tier`, or
+read that attempt base. When the hop also records the codec its plugin
+speaks, the public Responses rule uses that codec even if the member label
+is `subscription`. The plugin wire path keeps `service_tier` on a Chat or
+Responses target after a cross-protocol strip, then adjusts the encoded body
+for that base and codec. A Responses stream copies a top-level `service_tier`, or
 `response.service_tier` on `response.created` and `response.completed`, onto
 the start and delta events.
 
