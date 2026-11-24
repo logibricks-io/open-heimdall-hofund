@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- D-244: Under strict stays, a token count for a conversation that already has an answerer asks only that account. The local estimate is used when that account is not a candidate or cannot count, and no other account is asked. A new named session whose request already contains a reply stays on the account that history belongs to. The history map is kept in memory only. An unanswered subagent stays with its lead even when the routing does not spread new sessions.
+- D-263: Chat usage counts a top-level `reasoning_tokens` as reasoning when `completion_tokens_details` has no positive count, on a whole reply and on a stream. A positive count in `completion_tokens_details` is kept, and the two numbers are not added.
 
 ### Security
 
