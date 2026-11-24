@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - #920 item 3: A Claude `/usage` failure that quotes a standard-error line, or an `is_error` result string, scrubs known secrets (an OAuth or setup token, a refresh token, or an API key value) with the same redaction as a process that ends early, before that text is clipped, so a token that crosses the clip is not returned.
 
+### Security
+
+- Lockfile: `url` 2.5.8 -> 2.5.9 (RUSTSEC-2026-0592, stack overflow in `Url::origin()` on nested `blob:` URLs) and `cookie` 0.18.2 -> 0.18.3 (RUSTSEC-2026-0594, private cookie nonces can repeat after `fork`); `form_urlencoded` 1.2.2 -> 1.2.3 comes with `url` 2.5.9. `cargo-deny` fails on both advisories without this update.
+
 ## [0.2.0-rc.3] - 2026-11-20
 
 This is a third preview (prerelease) of v0.2.0. It carries the subscription,
