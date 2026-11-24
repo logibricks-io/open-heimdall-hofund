@@ -11,7 +11,7 @@ use hofund_plugin_api::{
 };
 use hofund_router::strategy::{Strategy, StrategyState};
 use hofund_router::{
-    Completion, CooldownPolicy, Cooldowns, FailoverPolicy, Hop, Member, Route, Router,
+    Completion, CooldownPolicy, Cooldowns, FailoverPolicy, Hop, Member, Route, Router, RouterError,
 };
 
 struct Fake {
@@ -428,4 +428,90 @@ async fn d24_a_model_with_no_provider_rests_alone_and_its_seat_is_passed_over() 
         .expect("dispatch");
     assert_eq!(routed.upstream_id, "second");
     assert_eq!(seen.lock().expect("seen").as_slice(), ["second"]);
+}
+
+#[tokio::test]
+async fn d260_vendor_timed_quota_rests_the_model_and_still_asks_the_rest() {
+    let (book, seen) = fixture();
+    let notice = "Third-party quota reached. Resets in 3h22m19s.";
+    let error = PluginError::quota_status(429, notice)
+        .with_reset_after(Duration::from_secs(12_139))
+        .with_model_scope();
+    book.record_failure_for_model(&member_id("first"), "pool-a", &error)
+        .expect("rest");
+    let cooling = book
+        .cooling_for_model(&member_id("first"), "pool-a")
+        .expect("cooling");
+    assert!(cooling.vendor_timed());
+    assert!(
+        book.cooling_for_model(&member_id("first"), "pool-b")
+            .is_none()
+    );
+
+    let lone = Router::new(
+        BTreeMap::from([(
+            "pool-a".to_owned(),
+            vec![fake("first", &seen, Behavior::Unary)],
+        )]),
+        FailoverPolicy::default(),
+    )
+    .with_cooldowns(Arc::clone(&book));
+    let refused = lone.dispatch(&Request::new("pool-a"), "inbound").await;
+    assert!(seen.lock().expect("seen").is_empty());
+    let Err(RouterError::Upstream { error, .. }) = refused else {
+        panic!("expected the stored refusal");
+    };
+    assert_eq!(error.status(), Some(429));
+    assert!(error.message().contains(notice));
+    let retry = error.retry_after().expect("retry");
+    let written = Duration::from_secs(12_139);
+    assert!(retry <= written && retry + Duration::from_secs(2) >= written);
+
+    let members = vec![
+        fake("first", &seen, Behavior::Unary),
+        fake("second", &seen, Behavior::Unary),
+    ];
+    let router = Router::new(
+        BTreeMap::from([
+            ("pool-a".to_owned(), members.clone()),
+            ("pool-b".to_owned(), members),
+        ]),
+        FailoverPolicy::default(),
+    )
+    .with_cooldowns(Arc::clone(&book));
+
+    seen.lock().expect("seen").clear();
+    let routed = router
+        .dispatch(&Request::new("pool-a"), "inbound")
+        .await
+        .expect("other account");
+    assert_eq!(routed.upstream_id, "second");
+    assert_eq!(seen.lock().expect("seen").as_slice(), ["second"]);
+
+    seen.lock().expect("seen").clear();
+    let routed = router
+        .dispatch(&Request::new("pool-b"), "inbound")
+        .await
+        .expect("sibling model");
+    assert_eq!(routed.upstream_id, "first");
+    assert_eq!(seen.lock().expect("seen").as_slice(), ["first"]);
+}
+
+#[tokio::test]
+async fn d260_a_guessed_quota_rest_is_still_probed() {
+    let (book, seen) = fixture();
+    let error = PluginError::quota_status(429, "Quota exceeded").with_model_scope();
+    book.record_failure_for_model(&member_id("first"), "demo", &error)
+        .expect("rest");
+    let cooling = book
+        .cooling_for_model(&member_id("first"), "demo")
+        .expect("cooling");
+    assert!(!cooling.vendor_timed());
+    let router = router(vec![fake("first", &seen, Behavior::Unary)], &book);
+    let routed = router
+        .dispatch(&Request::new("demo"), "inbound")
+        .await
+        .expect("probe");
+    assert_eq!(routed.upstream_id, "first");
+    assert_eq!(seen.lock().expect("seen").as_slice(), ["first"]);
 }
