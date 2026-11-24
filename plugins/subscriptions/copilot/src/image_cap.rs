@@ -6,14 +6,19 @@
 //! The cap is remembered per account and model, from that
 //! refusal. The model list's image limit is not used.
 //!
-//! The oldest images outside the latest user message are replaced with one
-//! line of text until the count fits, and that turn is sent once more.
-//! Later turns to the same model are fitted before they are sent. A turn
-//! already within the cap is left as it arrived. When the latest user
-//! message alone is over the cap, nothing is replaced and the refusal is
-//! returned as it came.
+//! Earlier copies of an image outside the latest user message are replaced
+//! with one line of text, keeping the last copy. If the count is still over
+//! the cap, the oldest images by their last position are replaced with a
+//! different line, including every earlier copy, and that turn is sent once
+//! more. Later turns to the same model are fitted before they are sent. A turn
+//! already within the cap is left as it arrived. When the latest user message
+//! alone is over the cap, nothing is replaced and the refusal is returned as
+//! it came.
+
+use std::collections::{HashMap, HashSet};
 
 use hofund_plugin_api::{AccountId, ContentPart, Message, PluginError, Request, Role};
+use hofund_plugin_sdk::{digest::sha256, json};
 
 use crate::models::Book;
 
@@ -21,6 +26,10 @@ use crate::models::Book;
 /// names neither this gateway nor the vendor.
 pub(crate) const OMITTED: &str =
     "[An earlier image was omitted here to keep this request within the model's image limit.]";
+
+/// Text written where an earlier copy of an image was left out.
+pub(crate) const SHOWN_LATER: &str =
+    "[This image is omitted here; the same image appears again later in this conversation.]";
 
 const MARKER: &str = "too many images: maximum allowed for model ";
 
@@ -31,12 +40,18 @@ struct Spot {
     message: usize,
     path: Vec<usize>,
     protected: bool,
+    digest: [u8; 32],
+}
+
+struct Omission {
+    spot: Spot,
+    text: &'static str,
 }
 
 enum Plan {
     Under,
     Cannot,
-    Omit(Vec<Spot>),
+    Omit(Vec<Omission>),
 }
 
 /// The cap named by a 400 "too many images" refusal, when the words are present.
@@ -114,12 +129,69 @@ fn plan(request: &Request, cap: usize) -> Plan {
     if found.len() <= cap {
         return Plan::Under;
     }
-    let over = found.len() - cap;
-    let removable: Vec<Spot> = found.into_iter().filter(|spot| !spot.protected).collect();
-    if removable.len() < over {
+
+    let mut copies_of: HashMap<[u8; 32], Vec<usize>> = HashMap::new();
+    let mut in_latest = HashSet::new();
+    let mut latest = 0;
+    for (index, spot) in found.iter().enumerate() {
+        if spot.protected {
+            latest += 1;
+            in_latest.insert(spot.digest);
+        } else {
+            copies_of.entry(spot.digest).or_default().push(index);
+        }
+    }
+
+    let mut history = Vec::new();
+    for (index, spot) in found.iter().enumerate() {
+        if spot.protected || in_latest.contains(&spot.digest) {
+            continue;
+        }
+        let copies = copies_of
+            .get(&spot.digest)
+            .expect("every history image has a copy group");
+        if copies.last() == Some(&index) {
+            history.push(spot.digest);
+        }
+    }
+
+    let over = (latest + history.len()).saturating_sub(cap);
+    if over > history.len() {
         return Plan::Cannot;
     }
-    Plan::Omit(removable.into_iter().take(over).collect())
+    let order: HashMap<[u8; 32], usize> = history
+        .into_iter()
+        .enumerate()
+        .map(|(index, digest)| (digest, index))
+        .collect();
+
+    let mut omissions = Vec::new();
+    for (index, spot) in found.into_iter().enumerate() {
+        if spot.protected {
+            continue;
+        }
+        let text = if in_latest.contains(&spot.digest) {
+            Some(SHOWN_LATER)
+        } else {
+            let copies = copies_of
+                .get(&spot.digest)
+                .expect("every history image has a copy group");
+            let position = order
+                .get(&spot.digest)
+                .expect("every grouped image has a history position");
+            if *position < over {
+                Some(OMITTED)
+            } else if copies.last() != Some(&index) {
+                Some(SHOWN_LATER)
+            } else {
+                None
+            }
+        };
+        if let Some(text) = text {
+            omissions.push(Omission { spot, text });
+        }
+    }
+    Plan::Omit(omissions)
 }
 
 fn locate(messages: &[Message]) -> Vec<Spot> {
@@ -171,11 +243,15 @@ fn walk(
     for (index, part) in parts.iter().enumerate() {
         path.push(index);
         match part {
-            ContentPart::Image(_) => found.push(Spot {
-                message,
-                path: path.clone(),
-                protected,
-            }),
+            ContentPart::Image(_) => {
+                let encoded = json::to_vec(part).expect("an image content part serializes");
+                found.push(Spot {
+                    message,
+                    path: path.clone(),
+                    protected,
+                    digest: sha256(&encoded),
+                });
+            }
             ContentPart::ToolResult(result) => {
                 walk(&result.content, message, protected, path, depth + 1, found);
             }
@@ -185,17 +261,17 @@ fn walk(
     }
 }
 
-fn rewrite(mut request: Request, spots: &[Spot]) -> Request {
-    for spot in spots {
-        let Some(message) = request.messages.get_mut(spot.message) else {
+fn rewrite(mut request: Request, omissions: &[Omission]) -> Request {
+    for omission in omissions {
+        let Some(message) = request.messages.get_mut(omission.spot.message) else {
             continue;
         };
-        replace(&mut message.content, &spot.path);
+        replace(&mut message.content, &omission.spot.path, omission.text);
     }
     request
 }
 
-fn replace(parts: &mut [ContentPart], path: &[usize]) {
+fn replace(parts: &mut [ContentPart], path: &[usize], text: &'static str) {
     let Some((&index, rest)) = path.split_first() else {
         return;
     };
@@ -203,10 +279,10 @@ fn replace(parts: &mut [ContentPart], path: &[usize]) {
         return;
     };
     if rest.is_empty() {
-        *part = ContentPart::text(OMITTED);
+        *part = ContentPart::text(text);
         return;
     }
     if let ContentPart::ToolResult(result) = part {
-        replace(&mut result.content, rest);
+        replace(&mut result.content, rest, text);
     }
 }
