@@ -112,7 +112,7 @@ fn default_used_since(since: SystemTime, projects_root: &Path) -> bool {
 /// Whether `account` is the one Claude Code is signed in to under the agent home.
 #[must_use]
 pub(crate) fn is_active_account(account: &AccountId) -> bool {
-    let Some(home) = cli::configured_dir() else {
+    let Some(home) = cli::agent_home() else {
         return false;
     };
     match Profile::read(&home).account_id() {
@@ -124,7 +124,7 @@ pub(crate) fn is_active_account(account: &AccountId) -> bool {
 /// Projects root to watch for Claude Code activity on the active account.
 #[must_use]
 pub(crate) fn activity_root_for_active() -> Option<std::path::PathBuf> {
-    cli::configured_dir()
+    cli::agent_home()
 }
 
 pub(crate) fn mark_usage_asked() -> u64 {

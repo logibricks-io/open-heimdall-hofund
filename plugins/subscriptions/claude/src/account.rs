@@ -258,8 +258,21 @@ pub(crate) async fn ask(
         lease.commit(None, updated.to_secret()).await?;
     }
 
+    if let Err(error) = &run_result {
+        let now = host.clock().now();
+        crate::said_out::note_text(host, account, &last, now);
+        crate::said_out::note_text(host, account, error.message(), now);
+    }
     run_result?;
-    finish_warmup_output(&last)
+    match finish_warmup_output(&last) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let now = host.clock().now();
+            crate::said_out::note_text(host, account, &last, now);
+            crate::said_out::note_text(host, account, error.message(), now);
+            Err(error)
+        }
+    }
 }
 
 async fn run_warmup_command(

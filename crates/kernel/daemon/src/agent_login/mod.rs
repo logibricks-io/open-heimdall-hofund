@@ -25,7 +25,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use hofund_config::Config;
-use hofund_plugin_api::{AccountId, AgentSignIn};
+use hofund_plugin_api::{AccountId, AgentSignIn, QuotaWindow};
 
 use crate::registry::DaemonRegistry;
 use crate::sign_in::{Opened, find, sorted_accounts};
@@ -262,38 +262,40 @@ async fn automatic_switch_allowed(
     Ok(blob.text("setupToken").is_none())
 }
 
+fn login_quota_from_windows(windows: &[QuotaWindow]) -> LoginQuota {
+    let mut used = 0.0_f64;
+    let mut held = false;
+    for window in windows {
+        let scoped = window.scope_model().is_some()
+            || !window.models().is_empty()
+            || !window.excluded_models().is_empty();
+        if !scoped && window.blocking() && window.held() {
+            held = true;
+        }
+        if scoped || !window.blocking() {
+            continue;
+        }
+        let share = match window.limit() {
+            Some(limit) if limit > 0 => (window.used() as f64) * 100.0 / (limit as f64),
+            _ => window.used() as f64,
+        };
+        used = used.max(share);
+    }
+    LoginQuota {
+        readable: true,
+        used_share: used,
+        used_up: used >= 100.0 || held,
+        held,
+        error: false,
+    }
+}
+
 async fn quota_peeks(entry: &Opened, known: &[(AccountId, String)]) -> Vec<(String, LoginQuota)> {
     let mut out = Vec::new();
     for (id, label) in known {
         let windows = entry.instance.quota(id, &entry.host).await;
         let peek = match windows {
-            Ok(windows) => {
-                let mut used = 0.0_f64;
-                for window in &windows {
-                    if window.scope_model().is_some()
-                        || !window.models().is_empty()
-                        || !window.excluded_models().is_empty()
-                    {
-                        continue;
-                    }
-                    if window.blocking() {
-                        let share = match window.limit() {
-                            Some(limit) if limit > 0 => {
-                                (window.used() as f64) * 100.0 / (limit as f64)
-                            }
-                            _ => window.used() as f64,
-                        };
-                        used = used.max(share);
-                    }
-                }
-                LoginQuota {
-                    readable: true,
-                    used_share: used,
-                    used_up: used >= 100.0,
-                    held: false,
-                    error: false,
-                }
-            }
+            Ok(windows) => login_quota_from_windows(&windows),
             Err(_) => LoginQuota {
                 readable: false,
                 error: true,
@@ -397,30 +399,7 @@ async fn quota_peeks_instance(
     for (id, label) in known {
         let windows = instance.quota(id, host).await;
         let peek = match windows {
-            Ok(windows) => {
-                let mut used = 0.0_f64;
-                for window in &windows {
-                    if window.scope_model().is_some()
-                        || !window.models().is_empty()
-                        || !window.excluded_models().is_empty()
-                        || !window.blocking()
-                    {
-                        continue;
-                    }
-                    let share = match window.limit() {
-                        Some(limit) if limit > 0 => (window.used() as f64) * 100.0 / (limit as f64),
-                        _ => window.used() as f64,
-                    };
-                    used = used.max(share);
-                }
-                LoginQuota {
-                    readable: true,
-                    used_share: used,
-                    used_up: used >= 100.0,
-                    held: false,
-                    error: false,
-                }
-            }
+            Ok(windows) => login_quota_from_windows(&windows),
             Err(_) => LoginQuota {
                 readable: false,
                 error: true,
@@ -1034,5 +1013,24 @@ mod tests {
     #[test]
     fn d27_19_login_switch_every_is_five_minutes() {
         assert_eq!(LOGIN_SWITCH_EVERY.as_secs(), 300);
+    }
+
+    #[test]
+    fn d254_account_wide_held_window_counts_as_spent() {
+        let until = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_900_000_000);
+        let window = QuotaWindow::new("limit", 100, Some(100), Some(until))
+            .expect("window")
+            .with_held(true);
+        let peek = login_quota_from_windows(&[window]);
+        assert!(peek.held);
+        assert!(peek.used_up);
+        assert!(!peek.error);
+        let scoped = QuotaWindow::new("limit", 100, Some(100), Some(until))
+            .expect("window")
+            .with_held(true)
+            .with_scope_model("fable");
+        let skipped = login_quota_from_windows(&[scoped]);
+        assert!(!skipped.held);
+        assert!(!skipped.used_up);
     }
 }
