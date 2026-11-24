@@ -285,12 +285,12 @@ mod tests {
 
     struct AgentEnv {
         _guard: crate::agent_login::TestHomeGuard,
+        _secrets: hofund_plugin_host::MemoryAccountSecretsGuard,
         uuid: String,
     }
 
-    /// A Claude account uuid unique to this test and process. Tests run in
-    /// parallel and the macOS keychain is shared, so a fixed identity makes
-    /// concurrent imports race on the same keychain item.
+    /// A Claude account uuid unique to this test and process keeps parallel
+    /// fixtures independent even when they share an in-memory secret backend.
     fn unique_claude_uuid() -> String {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -308,6 +308,7 @@ mod tests {
             let guard = push_test_agent_homes(map);
             Self {
                 _guard: guard,
+                _secrets: hofund_plugin_host::memory_account_secrets(),
                 uuid,
             }
         }
@@ -319,6 +320,7 @@ mod tests {
             let guard = push_test_agent_homes(map);
             Self {
                 _guard: guard,
+                _secrets: hofund_plugin_host::memory_account_secrets(),
                 uuid: String::new(),
             }
         }

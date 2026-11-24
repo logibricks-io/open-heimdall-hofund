@@ -197,6 +197,7 @@ pub fn apply_to_seat(
     seat.credits_mode = mode;
     seat.on_credits = on_credits_spending(allowance, model, now) && mode != CreditsMode::Off;
     seat.credits = effective_spends_credits(allowance, model, mode);
+    seat.trial_credits = seat.credits && allowance.spends_trial_credits(model);
     // Off never spends credits: a spent blocking window is fully used up, matching
     // order/drain's 100% threshold as well as the 98% smart tiers.
     if mode == CreditsMode::Off && !allowance.available(model, now) {
@@ -338,6 +339,25 @@ mod tests {
         assert!(!seat.credits);
         assert!(!seat.on_credits);
         assert!(seat.used >= 100.0);
+    }
+
+    #[test]
+    fn d255_trial_credits_follow_mode_and_bought_credits_stay_unmarked() {
+        let now = at(1_900_000_000);
+        let mut allowance = allowance_on_credits(now);
+        allowance.windows[1].trial_credits = true;
+        let mut seat = Seat::new("account:sub:a");
+        apply_to_seat(&mut seat, &allowance, "model", now, CreditsMode::On);
+        assert!(seat.credits);
+        assert!(seat.trial_credits);
+        apply_to_seat(&mut seat, &allowance, "model", now, CreditsMode::Off);
+        assert!(!seat.credits);
+        assert!(!seat.trial_credits);
+
+        allowance.windows[1].trial_credits = false;
+        apply_to_seat(&mut seat, &allowance, "model", now, CreditsMode::On);
+        assert!(seat.credits);
+        assert!(!seat.trial_credits);
     }
 
     #[test]
