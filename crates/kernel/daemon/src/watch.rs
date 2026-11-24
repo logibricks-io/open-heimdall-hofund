@@ -199,6 +199,8 @@ fn classify(targets: &Targets, event: &notify::Result<Event>) -> Step {
         // A rescan flag, or an event kind the backend could not classify, may
         // stand for changes whose paths were not reported.
         Ok(event) if event.need_rescan() || matches!(event.kind, EventKind::Other) => Step::Force,
+        // Reading the configuration for a check must not schedule another check.
+        Ok(event) if matches!(event.kind, EventKind::Access(_)) => Step::Ignore,
         Ok(event) if event.paths.iter().any(|path| targets.matches(path)) => Step::Settle,
         Ok(_) => Step::Ignore,
     }
@@ -247,14 +249,23 @@ pub(crate) async fn follow(
     poll(path, timing.poll, check).await;
 }
 
-/// Checks the file, then follows a symlink that now points somewhere else.
+/// Checks until the file stays unchanged across a check, then follows a
+/// symlink that now points somewhere else.
 async fn look(
     path: &Path,
     check: &Check,
     targets: &mut Targets,
     watcher: Option<&mut RecommendedWatcher>,
 ) {
-    check().await;
+    let mut observed = stamp(path);
+    loop {
+        check().await;
+        let current = stamp(path);
+        if current == observed {
+            break;
+        }
+        observed = current;
+    }
     let Ok(current) = Targets::resolve(path) else {
         return;
     };
@@ -416,6 +427,15 @@ mod tests {
     }
 
     #[test]
+    fn configuration_access_does_not_schedule_a_check() {
+        let (_dir, path) = scratch();
+        let targets = Targets::resolve(&path).expect("targets");
+        let event =
+            Ok(Event::new(EventKind::Access(notify::event::AccessKind::Any)).add_path(path));
+        assert!(matches!(classify(&targets, &event), Step::Ignore));
+    }
+
+    #[test]
     fn resolve_targets_the_on_disk_spelling_of_a_differently_cased_name() {
         let (dir, path) = scratch();
         let upper = dir.path().join("HOFUND.TOML");
@@ -491,6 +511,68 @@ mod tests {
         assert_eq!(count.load(Ordering::SeqCst), 1);
         tokio::time::sleep(Duration::from_secs(5)).await;
         assert_eq!(count.load(Ordering::SeqCst), 1);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn change_during_check_is_rechecked_without_another_event() {
+        let (_dir, path) = scratch();
+        let targets = Targets::resolve(&path).expect("targets");
+        let mtime = fs::metadata(&path)
+            .and_then(|meta| meta.modified())
+            .expect("mtime");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (checked, mut checks) = mpsc::unbounded_channel();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let gate = Arc::new(std::sync::Mutex::new(Some((started_tx, release_rx))));
+        let check: Check = {
+            let calls = Arc::clone(&calls);
+            let gate = Arc::clone(&gate);
+            Arc::new(move || {
+                let call = calls.fetch_add(1, Ordering::SeqCst);
+                checked.send(call).expect("check record");
+                let gate = gate.lock().expect("check gate").take();
+                Box::pin(async move {
+                    if let Some((started, release)) = gate {
+                        started.send(()).expect("check started");
+                        release.await.expect("release check");
+                    }
+                })
+            })
+        };
+        let (sender, events) = mpsc::unbounded_channel();
+        let task = {
+            let path = path.clone();
+            tokio::spawn(async move { follow(&path, fast(), &check, targets, events, None).await })
+        };
+
+        sender.send(modified(&path)).expect("modify");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), checks.recv())
+                .await
+                .expect("first check timed out"),
+            Some(0)
+        );
+        tokio::time::timeout(Duration::from_secs(1), started_rx)
+            .await
+            .expect("first check did not start")
+            .expect("first check dropped");
+
+        fs::write(&path, "listen = \"127.0.0.1:1\"\n").expect("second write");
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .and_then(|file| file.set_modified(mtime))
+            .expect("restore mtime");
+        release_tx.send(()).expect("release first check");
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), checks.recv())
+                .await
+                .expect("second write was not rechecked"),
+            Some(1)
+        );
         task.abort();
     }
 
