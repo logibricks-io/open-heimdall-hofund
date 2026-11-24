@@ -430,6 +430,52 @@ fn d222_a_later_pool_sentence_wins_over_a_bare_quota_line() {
 }
 
 #[test]
+fn d260_third_party_quota_rests_the_model_until_the_reset() {
+    let notice = "Third-party quota reached. Please switch to Gemini models or upgrade your subscription to increase your limits. Resets in 3h22m19s.";
+    let error = crate::notice::classify_output(notice).expect("quota");
+    assert!(error.scopes_model());
+    assert_eq!(error.kind(), PluginErrorKind::Quota);
+    assert_eq!(
+        error.reset_after(),
+        Some(std::time::Duration::from_secs(12_139))
+    );
+    assert_eq!(
+        error.retry_after(),
+        Some(std::time::Duration::from_secs(12_139))
+    );
+    assert!(
+        error
+            .message()
+            .contains("agy bridge: Antigravity quota reached:")
+    );
+    assert!(error.message().contains(notice));
+
+    let prefixed = format!("agy bridge: Antigravity quota reached: {notice}");
+    let again = crate::notice::classify_output(&prefixed).expect("prefixed");
+    assert!(again.scopes_model());
+    assert_eq!(
+        again.reset_after(),
+        Some(std::time::Duration::from_secs(12_139))
+    );
+
+    let json =
+        format!(r#"{{"type":"error","error":{{"type":"rate_limit_error","message":"{notice}"}}}}"#);
+    let nested = crate::notice::classify_output(&json).expect("json");
+    assert!(nested.scopes_model());
+    assert_eq!(
+        nested.reset_after(),
+        Some(std::time::Duration::from_secs(12_139))
+    );
+
+    let later = crate::notice::classify_output(&format!("quota\n{notice}\n")).expect("later");
+    assert!(later.scopes_model());
+    assert_eq!(
+        later.reset_after(),
+        Some(std::time::Duration::from_secs(12_139))
+    );
+}
+
+#[test]
 fn d222_proxy_map_email_lookup_ignores_case() {
     let plan = crate::move_accounts::parse_plan(
         r#"{
