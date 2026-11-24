@@ -206,23 +206,68 @@ pub(crate) fn attach_report(raw: &str) -> Result<String, PluginError> {
 /// before parsing and before the usage-based seat check.
 ///
 /// Empty or whitespace-only standard output is a transport error before
-/// that parse. A JSON success whose `result` string is empty still reaches
-/// the parser, so a usage-based seat can show the aside.
+/// that parse. When that error quotes a standard-error line, `secrets` are
+/// scrubbed with the same helper as a process that ends early, and the line
+/// is clipped only after that. A JSON success whose `result` string is empty
+/// still reaches the parser, so a usage-based seat can show the aside.
 pub(crate) fn windows_from_output(
     raw: &str,
     stderr: &str,
+    secrets: &[&str],
     now: SystemTime,
     dir: &Path,
 ) -> Result<Vec<QuotaWindow>, PluginError> {
     if raw.trim().is_empty() {
-        return Err(blank_usage_output(stderr));
+        return Err(blank_usage_output(stderr, secrets));
     }
     let text = attach_report(raw)?;
     parse_for_dir(&text, now, dir)
 }
 
-fn blank_usage_output(stderr: &str) -> PluginError {
-    let line = stderr
+/// Secrets a `/usage` error must scrub before the line is shown.
+///
+/// OAuth tokens come from the stored credentials text. A setup token is
+/// included when the account has one. Spawn environment values of at least
+/// eight characters are included too, the same set a process-end error redacts.
+#[must_use]
+pub(crate) fn usage_secrets(
+    credentials: &str,
+    setup_token: Option<&str>,
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> Vec<String> {
+    let mut secrets = Vec::new();
+    for token in [
+        crate::creds::access_token(credentials),
+        crate::creds::refresh_token(credentials),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        push_secret(&mut secrets, token);
+    }
+    if let Some(token) = setup_token {
+        push_secret(&mut secrets, token.to_owned());
+    }
+    for (_, value) in env {
+        if let Some(text) = value.to_str() {
+            push_secret(&mut secrets, text.to_owned());
+        }
+    }
+    secrets
+}
+
+fn push_secret(secrets: &mut Vec<String>, token: String) {
+    if token.chars().count() < 8 || secrets.contains(&token) {
+        return;
+    }
+    secrets.push(token);
+}
+
+fn blank_usage_output(stderr: &str, secrets: &[&str]) -> PluginError {
+    // Scrub before the clip. A secret that crosses the 120-character cut
+    // would otherwise keep its head in the error.
+    let clean = crate::bridge::failure::redact_all(stderr, secrets);
+    let line = clean
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
@@ -847,7 +892,7 @@ Usage report: no meters on this plan
     }
 
     fn assert_failed_read(raw: &str, now: SystemTime, dir: &std::path::Path) {
-        let err = windows_from_output(raw, "", now, dir).expect_err("error result");
+        let err = windows_from_output(raw, "", &[], now, dir).expect_err("error result");
         assert_eq!(err.kind(), PluginErrorKind::Transport);
         let message = err.message();
         assert!(!message.contains("planted-session-marker"));
@@ -860,7 +905,7 @@ Usage report: no meters on this plan
         let dir = tempfile::tempdir().expect("dir");
         for array in [false, true] {
             assert_failed_read(&error_result("", array), now, dir.path());
-            let err = windows_from_output(&error_result("", array), "", now, dir.path())
+            let err = windows_from_output(&error_result("", array), "", &[], now, dir.path())
                 .expect_err("empty");
             assert_eq!(err.message(), "Claude Code's /usage failed");
         }
@@ -892,7 +937,7 @@ Usage report: no meters on this plan
         for array in [false, true] {
             let raw = error_result(&result, array);
             assert_failed_read(&raw, now, dir.path());
-            let message = windows_from_output(&raw, "", now, dir.path())
+            let message = windows_from_output(&raw, "", &[], now, dir.path())
                 .expect_err("window")
                 .message()
                 .to_owned();
@@ -981,7 +1026,7 @@ Usage report: no meters on this plan
         let now = utc_at("2026-11-19T13:00:00Z");
         let dir = usage_based_dir();
         for raw in ["", " \n\t "] {
-            let err = windows_from_output(raw, "", now, dir.path()).expect_err("blank");
+            let err = windows_from_output(raw, "", &[], now, dir.path()).expect_err("blank");
             assert_eq!(err.kind(), PluginErrorKind::Transport);
             assert!(!err.message().contains(NO_METERS_DISPLAY));
             assert!(!err.message().contains(NO_METERS_WINDOW));
@@ -989,6 +1034,7 @@ Usage report: no meters on this plan
         let aside = windows_from_output(
             r#"{"type":"result","is_error":false,"result":""}"#,
             "",
+            &[],
             now,
             dir.path(),
         )
@@ -998,6 +1044,7 @@ Usage report: no meters on this plan
         let sentence = windows_from_output(
             "You are currently using your subscription to power your Claude Code usage",
             "",
+            &[],
             now,
             dir.path(),
         )
@@ -1013,7 +1060,7 @@ Usage report: no meters on this plan
             "usage reader stopped{}planted-tail-marker\nplanted-secret-marker\n",
             "x".repeat(200)
         );
-        let err = windows_from_output("\n", &stderr, now, dir.path()).expect_err("stderr");
+        let err = windows_from_output("\n", &stderr, &[], now, dir.path()).expect_err("stderr");
         assert_eq!(err.kind(), PluginErrorKind::Transport);
         let message = err.message();
         assert!(message.starts_with("Claude Code: usage reader stopped"));
@@ -1021,6 +1068,54 @@ Usage report: no meters on this plan
         assert!(!message.contains("planted-tail-marker"));
         assert!(!message.contains("planted-secret-marker"));
         assert!(!message.contains(NO_METERS_DISPLAY));
+    }
+
+    #[test]
+    fn i920_usage_stderr_redacts_a_secret_across_the_clip() {
+        let now = utc_at("2026-11-19T13:00:00Z");
+        let dir = tempfile::tempdir().expect("dir");
+        let oauth = "sk-ant-oat01-clipboundarysecretvalue";
+        let setup = "sk-ant-oat01-setupsecretvalue";
+        let api_key = "sk-ant-api03-stderrkeyvalue";
+        let credentials = format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"{oauth}","refreshToken":"rt-refresh-token-value"}}}}"#
+        );
+        let env = [(
+            std::ffi::OsString::from("ANTHROPIC_API_KEY"),
+            std::ffi::OsString::from(api_key),
+        )];
+        let secrets = usage_secrets(&credentials, Some(setup), &env);
+        let refs: Vec<&str> = secrets.iter().map(String::as_str).collect();
+
+        let mut head = format!("usage failed {api_key} {setup} ");
+        let start = 100;
+        assert!(head.chars().count() < start);
+        head.push_str(&".".repeat(start - head.chars().count()));
+        assert_eq!(head.chars().count(), start);
+        let line = format!("{head}{oauth} done");
+        let visible: String = line.chars().take(120).collect();
+        let hidden: String = line.chars().skip(120).collect();
+        let inside = 120 - start;
+        let fragment: String = oauth.chars().take(inside).collect();
+        let outside: String = oauth.chars().skip(inside).collect();
+        assert!(visible.contains(&fragment));
+        assert!(!visible.contains(oauth));
+        assert!(hidden.contains(&outside));
+        assert!(visible.contains(api_key));
+        assert!(visible.contains(setup));
+
+        let stderr = format!("{line}\n");
+        let err = windows_from_output("\n", &stderr, &refs, now, dir.path()).expect_err("stderr");
+        assert_eq!(err.kind(), PluginErrorKind::Transport);
+        let message = err.message();
+        assert!(message.contains("[redacted]"));
+        assert!(message.matches("[redacted]").count() >= 2);
+        assert!(!message.contains(oauth));
+        assert!(!message.contains(&fragment));
+        assert!(!message.contains(&outside));
+        assert!(!message.contains(api_key));
+        assert!(!message.contains(setup));
+        assert!(!message.contains("rt-refresh-token-value"));
     }
 
     #[test]
@@ -1070,7 +1165,7 @@ Usage report: no meters on this plan
             {"type": "result", "is_error": false, "result": 1}
         ])
         .to_string();
-        let windows = windows_from_output(&raw, "", now, dir.path()).expect("aside");
+        let windows = windows_from_output(&raw, "", &[], now, dir.path()).expect("aside");
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].display(), NO_METERS_DISPLAY);
         assert!(windows.iter().all(|window| window.name() != "5 hours"));
