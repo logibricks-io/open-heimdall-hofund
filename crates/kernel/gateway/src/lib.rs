@@ -3245,6 +3245,18 @@ fn failure(
         Some(upstream)
     };
     track.end_with(member, status.as_u16(), None, None);
+    if request.stream && message.contains(hofund_codec::EMPTY_REPLY_MESSAGE) {
+        let mut bytes = codec.encode_stream_error(status.as_u16(), &message);
+        bytes.extend_from_slice(codec.severed_stream_end());
+        return with_named_session(
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, codec.stream_content_type())
+                .body(Body::from(bytes))
+                .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "stream")),
+            &ledger.session_id,
+        );
+    }
     if compacts_in_stream_client(|name| headers.get(name).and_then(|value| value.to_str().ok()))
         && request.stream
         && codec.id() == ProtocolId::OPENAI_RESPONSES.as_str()

@@ -28,6 +28,9 @@ const TEXT_INDEX: u32 = 0;
 const THINKING_INDEX: u32 = 1;
 const TOOL_INDEX_BASE: u32 = 2;
 
+/// Stable protocol id for Chat Completions.
+pub const CHAT_PROTOCOL_ID: &str = "openai-chat";
+
 /// Codec for the OpenAI Chat Completions protocol.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct OpenAiChat;
@@ -57,7 +60,7 @@ impl OpenAiChat {
 
 impl Codec for OpenAiChat {
     fn id(&self) -> &'static str {
-        "openai-chat"
+        CHAT_PROTOCOL_ID
     }
 
     fn decode_request(&self, bytes: &[u8]) -> Result<Request, CodecError> {
