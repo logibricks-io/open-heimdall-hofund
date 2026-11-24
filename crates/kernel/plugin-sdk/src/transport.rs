@@ -2347,4 +2347,12 @@ mod tests {
         assert_eq!(error.kind(), PluginErrorKind::Quota);
         assert_eq!(error.reset_after(), Some(Duration::from_secs(4_720)));
     }
+
+    #[test]
+    fn d260_third_party_reset_keeps_the_written_seconds() {
+        assert_eq!(
+            retry_after_from_body(b"Third-party quota reached. Resets in 3h22m19s."),
+            Some(Duration::from_secs(12_139))
+        );
+    }
 }

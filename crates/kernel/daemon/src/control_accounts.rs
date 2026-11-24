@@ -158,6 +158,7 @@ impl AccountOps {
             host: request.host,
             label: request.label,
             site: request.site,
+            user: request.user,
         };
         let ctx = sign_in::sign_in_ctx(&entry.id, &options)
             .map_err(|_| invalid("sign-in options were rejected"))?;

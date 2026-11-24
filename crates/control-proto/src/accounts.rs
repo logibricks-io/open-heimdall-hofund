@@ -90,6 +90,9 @@ pub struct SignInStartRequest {
     /// Optional sign-in site.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub site: Option<String>,
+    /// Saved account to sign in again. Empty means a new account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
 }
 
 impl SignInStartRequest {
@@ -101,11 +104,15 @@ impl SignInStartRequest {
             host: None,
             label: None,
             site: None,
+            user: None,
         }
     }
 
     pub(crate) fn validate(&self) -> Result<(), ControlError> {
-        for value in [&self.host, &self.label, &self.site].into_iter().flatten() {
+        for value in [&self.host, &self.label, &self.site, &self.user]
+            .into_iter()
+            .flatten()
+        {
             validate_id(value)?;
         }
         Ok(())
@@ -646,6 +653,7 @@ mod tests {
             host: Some("example.test".to_owned()),
             label: Some("work".to_owned()),
             site: Some("device".to_owned()),
+            user: Some("me@example.com".to_owned()),
         };
         let body = serde_json::to_vec(&valid).expect("JSON");
         decode_request::<SignInStartRequest>(API_VERSION, &body).expect("valid options");
@@ -655,17 +663,20 @@ mod tests {
         };
         let body = serde_json::to_vec(&boundary).expect("JSON");
         decode_request::<SignInStartRequest>(API_VERSION, &body).expect("maximum id length");
-        for (host, label, site) in [
-            (Some(String::new()), None, None),
-            (None, Some(String::new()), None),
-            (None, None, Some(String::new())),
-            (Some("x".repeat(MAX_ID_BYTES + 1)), None, None),
+        for (host, label, site, user) in [
+            (Some(String::new()), None, None, None),
+            (None, Some(String::new()), None, None),
+            (None, None, Some(String::new()), None),
+            (None, None, None, Some(String::new())),
+            (Some("x".repeat(MAX_ID_BYTES + 1)), None, None, None),
+            (None, None, None, Some("x".repeat(MAX_ID_BYTES + 1))),
         ] {
             invalid(&SignInStartRequest {
                 version: API_VERSION,
                 host,
                 label,
                 site,
+                user,
             });
         }
     }
