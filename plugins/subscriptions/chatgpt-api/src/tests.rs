@@ -106,6 +106,7 @@ fn authorize_url_carries_dynamic_client_and_host_id() {
         "state-1",
         "nonce-1",
         "urn:uuid:00000000-0000-4000-8000-000000000001",
+        None,
     )
     .expect("url");
     let pairs = query_pairs(&url);
@@ -362,4 +363,479 @@ fn refresh_posts_client_id_and_resource() {
 #[test]
 fn refresh_margin_constant_matches_reference() {
     assert_eq!(tokens::REFRESH_MARGIN.as_secs(), 180);
+}
+
+const NOW_SECS: u64 = 1_700_000_000;
+const AGAIN_SESSION: &str = "abcdef0123456789abcdef0123456789";
+const PROBE_SESSION: &str = "fedcba9876543210fedcba9876543210";
+
+fn fixed_now() -> std::time::SystemTime {
+    std::time::UNIX_EPOCH + std::time::Duration::from_secs(NOW_SECS)
+}
+
+fn host_at(dir: &tempfile::TempDir) -> TestHost {
+    TestHost::open_for_at(PluginKind::Subscription, plugin(), dir.path(), fixed_now())
+}
+
+fn ctx_for(session: &str, user: Option<&str>) -> SignInCtx {
+    let ctx = SignInCtx::new(plugin())
+        .with_session(session)
+        .expect("session");
+    match user {
+        Some(user) => ctx.with_option("user", user).expect("user"),
+        None => ctx,
+    }
+}
+
+fn id_token_at(email: &str, sub: &str, nonce: &str, client_id: &str, exp: u64) -> String {
+    jwt(&format!(
+        r#"{{"email":"{email}","sub":"{sub}","nonce":"{nonce}","iss":"https://auth.openai.com","aud":"{client_id}","exp":{exp},"https://api.openai.com/auth":{{"chatgpt_plan_type":"plus"}}}}"#
+    ))
+}
+
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'+' => {
+                out.push(b' ');
+                index += 1;
+            }
+            b'%' if index + 2 < bytes.len() => {
+                let hex = &text[index + 1..index + 3];
+                if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                    out.push(byte);
+                    index += 3;
+                } else {
+                    out.push(b'%');
+                    index += 1;
+                }
+            }
+            byte => {
+                out.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn query_value(url: &str, key: &str) -> Option<String> {
+    let query = url.split_once('?')?.1;
+    query.split('&').find_map(|pair| {
+        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+        (percent_decode(name) == key).then(|| percent_decode(value))
+    })
+}
+
+fn open_url(challenge: SignInChallenge) -> String {
+    let SignInChallenge::OpenUrl { url, .. } = challenge else {
+        panic!("open url");
+    };
+    url
+}
+
+fn token_bodies(host: &TestHost) -> Vec<String> {
+    host.http()
+        .calls()
+        .into_iter()
+        .filter(|call| call.uri().contains("/oauth/token"))
+        .map(|call| String::from_utf8(call.body().to_vec()).unwrap_or_default())
+        .collect()
+}
+
+fn stored_text(host: &TestHost, id: &AccountId, key: &str) -> String {
+    let blob = SecretObject::parse(
+        &block_on(host.context().accounts().secret(id))
+            .expect("read")
+            .expect("secret"),
+    )
+    .expect("blob");
+    blob.text(key).unwrap_or_default().to_owned()
+}
+
+fn stored_access(host: &TestHost, id: &AccountId) -> String {
+    let blob = SecretObject::parse(
+        &block_on(host.context().accounts().secret(id))
+            .expect("read")
+            .expect("secret"),
+    )
+    .expect("blob");
+    blob.secret("access_token")
+        .map(|token| secret_text(&token).to_owned())
+        .unwrap_or_default()
+}
+
+fn sign_up(host: &TestHost, sub: &dyn Subscription) -> (AccountId, String) {
+    let challenge = block_on(sub.start_sign_in(&ctx(), host.context())).expect("start");
+    let url = open_url(challenge);
+    let state = query_value(&url, "state").expect("state");
+    let nonce = query_value(&url, "nonce").expect("nonce");
+    let idt = id_token_at(
+        "me@example.com",
+        "user-1",
+        &nonce,
+        "oaiapp_123",
+        NOW_SECS + 3600,
+    );
+    host.http()
+        .enqueue(token_reply("access-first", "refresh-first", &idt));
+    host.http()
+        .enqueue(include_bytes!("fixtures/models.json").as_slice());
+    let id = block_on(sub.complete_sign_in(
+        &ctx(),
+        SignInProof::Callback {
+            code: SecretString::from("code-first".to_owned()),
+            state,
+            issued_client_id: Some("oaiapp_123".to_owned()),
+        },
+        host.context(),
+    ))
+    .expect("signed in");
+    (id, idt)
+}
+
+#[test]
+fn d257_sign_in_again_uses_the_saved_client_and_hints() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host_at(&dir);
+    let sub = subscription(&host);
+    let (id, idt) = sign_up(&host, sub.as_ref());
+    assert_eq!(stored_text(&host, &id, "client_id"), "oaiapp_123");
+
+    let challenge = block_on(sub.start_sign_in(
+        &ctx_for(AGAIN_SESSION, Some("Me@Example.COM")),
+        host.context(),
+    ))
+    .expect("again");
+    let url = open_url(challenge);
+    assert_eq!(
+        query_value(&url, "client_id").as_deref(),
+        Some("oaiapp_123")
+    );
+    assert_eq!(
+        query_value(&url, "id_token_hint").as_deref(),
+        Some(idt.as_str())
+    );
+    assert_eq!(
+        query_value(&url, "login_hint").as_deref(),
+        Some("me@example.com")
+    );
+    assert!(query_value(&url, "agent_name_hint").is_none());
+    assert_eq!(
+        query_value(&url, "ext_agent_host_id").as_deref(),
+        Some(host_id::load(host.context()).expect("host id").as_str())
+    );
+    assert_eq!(
+        query_value(&url, "resource").as_deref(),
+        Some("https://api.openai.com/v1")
+    );
+    assert!(
+        query_value(&url, "scope")
+            .unwrap_or_default()
+            .contains(sign_in::DIRECT_SCOPE)
+    );
+
+    let probe = block_on(sub.start_sign_in(&ctx_for(PROBE_SESSION, None), host.context()))
+        .expect("new account");
+    let probe_url = open_url(probe);
+    assert_eq!(
+        query_value(&probe_url, "client_id").as_deref(),
+        Some(sign_in::DYNAMIC_CLIENT)
+    );
+    assert_eq!(
+        query_value(&probe_url, "agent_name_hint").as_deref(),
+        Some(sign_in::AGENT_NAME)
+    );
+    block_on(sub.cancel_sign_in(&ctx_for(PROBE_SESSION, None), host.context())).expect("cancel");
+
+    let state = query_value(&url, "state").expect("state");
+    let nonce = query_value(&url, "nonce").expect("nonce");
+    let next = id_token_at(
+        "me@example.com",
+        "user-1",
+        &nonce,
+        "oaiapp_123",
+        NOW_SECS + 3600,
+    );
+    host.http()
+        .enqueue(token_reply("access-again", "refresh-again", &next));
+    host.http()
+        .enqueue(include_bytes!("fixtures/models.json").as_slice());
+    let again = block_on(sub.complete_sign_in(
+        &ctx_for(AGAIN_SESSION, Some("me@example.com")),
+        SignInProof::Callback {
+            code: SecretString::from("code-again".to_owned()),
+            state,
+            issued_client_id: None,
+        },
+        host.context(),
+    ))
+    .expect("signed in again");
+    assert_eq!(again, id);
+    let traded = token_bodies(&host);
+    assert!(
+        traded
+            .last()
+            .is_some_and(|body| body.contains("client_id=oaiapp_123")),
+        "the code was not traded under the saved client"
+    );
+    assert_eq!(stored_text(&host, &id, "client_id"), "oaiapp_123");
+    assert_eq!(stored_access(&host, &id), "access-again");
+}
+
+#[test]
+fn d257_another_client_replaces_nothing() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host_at(&dir);
+    let sub = subscription(&host);
+    let (id, _) = sign_up(&host, sub.as_ref());
+    let before = token_bodies(&host).len();
+    let challenge = block_on(sub.start_sign_in(
+        &ctx_for(AGAIN_SESSION, Some("me@example.com")),
+        host.context(),
+    ))
+    .expect("again");
+    let state = query_value(&open_url(challenge), "state").expect("state");
+    let error = block_on(sub.complete_sign_in(
+        &ctx_for(AGAIN_SESSION, None),
+        SignInProof::Callback {
+            code: SecretString::from("code-other".to_owned()),
+            state,
+            issued_client_id: Some("oaiapp_999".to_owned()),
+        },
+        host.context(),
+    ))
+    .expect_err("other client");
+    assert_eq!(error.kind(), PluginErrorKind::Auth);
+    assert!(error.to_string().contains("another client"));
+    assert_eq!(token_bodies(&host).len(), before);
+    assert_eq!(stored_text(&host, &id, "client_id"), "oaiapp_123");
+    assert_eq!(stored_access(&host, &id), "access-first");
+}
+
+#[test]
+fn d257_another_subject_replaces_nothing() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host_at(&dir);
+    let sub = subscription(&host);
+    let (id, _) = sign_up(&host, sub.as_ref());
+    let challenge = block_on(sub.start_sign_in(
+        &ctx_for(AGAIN_SESSION, Some("me@example.com")),
+        host.context(),
+    ))
+    .expect("again");
+    let url = open_url(challenge);
+    let state = query_value(&url, "state").expect("state");
+    let nonce = query_value(&url, "nonce").expect("nonce");
+    let other = id_token_at(
+        "other@example.com",
+        "user-2",
+        &nonce,
+        "oaiapp_123",
+        NOW_SECS + 3600,
+    );
+    host.http()
+        .enqueue(token_reply("access-other", "refresh-other", &other));
+    let error = block_on(sub.complete_sign_in(
+        &ctx_for(AGAIN_SESSION, None),
+        SignInProof::Callback {
+            code: SecretString::from("code-other".to_owned()),
+            state,
+            issued_client_id: None,
+        },
+        host.context(),
+    ))
+    .expect_err("other subject");
+    assert_eq!(error.kind(), PluginErrorKind::Auth);
+    assert!(error.to_string().contains("not the account"));
+    assert!(error.to_string().contains("other@example.com"));
+    assert_eq!(stored_text(&host, &id, "client_id"), "oaiapp_123");
+    assert_eq!(stored_access(&host, &id), "access-first");
+}
+
+#[test]
+fn d257_stale_id_token_hint_is_left_out() {
+    let pkce = Pkce::generate().expect("pkce");
+    let now = fixed_now();
+    let cases = [
+        (NOW_SECS - 2 * 3600, false),
+        (NOW_SECS + 3600, true),
+        (NOW_SECS + 60, false),
+        (NOW_SECS + 61, true),
+    ];
+    for (exp, hint) in cases {
+        let token = jwt(&format!(r#"{{"sub":"user-1","exp":{exp}}}"#));
+        assert_eq!(sign_in::id_token_hint_live(&token, now), hint, "exp {exp}");
+        let url = sign_in::authorize(
+            "https://auth.test/api/accounts/authorize",
+            "http://127.0.0.1:1/auth/callback",
+            &pkce,
+            "state-1",
+            "nonce-1",
+            "urn:uuid:x",
+            Some(sign_in::AuthorizeSaved {
+                client_id: "oaiapp_123",
+                id_token: &token,
+                email: "me@example.com",
+                now,
+            }),
+        )
+        .expect("url");
+        assert_eq!(query_value(&url, "id_token_hint").is_some(), hint);
+        assert_eq!(
+            query_value(&url, "client_id").as_deref(),
+            Some("oaiapp_123")
+        );
+        assert_eq!(
+            query_value(&url, "login_hint").as_deref(),
+            Some("me@example.com")
+        );
+        assert!(query_value(&url, "agent_name_hint").is_none());
+    }
+    for token in ["", "not-a-jwt"] {
+        assert!(!sign_in::id_token_hint_live(token, now));
+        let url = sign_in::authorize(
+            "https://auth.test/api/accounts/authorize",
+            "http://127.0.0.1:1/auth/callback",
+            &pkce,
+            "state-1",
+            "nonce-1",
+            "urn:uuid:x",
+            Some(sign_in::AuthorizeSaved {
+                client_id: "oaiapp_123",
+                id_token: token,
+                email: "me@example.com",
+                now,
+            }),
+        )
+        .expect("url");
+        assert!(query_value(&url, "id_token_hint").is_none());
+        assert_eq!(
+            query_value(&url, "login_hint").as_deref(),
+            Some("me@example.com")
+        );
+    }
+
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host_at(&dir);
+    let sub = subscription(&host);
+    let (id, _) = sign_up(&host, sub.as_ref());
+    let stale = id_token_at(
+        "me@example.com",
+        "user-1",
+        "old-nonce",
+        "oaiapp_123",
+        NOW_SECS - 2 * 3600,
+    );
+    let blob = SecretObject::parse(
+        &block_on(host.context().accounts().secret(&id))
+            .expect("read")
+            .expect("secret"),
+    )
+    .expect("blob")
+    .with_secret("id_token", &SecretString::from(stale));
+    block_on(async {
+        let accounts = host.context().accounts();
+        let row = accounts
+            .account(id.clone(), "me@example.com")
+            .expect("account");
+        accounts
+            .upsert(row, blob.to_secret())
+            .await
+            .expect("upsert");
+    });
+    let challenge = block_on(sub.start_sign_in(
+        &ctx_for(AGAIN_SESSION, Some("me@example.com")),
+        host.context(),
+    ))
+    .expect("again");
+    let url = open_url(challenge);
+    assert_eq!(
+        query_value(&url, "client_id").as_deref(),
+        Some("oaiapp_123")
+    );
+    assert!(query_value(&url, "id_token_hint").is_none());
+    assert_eq!(
+        query_value(&url, "login_hint").as_deref(),
+        Some("me@example.com")
+    );
+    assert!(query_value(&url, "agent_name_hint").is_none());
+}
+
+#[test]
+fn d257_unknown_user_stays_dynamic() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host_at(&dir);
+    let sub = subscription(&host);
+    let _ = sign_up(&host, sub.as_ref());
+    let challenge = block_on(sub.start_sign_in(
+        &ctx_for(AGAIN_SESSION, Some("nobody@example.com")),
+        host.context(),
+    ))
+    .expect("new");
+    let url = open_url(challenge);
+    assert_eq!(
+        query_value(&url, "client_id").as_deref(),
+        Some(sign_in::DYNAMIC_CLIENT)
+    );
+    assert_eq!(
+        query_value(&url, "agent_name_hint").as_deref(),
+        Some(sign_in::AGENT_NAME)
+    );
+    let state = query_value(&url, "state").expect("state");
+    let error = block_on(sub.complete_sign_in(
+        &ctx_for(AGAIN_SESSION, None),
+        SignInProof::Callback {
+            code: SecretString::from("code-new".to_owned()),
+            state,
+            issued_client_id: None,
+        },
+        host.context(),
+    ))
+    .expect_err("no client");
+    assert!(error.to_string().contains("no client id"));
+}
+
+#[test]
+fn d257_same_callback_client_is_traded() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host_at(&dir);
+    let sub = subscription(&host);
+    let (id, _) = sign_up(&host, sub.as_ref());
+    let challenge =
+        block_on(sub.start_sign_in(&ctx_for(AGAIN_SESSION, Some("user-1")), host.context()))
+            .expect("again");
+    let url = open_url(challenge);
+    assert_eq!(
+        query_value(&url, "client_id").as_deref(),
+        Some("oaiapp_123")
+    );
+    let state = query_value(&url, "state").expect("state");
+    let nonce = query_value(&url, "nonce").expect("nonce");
+    let next = id_token_at(
+        "me@example.com",
+        "user-1",
+        &nonce,
+        "oaiapp_123",
+        NOW_SECS + 3600,
+    );
+    host.http()
+        .enqueue(token_reply("access-same", "refresh-same", &next));
+    host.http()
+        .enqueue(include_bytes!("fixtures/models.json").as_slice());
+    block_on(sub.complete_sign_in(
+        &ctx_for(AGAIN_SESSION, None),
+        SignInProof::Callback {
+            code: SecretString::from("code-same".to_owned()),
+            state,
+            issued_client_id: Some("  oaiapp_123  ".to_owned()),
+        },
+        host.context(),
+    ))
+    .expect("same client");
+    assert_eq!(stored_access(&host, &id), "access-same");
+    assert_eq!(stored_text(&host, &id, "client_id"), "oaiapp_123");
 }
