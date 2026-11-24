@@ -96,7 +96,7 @@ The `bedrock` plugin signs each Converse request with the SDK `AwsSigner`. A sto
 
 `list_models` and `probe` use the adapter's pooled endpoint client. The SDK pager owns cursor rules; the provider transport enforces body caps while reading. The relay remains unsupported. For `[providers.models].url`, the daemon fetches that exact URL through `HostContext` and the SDK pager rather than treating it as a plugin base. It redacts the resolved URL, its query, and every query value.
 
-The daemon probe selector uses route mappings and listed endpoint metadata. `NamedOnlyOn` applies to OpenCode's Generative wire when that metadata exists. There is no models.dev cache yet, so catalog-only API decoration and the fallback limits cache are absent; `ModelsHost::with_catalog_limits` is the seam for row 2.8. Disabled-model state and per-key visibility do not exist in this slice. The daemon emits `model_list` and `provider_test` tracing events because there is no separate probe request-log store.
+The daemon probe selector uses route mappings and listed endpoint metadata. `NamedOnlyOn` applies to OpenCode's Generative wire when that metadata exists. The models.dev cache decorates listed rows through the provider's ordered catalog ids. D-264 adds region-aware catalog selection, migration of preset-owned saved values, preservation of user-named catalogs, and membership-price exclusion. General display-name decoration remains deferred. Disabled-model state and per-key visibility do not exist in this slice. The daemon emits `model_list` and `provider_test` tracing events because there is no separate probe request-log store.
 
 ## How options reach a factory
 
