@@ -160,7 +160,10 @@ pub(crate) fn usage_based_seat(dir: &Path) -> bool {
 ///
 /// A result with `is_error: true` is a failed read. The error quotes only a
 /// clipped `result` string, never the rest of the JSON.
-pub(crate) fn attach_report(raw: &str) -> Result<String, PluginError> {
+///
+/// [`windows_from_output`] passes known secrets so they are scrubbed before
+/// the clip. Callers that are not building that error pass an empty list.
+pub(crate) fn attach_report(raw: &str, secrets: &[&str]) -> Result<String, PluginError> {
     let trimmed = raw.trim();
     let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
         return Ok(raw.to_owned());
@@ -169,7 +172,7 @@ pub(crate) fn attach_report(raw: &str) -> Result<String, PluginError> {
         Value::Object(object) => {
             if object.get("is_error").and_then(Value::as_bool) == Some(true) {
                 let result = object.get("result").and_then(Value::as_str).unwrap_or("");
-                return Err(usage_command_failed(result));
+                return Err(usage_command_failed(result, secrets));
             }
             Ok(object
                 .get("result")
@@ -193,7 +196,7 @@ pub(crate) fn attach_report(raw: &str) -> Result<String, PluginError> {
                 return Ok(raw.to_owned());
             };
             if is_error {
-                return Err(usage_command_failed(&result));
+                return Err(usage_command_failed(&result, secrets));
             }
             let extra = report_lines(&items, &result);
             Ok(format!("{result}{extra}"))
@@ -206,9 +209,10 @@ pub(crate) fn attach_report(raw: &str) -> Result<String, PluginError> {
 /// before parsing and before the usage-based seat check.
 ///
 /// Empty or whitespace-only standard output is a transport error before
-/// that parse. When that error quotes a standard-error line, `secrets` are
-/// scrubbed with the same helper as a process that ends early, and the line
-/// is clipped only after that. A JSON success whose `result` string is empty
+/// that parse. When that error quotes a standard-error line, or an `is_error`
+/// result string, `secrets` are scrubbed with the same helper as a process
+/// that ends early, and the text is clipped only after that. A JSON success
+/// whose `result` string is empty
 /// still reaches the parser, so a usage-based seat can show the aside.
 pub(crate) fn windows_from_output(
     raw: &str,
@@ -220,7 +224,7 @@ pub(crate) fn windows_from_output(
     if raw.trim().is_empty() {
         return Err(blank_usage_output(stderr, secrets));
     }
-    let text = attach_report(raw)?;
+    let text = attach_report(raw, secrets)?;
     parse_for_dir(&text, now, dir)
 }
 
@@ -280,8 +284,10 @@ fn blank_usage_output(stderr: &str, secrets: &[&str]) -> PluginError {
     }
 }
 
-fn usage_command_failed(result: &str) -> PluginError {
-    let clipped = clip_line(result.trim());
+fn usage_command_failed(result: &str, secrets: &[&str]) -> PluginError {
+    // Scrub before the clip, same as a quoted standard-error line.
+    let clean = crate::bridge::failure::redact_all(result.trim(), secrets);
+    let clipped = clip_line(clean.trim());
     if clipped.is_empty() {
         PluginError::transport("Claude Code's /usage failed")
     } else {
@@ -735,8 +741,8 @@ Usage report: no meters on this plan
     #[test]
     fn d238_report_rows_fill_a_text_that_drew_no_window() {
         let now = utc_at("2026-11-19T13:00:00Z");
-        let text =
-            attach_report(include_str!("fixtures/usage/enterprise_rows.json")).expect("report");
+        let text = attach_report(include_str!("fixtures/usage/enterprise_rows.json"), &[])
+            .expect("report");
         assert!(text.contains("Current session: 37.5% used · resets 2026-11-19T15:00:00.000Z"));
         assert!(text.contains("Current week (all models): 8% used · resets 2026-11-26T13:00:00Z"));
         assert!(text.contains("Current week (Fable): 4% used"));
@@ -759,16 +765,16 @@ Usage report: no meters on this plan
 
     #[test]
     fn d238_text_that_drew_a_window_ignores_report_rows() {
-        let text =
-            attach_report(include_str!("fixtures/usage/text_drew_window.json")).expect("report");
+        let text = attach_report(include_str!("fixtures/usage/text_drew_window.json"), &[])
+            .expect("report");
         assert_eq!(text, "Current session: 13% used");
     }
 
     #[test]
     fn d238_empty_limits_with_credits_is_an_aside_beside_usage_credits() {
         let now = utc_at("2026-11-19T13:00:00Z");
-        let text =
-            attach_report(include_str!("fixtures/usage/no_meters_credits.json")).expect("report");
+        let text = attach_report(include_str!("fixtures/usage/no_meters_credits.json"), &[])
+            .expect("report");
         assert!(text.contains(NO_METERS_LINE));
         assert!(text.contains("Extra usage: 12.00 / 500.00 USD spent"));
         let windows = parse(&text, now).expect("aside");
@@ -789,7 +795,7 @@ Usage report: no meters on this plan
     #[test]
     fn d238_bad_row_keeps_the_extra_line_and_stays_unavailable() {
         let now = utc_at("2026-11-19T13:00:00Z");
-        let text = attach_report(include_str!("fixtures/usage/bad_row.json")).expect("report");
+        let text = attach_report(include_str!("fixtures/usage/bad_row.json"), &[]).expect("report");
         assert!(text.contains("Extra usage: 1.00 / 500.00 USD spent"));
         assert!(!text.contains("Current session:"));
         let error = parse(&text, now).expect_err("unavailable");
@@ -806,7 +812,7 @@ Usage report: no meters on this plan
             include_str!("fixtures/usage/rate_limits_null.json"),
             include_str!("fixtures/usage/no_meters.json"),
         ] {
-            let text = attach_report(fixture).expect("report");
+            let text = attach_report(fixture, &[]).expect("report");
             if fixture.contains("\"limits\":[]") {
                 let windows = parse(&text, now).expect("empty limits");
                 assert_eq!(windows[0].display(), NO_METERS_DISPLAY);
@@ -982,7 +988,7 @@ Usage report: no meters on this plan
             }
         ])
         .to_string();
-        let text = attach_report(&raw).expect("report");
+        let text = attach_report(&raw, &[]).expect("report");
         assert!(text.contains("Current session: 3% used"));
         assert!(!text.contains("Current session: 99"));
         assert!(!text.contains("Extra usage:"));
@@ -1077,8 +1083,9 @@ Usage report: no meters on this plan
         let oauth = "sk-ant-oat01-clipboundarysecretvalue";
         let setup = "sk-ant-oat01-setupsecretvalue";
         let api_key = "sk-ant-api03-stderrkeyvalue";
+        let refresh = "rt-refresh-token-value";
         let credentials = format!(
-            r#"{{"claudeAiOauth":{{"accessToken":"{oauth}","refreshToken":"rt-refresh-token-value"}}}}"#
+            r#"{{"claudeAiOauth":{{"accessToken":"{oauth}","refreshToken":"{refresh}"}}}}"#
         );
         let env = [(
             std::ffi::OsString::from("ANTHROPIC_API_KEY"),
@@ -1087,7 +1094,7 @@ Usage report: no meters on this plan
         let secrets = usage_secrets(&credentials, Some(setup), &env);
         let refs: Vec<&str> = secrets.iter().map(String::as_str).collect();
 
-        let mut head = format!("usage failed {api_key} {setup} ");
+        let mut head = format!("usage failed {api_key} {setup} {refresh} ");
         let start = 100;
         assert!(head.chars().count() < start);
         head.push_str(&".".repeat(start - head.chars().count()));
@@ -1103,6 +1110,7 @@ Usage report: no meters on this plan
         assert!(hidden.contains(&outside));
         assert!(visible.contains(api_key));
         assert!(visible.contains(setup));
+        assert!(visible.contains(refresh));
 
         let stderr = format!("{line}\n");
         let err = windows_from_output("\n", &stderr, &refs, now, dir.path()).expect_err("stderr");
@@ -1115,7 +1123,50 @@ Usage report: no meters on this plan
         assert!(!message.contains(&outside));
         assert!(!message.contains(api_key));
         assert!(!message.contains(setup));
-        assert!(!message.contains("rt-refresh-token-value"));
+        assert!(!message.contains(refresh));
+    }
+
+    #[test]
+    fn i920_error_result_redacts_a_secret_across_the_clip() {
+        let now = utc_at("2026-11-19T13:00:00Z");
+        let dir = tempfile::tempdir().expect("dir");
+        let oauth = "sk-ant-oat01-clipboundarysecretvalue";
+        let refresh = "rt-refresh-token-value";
+        let credentials = format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"{oauth}","refreshToken":"{refresh}"}}}}"#
+        );
+        let secrets = usage_secrets(&credentials, None, &[]);
+        let refs: Vec<&str> = secrets.iter().map(String::as_str).collect();
+
+        let mut head = format!("usage failed {refresh} ");
+        let start = 100;
+        assert!(head.chars().count() < start);
+        head.push_str(&".".repeat(start - head.chars().count()));
+        assert_eq!(head.chars().count(), start);
+        let result = format!("{head}{oauth} done");
+        let visible: String = result.chars().take(120).collect();
+        let hidden: String = result.chars().skip(120).collect();
+        let inside = 120 - start;
+        let fragment: String = oauth.chars().take(inside).collect();
+        let outside: String = oauth.chars().skip(inside).collect();
+        assert!(visible.contains(&fragment));
+        assert!(visible.contains(refresh));
+        assert!(!visible.contains(oauth));
+        assert!(hidden.contains(&outside));
+
+        for array in [false, true] {
+            let raw = error_result(&result, array);
+            let err = windows_from_output(&raw, "", &refs, now, dir.path()).expect_err("result");
+            assert_eq!(err.kind(), PluginErrorKind::Transport);
+            let message = err.message();
+            assert!(message.contains("[redacted]"));
+            assert!(message.matches("[redacted]").count() >= 2);
+            assert!(!message.contains(oauth));
+            assert!(!message.contains(&fragment));
+            assert!(!message.contains(&outside));
+            assert!(!message.contains(refresh));
+            assert!(!message.contains("planted-session-marker"));
+        }
     }
 
     #[test]
@@ -1141,7 +1192,7 @@ Usage report: no meters on this plan
             }
         ])
         .to_string();
-        let text = attach_report(&raw).expect("report");
+        let text = attach_report(&raw, &[]).expect("report");
         assert!(text.contains("Current session: 3% used"));
         assert!(!text.contains("99%"));
         assert!(!text.contains("Current week"));

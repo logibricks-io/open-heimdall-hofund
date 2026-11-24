@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- #920 item 3: A Claude `/usage` failure that quotes a standard-error line, or an `is_error` result string, scrubs known secrets (an OAuth or setup token, a refresh token, or an API key value) with the same redaction as a process that ends early, before that text is clipped, so a token that crosses the clip is not returned.
+
 ## [0.2.0-rc.3] - 2026-11-20
 
 This is a third preview (prerelease) of v0.2.0. It carries the subscription,
@@ -72,7 +76,6 @@ repository secrets are set; otherwise the artifacts are unsigned.
 
 ### Fixed
 
-- #920 item 3: A Claude `/usage` failure that quotes a standard-error line scrubs known secrets (an OAuth or setup token, or an API key value) with the same redaction as a process that ends early, before the line is clipped, so a token on that line is not returned.
 - D-242: A Codex subscription function tool whose `strict` is omitted, or is not a boolean, is sent with `strict` false. A tool that asks for strict keeps that flag when its parameters still compile under the ChatGPT backend's strict rules, with each `oneOf` keyword rewritten as `anyOf`. A schema those rules still refuse (a keyword they do not take, a lookaround in a pattern, an open object, a property left out of `required`, a root that is not an object, or a node with only `const`) is sent as written with `strict` false. Function tools nested in a namespace, and in `additional_tools` or `tool_search_output` input items, are included. A Chat or Messages client's `strict` survives the cross-protocol extension strip onto the Responses tool, so this check sees it. An omitted `strict` stays omitted until this pass.
 - D-240: An Azure key that has answered a request and then receives HTTP 401 rests suspended for 24 hours, and the deployment list is probed in the background until it answers. A key that has never answered, or whose secret was replaced, keeps the generic 401 rest and is not probed. A one-key provider is answered only by a ledger row for the key it is using now, and only when that row is still inside the 30-day window, so an older key's success does not suspend the replacement after restart. A model success that started before the secret change does not mark the replacement answered, whether the same member is kept or the member is removed. Dropping that active suspended rest emits a recovery. A later successful request lifts that member-wide rest. A ledger key id that is not kebab-case is skipped. The plugin sets a vendor-neutral `subscription_suspended` flag; the router does not match vendor wording.
 - D-237: A Claude `/usage` reading that still has no 5-hour window after the weekly used share rose inside five hours no longer shows an invented 5-hour window at 0%. The omission is kept in the account directory and stays out across a restart until a reading includes a real 5-hour window. An account not yet seen used still shows the unstarted 5-hour window. A previous no-meters aside does not count as that omission, so a later idle week still shows the unstarted window. A header that is not a whole `/usage` reading does not count either, so it does not hide the saved reading. The decision uses the windows and time from before `/usage` runs. The reading file is created mode `0600`, and a failed save is returned.
