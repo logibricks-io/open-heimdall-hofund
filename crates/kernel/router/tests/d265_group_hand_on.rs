@@ -22,6 +22,7 @@ enum Reply {
     Status(u16, &'static str),
     StatusAdvance(u16, &'static str, u64),
     StatusThenUnary(u16, &'static str),
+    StatusTwiceThenUnary(u16, &'static str),
     StreamStatus(u16),
     StreamOk,
     Quota,
@@ -75,6 +76,10 @@ impl Member for Fake {
                 Err(PluginError::status_error(status, message))
             }
             Reply::StatusThenUnary(_, _) => Ok(Completion::Unary(Box::new(answer()))),
+            Reply::StatusTwiceThenUnary(status, message) if hit < 2 => {
+                Err(PluginError::status_error(status, message))
+            }
+            Reply::StatusTwiceThenUnary(_, _) => Ok(Completion::Unary(Box::new(answer()))),
             Reply::StreamStatus(status) => Ok(Completion::Stream(Box::pin(stream::iter([Err(
                 PluginError::status_error(status, "before content"),
             )])))),
@@ -283,14 +288,24 @@ impl WaitHook for ImmediateWait {
 
 #[tokio::test]
 async fn d265_patience_replans_busy_probe_after_hand_on() {
-    for handed in [Reply::Status(503, "unavailable"), Reply::Quota] {
+    for (probe, handed, upstream, expected) in [
+        (
+            Reply::StatusTwiceThenUnary(503, "unavailable"),
+            Reply::StatusThenUnary(503, "unavailable"),
+            "second",
+            vec!["first", "second", "first", "second"],
+        ),
+        (
+            Reply::StatusThenUnary(503, "unavailable"),
+            Reply::Quota,
+            "first",
+            vec!["first", "second", "first"],
+        ),
+    ] {
         let fixture = Fixture::new();
         fixture.rest("first", Rest::Rate);
         fixture.rest("second", Rest::Rate);
-        let router = fixture.patient_router(&[
-            ("first", Reply::StatusThenUnary(503, "unavailable")),
-            ("second", handed),
-        ]);
+        let router = fixture.patient_router(&[("first", probe), ("second", handed)]);
         let waits = Arc::new(Mutex::new(Vec::new()));
         let wait = Arc::new(ImmediateWait {
             now: Arc::clone(&fixture.now),
@@ -299,9 +314,9 @@ async fn d265_patience_replans_busy_probe_after_hand_on() {
         let routed = router
             .dispatch_with_wait(&Request::new("demo"), "test", None, Some(wait))
             .await
-            .expect("busy probe is replanned");
-        assert_eq!(routed.upstream_id, "first");
-        assert_eq!(fixture.seen(), ["first", "second", "first"]);
+            .expect("busy members are replanned together");
+        assert_eq!(routed.upstream_id, upstream);
+        assert_eq!(fixture.seen(), expected);
         assert_eq!(
             waits.lock().expect("waits").as_slice(),
             [Duration::from_secs(2)]
