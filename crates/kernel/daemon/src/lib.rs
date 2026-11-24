@@ -794,6 +794,10 @@ async fn start_inner(
     let running = running
         .with_resource(AffinityFlush(runtime.affinity()))
         .with_resource(sign_in::SubscriptionRisks::new(Arc::clone(&runtime)))
+        .with_before_drain({
+            let runtime = Arc::clone(&runtime);
+            move || runtime.stopping_upstreams()
+        })
         .with_after_drain({
             let runtime = Arc::clone(&runtime);
             move || async move {

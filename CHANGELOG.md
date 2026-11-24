@@ -7,13 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- D-259: a dropped Claude bridge request shelves a session cut at a known end (the saved session the run started from, or the preceding assistant row whose stop reason is `end_turn`) and lets the run go. A different next turn resumes that cut and is told only that turn. A request for the same turn waits while the cut is still being made, and returns 499 if its own client goes. A new run, a request carrying client cache marks, and a run that does not persist a session keep nothing.
-
 ### Fixed
 
-- D-253: an exact turn-key miss on the Claude bridge passes over Claude Code's local `No response requested.` reply when an idle run or a shelved session is waiting at the upstream's last reply with the same account, model, settings, system, and tools. That turn is the cancelled user message plus the local reply. A limit refusal or a busy retry keeps the cancelled message.
+- D-263: Chat usage counts a top-level `reasoning_tokens` as reasoning when `completion_tokens_details` has no positive count, on a whole reply and on a stream. A positive count in `completion_tokens_details` is kept, and the two numbers are not added.
 
 ### Security
 

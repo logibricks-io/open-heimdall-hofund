@@ -451,6 +451,8 @@ fn unix_ms_now() -> u64 {
 #[doc(hidden)]
 pub const CONTROL_DRAIN: std::time::Duration = std::time::Duration::from_secs(4);
 
+/// Hook run before the HTTP drain starts.
+type BeforeDrainHook = Box<dyn FnOnce() + Send>;
 /// Hook run after the HTTP drain, before [`Running`] is dropped.
 type AfterDrainHook = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
 
@@ -472,6 +474,7 @@ pub struct Running {
     realtimes: Option<Arc<realtime::Registry>>,
     relisten: Option<Relisten>,
     fatal: Option<watch::Receiver<Option<String>>>,
+    before_drain: Option<BeforeDrainHook>,
     after_drain: Option<AfterDrainHook>,
 }
 
@@ -833,6 +836,7 @@ impl Running {
             realtimes: None,
             relisten: None,
             fatal: None,
+            before_drain: None,
             after_drain: None,
         }
     }
@@ -953,6 +957,17 @@ impl Running {
         self
     }
 
+    /// Runs `hook` before listeners and in-flight requests are drained.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_before_drain<F>(mut self, hook: F) -> Self
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.before_drain = Some(Box::new(hook));
+        self
+    }
+
     /// Runs `hook` after the HTTP drain, before this server is dropped.
     ///
     /// The daemon uses this to shut constructed upstream providers down so
@@ -1042,9 +1057,13 @@ impl Running {
     /// Asks the server to stop, aborts attached tasks, and waits for the server.
     /// Control listeners close connections that outlast their drain deadline.
     /// Responses sockets close after their turns; dropping a bounded drain cuts them.
-    /// After the HTTP drain, any [`Self::with_after_drain`] hook runs so
-    /// constructed upstream providers can shut down before they are dropped.
+    /// Any [`Self::with_before_drain`] hook runs first. After the HTTP drain,
+    /// any [`Self::with_after_drain`] hook runs so constructed upstream
+    /// providers can shut down before they are dropped.
     pub async fn shutdown(mut self) {
+        if let Some(hook) = self.before_drain.take() {
+            hook();
+        }
         self.request_shutdown();
         for task in self.attached.drain(..) {
             task.abort();
@@ -1088,6 +1107,9 @@ impl Running {
 
 impl Drop for Running {
     fn drop(&mut self) {
+        if let Some(hook) = self.before_drain.take() {
+            hook();
+        }
         for task in self.attached.drain(..) {
             task.abort();
         }
@@ -2204,6 +2226,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
             }
         }
     });
+    track.client_waiting(Arc::clone(&app.usage), &model_request, &identity);
     let result = tokio::select! {
         result = &mut dispatch => result,
         _ = notice => {

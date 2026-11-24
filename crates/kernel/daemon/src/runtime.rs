@@ -926,6 +926,13 @@ impl Runtime {
         self.plan.lock().expect("plan").subscriptions.clone()
     }
 
+    /// Marks every constructed provider as stopping before request draining.
+    pub(crate) fn stopping_upstreams(&self) {
+        for upstream in self.constructed_upstreams() {
+            upstream.stopping();
+        }
+    }
+
     /// Calls `UpstreamProvider::shutdown` on every constructed instance.
     ///
     /// Provider instances and subscription members are included, and the same
