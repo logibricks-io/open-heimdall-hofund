@@ -2521,8 +2521,10 @@ impl DispatchState {
 
     /// A vendor-timed quota or credit rest is not probed unless a renewed
     /// window opened its one-shot probe. A later member that can still be asked
-    /// is tried instead. When every remaining member is held, the first stored
-    /// words and the soonest reset are the answer.
+    /// is tried instead. When every remaining member is held, the answer uses
+    /// the first held member's class, words, and status, and `Retry-After` at
+    /// the soonest reset, so a mixed quota and credit pool cannot pair one
+    /// member's class with another's status.
     fn quota_hold(&self, asking: &[usize], index: usize) -> QuotaHold {
         let Some(cooldowns) = self.cooldowns.as_ref() else {
             return QuotaHold::Proceed;
@@ -2530,7 +2532,8 @@ impl DispatchState {
         let now = self.now();
         let mut first_message = None;
         let mut first_cause = None;
-        let mut soonest: Option<(Duration, u16)> = None;
+        let mut first_status = None;
+        let mut soonest: Option<Duration> = None;
         let mut current_held = false;
         let mut other = false;
         let mut any = false;
@@ -2559,6 +2562,7 @@ impl DispatchState {
             }
             if first_message.is_none() {
                 first_cause = Some(cooling.cause());
+                first_status = Some(cooling.status().unwrap_or(429));
                 let text = cooling.error();
                 first_message = Some(if text.is_empty() {
                     match cooling.cause() {
@@ -2570,9 +2574,8 @@ impl DispatchState {
                 });
             }
             let left = cooling.until().saturating_duration_since(now);
-            let status = cooling.status().unwrap_or(429);
-            if soonest.as_ref().is_none_or(|(best, _)| left < *best) {
-                soonest = Some((left, status));
+            if soonest.is_none_or(|best| left < best) {
+                soonest = Some(left);
             }
         }
         if !any || (!current_held && other) {
@@ -2581,10 +2584,11 @@ impl DispatchState {
         if other {
             return QuotaHold::Skip;
         }
-        let Some((left, status)) = soonest else {
+        let Some(left) = soonest else {
             return QuotaHold::Proceed;
         };
         let message = first_message.unwrap_or_else(|| "out of quota".to_owned());
+        let status = first_status.unwrap_or(429);
         let mut error = match first_cause {
             Some(CooldownCause::Credit) => PluginError::credit_status(status, message),
             _ => PluginError::quota_status(status, message),

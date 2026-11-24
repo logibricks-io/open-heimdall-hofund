@@ -403,8 +403,10 @@ impl Cooldowns {
 
     /// Records a successful account-wide window reading. A renewed full
     /// window lifts a rest whose deadline was not named by the vendor. For a
-    /// vendor-timed quota or credit rest, it instead opens one upstream probe
-    /// without lifting the rest. A vendor-timed rest lifts only when a matching
+    /// vendor-timed quota or credit rest on this account, with no model, it
+    /// instead opens one upstream probe without lifting the rest. A
+    /// model-scoped vendor-timed rest is left unchanged, so this reading
+    /// does not ask that model. A vendor-timed rest lifts only when a matching
     /// window's reset elapsed or moved to a later cycle. A rate or generic rest
     /// stays.
     pub fn observe_credit_window(&self, id: &MemberId, windows: &[QuotaWindow]) {
@@ -1308,12 +1310,25 @@ impl Cooldowns {
         candidate.status = error.status();
         candidate.error = error.message().trim().chars().take(300).collect();
         candidate.background_probe = background_probe;
-        let candidate_until = candidate.until;
+        // A renewed-window probe closes only for a vendor-timed quota or
+        // credit refusal at the probed deadline. One second either way is
+        // the same reset, matching window readings. The stored instant is
+        // kept, so that sample cannot replace it and open another ask.
+        // Anything else leaves the probe open; `apply` then also keeps an
+        // earlier rest.
         if matches!(failure, Failure::Quota | Failure::Credit)
-            && let Some(current) = state.cooling.as_mut()
+            && let Some(current) = state
+                .cooling
+                .as_ref()
+                .filter(|cooling| cooling.renewal_probe)
         {
-            current.renewal_probe = false;
+            if candidate.vendor_timed && same_reset(current.until, candidate.until) {
+                candidate.until = current.until;
+            } else {
+                candidate.renewal_probe = true;
+            }
         }
+        let candidate_until = candidate.until;
         let applied = apply(state, candidate, named);
         // The credit ladder moves only with the rest it wrote: a kept rest
         // keeps its rung and run (reference: internal/gateway/routing.go:
@@ -1809,6 +1824,13 @@ fn positive_hint(duration: Option<Duration>) -> Option<Duration> {
     duration.filter(|duration| !duration.is_zero())
 }
 
+/// Whether two instants are one reset. A difference of one second is still
+/// the same time, as with a window reading's reset.
+fn same_reset(left: Instant, right: Instant) -> bool {
+    left.saturating_duration_since(right) <= Duration::from_secs(1)
+        && right.saturating_duration_since(left) <= Duration::from_secs(1)
+}
+
 fn overload_duration(policy: &CooldownPolicy, error: &PluginError) -> Duration {
     positive_hint(error.retry_after())
         .map(|after| after.min(policy.overload_max))
@@ -1871,7 +1893,9 @@ fn cooling(now: Instant, duration: Duration, cause: CooldownCause, failures: u32
 /// shortens a longer rest (ruling R-494b, superseding R-494). One
 /// exception: a guessed quota or credit rest gives way to a rest of the same
 /// cause whose time the vendor named (`named`), though it is sooner
-/// (`reference: internal/gateway/routing.go:1518-1533`).
+/// (`reference: internal/gateway/routing.go:1518-1533`). A renewal probe
+/// pins a same-deadline vendor refusal to the stored instant before this
+/// call, so a sample one second later does not move that deadline.
 fn apply(state: &mut State, candidate: Cooling, named: bool) -> Cooling {
     let applied = match &state.cooling {
         Some(current)

@@ -465,6 +465,36 @@ async fn d251_3_renewal_lets_a_lone_member_ask_once() {
 }
 
 #[tokio::test]
+async fn d251_7_ready_sibling_answers_before_the_renewal_probe() {
+    let (book, seen) = fixture();
+    let id = member_id("first");
+    book.configure_credit_window(&id);
+    let reset = SystemTime::now() + Duration::from_secs(3 * 60 * 60);
+    let reading = |used| QuotaWindow::new("window", used, Some(10), Some(reset)).expect("window");
+    let refusal = PluginError::quota_status(429, "allowance exhausted")
+        .with_reset_after(Duration::from_secs(6 * 60 * 60));
+    book.observe_credit_window(&id, &[reading(10)]);
+    book.record_failure(&id, &refusal)
+        .expect("vendor-timed rest");
+    book.observe_credit_window(&id, &[reading(8)]);
+    assert!(book.cooling(&id).expect("renewed rest").renewal_probe());
+    let router = router(
+        vec![
+            fake("first", &seen, Behavior::RefuseQuota),
+            fake("second", &seen, Behavior::Unary),
+        ],
+        &book,
+    );
+
+    let routed = router
+        .dispatch(&Request::new("demo"), "inbound")
+        .await
+        .expect("ready sibling");
+    assert_eq!(routed.upstream_id, "second");
+    assert_eq!(seen.lock().expect("seen").as_slice(), ["second"]);
+}
+
+#[tokio::test]
 async fn d24_a_model_with_no_provider_rests_alone_and_its_seat_is_passed_over() {
     let (book, seen) = fixture();
     let error = PluginError::status_error(
