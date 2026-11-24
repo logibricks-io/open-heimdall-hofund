@@ -1022,12 +1022,23 @@ impl Router {
         result
     }
 
+    /// Whether hop `index` is resting on a quota refusal that named its deadline.
+    fn vendor_timed_quota_at(&self, resolved: &Resolved, index: usize) -> bool {
+        let Some(cooldowns) = &self.cooldowns else {
+            return false;
+        };
+        let hop = &resolved.hops[index];
+        let model = hop.wire_model.as_deref().unwrap_or(&resolved.bare);
+        vendor_timed_quota_rest(cooldowns, hop, model).is_some()
+    }
+
     /// Counts input tokens for `request`.
     ///
     /// An upstream that has a count endpoint is asked, with the same failover
-    /// rules as [`Self::dispatch`]. When every asked upstream has no count
-    /// endpoint, the result is a character estimate and [`InputCount::estimated`]
-    /// is set.
+    /// rules as [`Self::dispatch`]. A vendor-timed quota rest is not asked.
+    /// The next member counts, or the result is a character estimate when
+    /// none remains. When every asked upstream has no count endpoint, the
+    /// result is that estimate and [`InputCount::estimated`] is set.
     ///
     /// # Errors
     ///
@@ -1061,7 +1072,18 @@ impl Router {
         let policy = self.policy.clone();
         let mut last = None;
         let mut unsupported = false;
-        for (index, hop) in resolved.hops.iter().enumerate() {
+        let mut skipped_hold = false;
+        for index in 0..resolved.hops.len() {
+            if self.vendor_timed_quota_at(&resolved, index) {
+                let later_open = (index + 1..resolved.hops.len())
+                    .any(|later| !self.vendor_timed_quota_at(&resolved, later));
+                if later_open {
+                    continue;
+                }
+                skipped_hold = true;
+                break;
+            }
+            let hop = &resolved.hops[index];
             let mut attempt = request.clone();
             apply_wire(&mut attempt, hop, &resolved.bare, &self.served_models());
             let span = member_span(hop, index, inbound_protocol);
@@ -1095,7 +1117,7 @@ impl Router {
                 }
             }
         }
-        if unsupported {
+        if unsupported || (skipped_hold && last.is_none()) {
             return Ok(InputCount {
                 tokens: estimate_input_tokens(request),
                 estimated: true,
@@ -2527,8 +2549,7 @@ impl DispatchState {
                 continue;
             }
             any = true;
-            let held =
-                vendor_timed_allowance_rest(cooldowns, &self.resolved.hops[candidate], &model);
+            let held = vendor_timed_quota_rest(cooldowns, &self.resolved.hops[candidate], &model);
             let Some(cooling) = held else {
                 other = true;
                 continue;
@@ -2867,7 +2888,7 @@ fn cooling_labels(cooldowns: Option<&Arc<Cooldowns>>, resolved: &Resolved) -> Ve
 
 /// The active rest when a quota or credit refusal named its deadline and no
 /// renewed window has opened its one-shot probe.
-fn vendor_timed_allowance_rest(cooldowns: &Cooldowns, hop: &Hop, model: &str) -> Option<Cooling> {
+fn vendor_timed_quota_rest(cooldowns: &Cooldowns, hop: &Hop, model: &str) -> Option<Cooling> {
     cooldowns
         .cooling_for_model(hop.member.id(), model)
         .filter(|cooling| {

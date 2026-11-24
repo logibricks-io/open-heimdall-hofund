@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
-use hofund_ir::{ContentPart, Message, Request, Response, Role};
+use hofund_ir::{ContentPart, Message, Request, Response, Role, estimate_input_tokens};
 use hofund_plugin_api::{
     CountOutcome, MemberId, MemberKey, PluginError, PluginId, PresetId, QuotaObservation,
     QuotaWindow,
@@ -13,6 +13,7 @@ use hofund_plugin_api::{
 use hofund_router::strategy::{Strategy, StrategyState};
 use hofund_router::{
     Completion, CooldownPolicy, Cooldowns, FailoverPolicy, Hop, Member, Route, Router, RouterError,
+    WaitHook,
 };
 
 struct Fake {
@@ -495,4 +496,197 @@ async fn d24_a_model_with_no_provider_rests_alone_and_its_seat_is_passed_over() 
         .expect("dispatch");
     assert_eq!(routed.upstream_id, "second");
     assert_eq!(seen.lock().expect("seen").as_slice(), ["second"]);
+}
+
+struct FrozenClock(Arc<Mutex<Instant>>);
+
+impl WaitHook for FrozenClock {
+    fn wait(
+        &self,
+        _duration: Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(std::future::ready(()))
+    }
+
+    fn now(&self) -> Instant {
+        *self.0.lock().expect("clock")
+    }
+}
+
+struct FrozenBook {
+    book: Arc<Cooldowns>,
+    clock: Arc<Mutex<Instant>>,
+    seen: Arc<Mutex<Vec<&'static str>>>,
+}
+
+fn frozen_book() -> FrozenBook {
+    let now = Arc::new(Mutex::new(Instant::now()));
+    let clock = Arc::clone(&now);
+    let book = Arc::new(Cooldowns::with_clock(
+        CooldownPolicy::default(),
+        Arc::new(move || *clock.lock().expect("clock")),
+    ));
+    FrozenBook {
+        book,
+        clock: now,
+        seen: Arc::new(Mutex::new(Vec::new())),
+    }
+}
+
+#[tokio::test]
+async fn d260_vendor_timed_quota_rests_the_model_and_still_asks_the_rest() {
+    let FrozenBook { book, clock, seen } = frozen_book();
+    let notice = "Third-party quota reached. Resets in 3h22m19s.";
+    let error = PluginError::quota_status(429, notice)
+        .with_reset_after(Duration::from_secs(12_139))
+        .with_model_scope();
+    book.record_failure_for_model(&member_id("first"), "pool-a", &error)
+        .expect("rest");
+    let cooling = book
+        .cooling_for_model(&member_id("first"), "pool-a")
+        .expect("cooling");
+    assert!(cooling.vendor_timed());
+    assert!(
+        book.cooling_for_model(&member_id("first"), "pool-b")
+            .is_none()
+    );
+
+    let lone = Router::new(
+        BTreeMap::from([(
+            "pool-a".to_owned(),
+            vec![fake("first", &seen, Behavior::Unary)],
+        )]),
+        FailoverPolicy::default(),
+    )
+    .with_cooldowns(Arc::clone(&book));
+    let refused = lone
+        .dispatch_with_wait(
+            &Request::new("pool-a"),
+            "inbound",
+            None,
+            Some(Arc::new(FrozenClock(Arc::clone(&clock)))),
+        )
+        .await;
+    assert!(seen.lock().expect("seen").is_empty());
+    let Err(RouterError::Upstream { error, .. }) = refused else {
+        panic!("expected the stored refusal");
+    };
+    assert_eq!(error.status(), Some(429));
+    assert!(error.message().contains(notice));
+    let written = Duration::from_secs(12_139);
+    assert_eq!(error.retry_after(), Some(written));
+    assert_eq!(error.reset_after(), Some(written));
+
+    let members = vec![
+        fake("first", &seen, Behavior::Unary),
+        fake("second", &seen, Behavior::Unary),
+    ];
+    let router = Router::new(
+        BTreeMap::from([
+            ("pool-a".to_owned(), members.clone()),
+            ("pool-b".to_owned(), members),
+        ]),
+        FailoverPolicy::default(),
+    )
+    .with_cooldowns(Arc::clone(&book));
+
+    seen.lock().expect("seen").clear();
+    let routed = router
+        .dispatch(&Request::new("pool-a"), "inbound")
+        .await
+        .expect("other account");
+    assert_eq!(routed.upstream_id, "second");
+    assert_eq!(seen.lock().expect("seen").as_slice(), ["second"]);
+
+    seen.lock().expect("seen").clear();
+    let routed = router
+        .dispatch(&Request::new("pool-b"), "inbound")
+        .await
+        .expect("sibling model");
+    assert_eq!(routed.upstream_id, "first");
+    assert_eq!(seen.lock().expect("seen").as_slice(), ["first"]);
+}
+
+#[tokio::test]
+async fn d260_a_guessed_quota_rest_is_still_probed() {
+    let (book, seen) = fixture();
+    let error = PluginError::quota_status(429, "Quota exceeded").with_model_scope();
+    book.record_failure_for_model(&member_id("first"), "demo", &error)
+        .expect("rest");
+    let cooling = book
+        .cooling_for_model(&member_id("first"), "demo")
+        .expect("cooling");
+    assert!(!cooling.vendor_timed());
+    let router = router(vec![fake("first", &seen, Behavior::Unary)], &book);
+    let routed = router
+        .dispatch(&Request::new("demo"), "inbound")
+        .await
+        .expect("probe");
+    assert_eq!(routed.upstream_id, "first");
+    assert_eq!(seen.lock().expect("seen").as_slice(), ["first"]);
+}
+
+#[tokio::test]
+async fn d260_count_skips_a_vendor_timed_quota_rest() {
+    let (book, seen) = fixture();
+    let error = PluginError::quota_status(429, "Third-party quota reached. Resets in 3h22m19s.")
+        .with_reset_after(Duration::from_secs(12_139))
+        .with_model_scope();
+    book.record_failure_for_model(&member_id("first"), "demo", &error)
+        .expect("rest");
+    let request = Request::new("demo");
+
+    let lone = router(vec![fake("first", &seen, Behavior::Count(9))], &book);
+    let count = lone.count(&request, "inbound").await.expect("estimate");
+    assert!(seen.lock().expect("seen").is_empty());
+    assert!(count.estimated);
+    assert_eq!(count.tokens, estimate_input_tokens(&request));
+    assert!(count.upstream_id.is_empty());
+
+    seen.lock().expect("seen").clear();
+    let mixed = router(
+        vec![
+            fake("first", &seen, Behavior::Count(9)),
+            fake("second", &seen, Behavior::MissingCount),
+        ],
+        &book,
+    );
+    let count = mixed
+        .count(&request, "inbound")
+        .await
+        .expect("no count left");
+    assert_eq!(seen.lock().expect("seen").as_slice(), ["second"]);
+    assert!(count.estimated);
+    assert_eq!(count.tokens, estimate_input_tokens(&request));
+
+    seen.lock().expect("seen").clear();
+    let next = router(
+        vec![
+            fake("first", &seen, Behavior::Count(9)),
+            fake("second", &seen, Behavior::Count(4)),
+        ],
+        &book,
+    );
+    let count = next.count(&request, "inbound").await.expect("next");
+    assert_eq!(seen.lock().expect("seen").as_slice(), ["second"]);
+    assert!(!count.estimated);
+    assert_eq!(count.tokens, 4);
+    assert_eq!(count.upstream_id, "second");
+
+    seen.lock().expect("seen").clear();
+    let sibling = Router::new(
+        BTreeMap::from([(
+            "pool-b".to_owned(),
+            vec![fake("first", &seen, Behavior::Count(7))],
+        )]),
+        FailoverPolicy::default(),
+    )
+    .with_cooldowns(Arc::clone(&book));
+    let count = sibling
+        .count(&Request::new("pool-b"), "inbound")
+        .await
+        .expect("sibling");
+    assert_eq!(seen.lock().expect("seen").as_slice(), ["first"]);
+    assert!(!count.estimated);
+    assert_eq!(count.tokens, 7);
 }

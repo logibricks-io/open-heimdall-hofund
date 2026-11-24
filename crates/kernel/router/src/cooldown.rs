@@ -35,7 +35,8 @@
 //! route with one member tries that member, including a guessed quota rest.
 //! A vendor-timed quota or credit rest is held without a call unless a renewed
 //! window opened its one-shot probe. When every remaining member is held, the
-//! stored refusal and soonest reset are returned.
+//! stored refusal and soonest reset are returned. If every member is cooling
+//! for the requested model, only the soonest eligible probe is tried.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};

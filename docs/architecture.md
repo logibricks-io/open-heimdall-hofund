@@ -499,7 +499,10 @@ online. The answer is kept for 5 seconds and one request asks at a time.
 Offline, the next member is still asked, and the last member's failure goes to
 the client, but nobody rests. The router only orders
 members, putting ready members first and retaining the soonest cooling member
-as a probe.
+as a probe. A vendor-timed quota rest is the exception: when every member still
+to be asked rests that way, the stored refusal is returned with `Retry-After`
+at the soonest reset and nobody is asked. A token count skips that rest and
+uses the next member, or the local estimate when none remains.
 
 ## Failover decisions
 
