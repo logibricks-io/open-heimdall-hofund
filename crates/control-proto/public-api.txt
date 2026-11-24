@@ -1229,6 +1229,7 @@ SignInStartRequest #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, E
 SignInStartRequest.host
 SignInStartRequest.label
 SignInStartRequest.site
+SignInStartRequest.user
 SignInStartRequest.version
 SignInStartRequest::fn new () -> Self
 SignInStartResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)

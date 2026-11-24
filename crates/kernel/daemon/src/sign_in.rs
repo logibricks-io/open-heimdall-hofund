@@ -94,7 +94,7 @@ impl From<DaemonError> for SignInError {
 }
 
 /// Per-sign-in choices from the command line. The plugin reads them from
-/// its [`SignInCtx`] as the `host` and `label` options.
+/// its [`SignInCtx`] as the `host`, `label`, `site`, and `user` options.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SignInOptions {
     /// Vendor host, such as an enterprise domain.
@@ -103,6 +103,9 @@ pub struct SignInOptions {
     pub label: Option<String>,
     /// Sign-in site, such as `device` for ChatGPT device codes.
     pub site: Option<String>,
+    /// Saved account to sign in again, matched by the plugin.
+    /// Empty means a new account.
+    pub user: Option<String>,
 }
 
 /// One configured subscription and its accounts.
@@ -852,6 +855,14 @@ pub(crate) fn sign_in_ctx(
     if let Some(site) = &options.site {
         ctx = ctx.with_option("site", site.as_str()).map_err(failed)?;
     }
+    if let Some(user) = options
+        .user
+        .as_deref()
+        .map(str::trim)
+        .filter(|user| !user.is_empty())
+    {
+        ctx = ctx.with_option("user", user).map_err(failed)?;
+    }
     Ok(ctx)
 }
 
@@ -1549,11 +1560,30 @@ mod tests {
             host: Some("corp.example.test".to_owned()),
             label: Some("work".to_owned()),
             site: None,
+            user: None,
         };
         let ctx = sign_in_ctx(PLUGIN, &options).expect("ctx");
         assert_eq!(ctx.option("host"), Some("corp.example.test"));
         assert_eq!(ctx.option("label"), Some("work"));
         assert_eq!(ctx.session().len(), 32);
+    }
+
+    #[test]
+    fn d257_ctx_carries_the_saved_user() {
+        let options = SignInOptions {
+            host: None,
+            label: None,
+            site: None,
+            user: Some("  me@example.com  ".to_owned()),
+        };
+        let ctx = sign_in_ctx(PLUGIN, &options).expect("ctx");
+        assert_eq!(ctx.option("user"), Some("me@example.com"));
+        let blank = SignInOptions {
+            user: Some("   ".to_owned()),
+            ..SignInOptions::default()
+        };
+        let ctx = sign_in_ctx(PLUGIN, &blank).expect("ctx");
+        assert_eq!(ctx.option("user"), None);
     }
 
     #[tokio::test]
