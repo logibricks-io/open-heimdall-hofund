@@ -143,6 +143,11 @@ impl Fixture {
     }
 
     fn rest(&self, id: &'static str, rest: Rest) {
+        self.rest_now(id, rest);
+        self.advance(10);
+    }
+
+    fn rest_now(&self, id: &'static str, rest: Rest) {
         let error = match rest {
             Rest::Rate => PluginError::status_error(429, "too many requests"),
             Rest::Outage => PluginError::status_error(503, "unavailable"),
@@ -159,7 +164,6 @@ impl Fixture {
         self.book
             .record_failure_for_model(&member_id(id), "demo", &error)
             .expect("rest");
-        *self.now.lock().expect("clock") += Duration::from_secs(10);
     }
 
     fn advance(&self, seconds: u64) {
@@ -322,6 +326,32 @@ async fn d265_probe_with_only_ineligible_companion_starts_guard() {
         ("first", Reply::Unary),
         ("second", Reply::Unary),
         ("third", Reply::Status(503, "unavailable")),
+    ]);
+    fixture.clear_seen();
+    assert!(dispatch(&next_router).await.is_err());
+    assert_eq!(fixture.seen(), ["third"]);
+}
+
+#[tokio::test]
+async fn d265_ready_member_keeps_recent_resting_ask_guard() {
+    let fixture = Fixture::new();
+    fixture.rest_now("first", Rest::Rate);
+    fixture.rest_now("second", Rest::Quota);
+    fixture.advance(25);
+    fixture.rest_now("third", Rest::Overload);
+    fixture.advance(25);
+    let first_router = fixture.router(&[
+        ("first", Reply::Status(401, "bad key")),
+        ("second", Reply::Unary),
+    ]);
+    assert!(dispatch(&first_router).await.is_err());
+    assert_eq!(fixture.seen(), ["first"]);
+
+    fixture.advance(4);
+    let next_router = fixture.router(&[
+        ("first", Reply::Unary),
+        ("second", Reply::Unary),
+        ("third", Reply::StatusAdvance(503, "unavailable", 7)),
     ]);
     fixture.clear_seen();
     assert!(dispatch(&next_router).await.is_err());

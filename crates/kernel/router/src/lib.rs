@@ -2107,7 +2107,7 @@ impl DispatchState {
         let position = self.hand_on.iter().position(|hop| {
             let model = hop.wire_model.as_deref().unwrap_or(&bare);
             let Some(cooling) = cooldowns.cooling_for_model(hop.member.id(), model) else {
-                return momentary;
+                return momentary && !cooldowns.hand_on_asked_recently(hop.member.id());
             };
             let accepts = match cooling.hand_on() {
                 Some(HandOnRest::Rate) => true,

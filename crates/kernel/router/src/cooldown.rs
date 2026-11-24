@@ -431,6 +431,13 @@ impl Cooldowns {
         true
     }
 
+    pub(crate) fn hand_on_asked_recently(&self, id: &MemberId) -> bool {
+        let now = (self.clock)();
+        let mut book = self.lock();
+        self.maintain_locked(&mut book, now);
+        book.hand_on_asked.contains_key(id)
+    }
+
     /// Enables full-window credit handling for one subscription account.
     pub fn configure_credit_window(&self, id: &MemberId) {
         self.lock().windowed_credit.insert(id.clone());
