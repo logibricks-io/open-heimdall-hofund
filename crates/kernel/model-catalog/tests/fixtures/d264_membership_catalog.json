@@ -11,8 +11,8 @@
       }
     }
   },
-  "acme-coding-plan": {
-    "id": "acme-coding-plan",
+  "a-plan-coding-plan": {
+    "id": "a-plan-coding-plan",
     "models": {
       "established": {
         "id": "established",
@@ -37,6 +37,16 @@
     "models": {
       "free-model": {
         "id": "free-model",
+        "modalities": {"input": ["text"], "output": ["text"]},
+        "cost": {"input": 0, "output": 0}
+      }
+    }
+  },
+  "other-coding-plan": {
+    "id": "other-coding-plan",
+    "models": {
+      "other-plan-model": {
+        "id": "other-plan-model",
         "modalities": {"input": ["text"], "output": ["text"]},
         "cost": {"input": 0, "output": 0}
       }

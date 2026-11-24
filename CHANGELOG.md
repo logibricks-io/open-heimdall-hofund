@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- D-264: Zhipu and Z.ai Coding Plan providers read model capabilities from their region's models.dev plan catalog first, then `zhipuai`; preset-owned saved catalogs follow the selected region while a user-named catalog stays unchanged. Plan-only models now retain image input, context and output limits, and reasoning levels. Membership plan prices are never used as list prices: established models fall back to the metered catalog price, plan-only models stay unpriced, unrelated catalogs do not borrow plan metadata, and genuinely free non-membership models can still cost $0. Verified with fixture catalogs and loopback mocks only.
+- D-264: Zhipu and Z.ai Coding Plan providers read model capabilities from their region's models.dev plan catalog first, then `zhipuai`; preset-owned saved catalogs follow the selected region while a user-named catalog stays unchanged. Plan-only models now retain image input, context and output limits, and reasoning levels. The two GLM membership plan prices are skipped during ordered model-list and usage pricing: established models fall back to the metered catalog price even without a cached model-list price, plan-only models stay unpriced, unrelated catalogs do not borrow plan metadata, other coding-plan catalogs keep their published prices, and genuinely free non-membership models can still cost $0. Verified with fixture catalogs and loopback mocks only.
 
 ### Security
 

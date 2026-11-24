@@ -142,7 +142,7 @@ pub fn build_index(
                     &catalog.providers,
                     toggle_providers,
                 ),
-                price: price_for(provider_id, model.cost.as_ref()),
+                price: model.cost.as_ref().map(dev_price),
                 release_date: non_empty(&model.release_date),
                 deprecated: is_deprecated(&model.status),
                 retired: model.status.eq_ignore_ascii_case("retired"),
@@ -239,11 +239,17 @@ impl CatalogIndex {
             .find_map(|catalog| self.in_catalog(catalog, model))
     }
 
-    /// Returns the first usable price in catalog order.
+    /// Returns the first usable price in catalog order, skipping membership catalogs.
     #[must_use]
-    pub fn price_in(&self, catalogs: &[String], model: &str) -> Option<&Price> {
+    pub fn price_in(
+        &self,
+        catalogs: &[String],
+        membership_catalogs: &[String],
+        model: &str,
+    ) -> Option<&Price> {
         catalogs
             .iter()
+            .filter(|catalog| !membership_catalogs.contains(catalog))
             .filter_map(|catalog| self.in_catalog(catalog, model))
             .find_map(|entry| entry.price.as_ref())
     }
@@ -329,13 +335,6 @@ fn dev_price(price: &DevPrice) -> Price {
         cache_write: price.cache_write,
         cache_write_1h: price.cache_write_1h.unwrap_or(0.0),
     }
-}
-
-fn price_for(provider_id: &str, price: Option<&DevPrice>) -> Option<Price> {
-    if provider_id.ends_with("-coding-plan") {
-        return None;
-    }
-    price.map(dev_price)
 }
 
 fn effective_window(limit: &DevLimit) -> Option<u32> {

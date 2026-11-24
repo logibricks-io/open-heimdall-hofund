@@ -7,6 +7,7 @@ use std::time::Duration;
 use hofund_config::CatalogSettings;
 use hofund_daemon::ModelsHost;
 use hofund_model_catalog::{CacheFile, CatalogFetcher, FetchResponse, ModelCatalog, parse_catalog};
+use hofund_provider::ModelPlan;
 use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -46,12 +47,20 @@ async fn d264_live_id_rows_use_ordered_catalog_metadata_and_prices() {
         .mount(&server)
         .await;
     let config = hofund_config::load(&format!(
-        "[[providers]]\nid = \"plan\"\nprotocol = \"openai-chat\"\nbase_url = \"{}/v1\"\napi_key = \"test-key\"\ncatalog = \"acme-coding-plan, acme\"\n",
+        "[[providers]]\nid = \"plan\"\nprotocol = \"openai-chat\"\nbase_url = \"{}/v1\"\napi_key = \"test-key\"\ncatalog = \"a-plan-coding-plan, acme\"\n",
         server.uri()
     ))
     .expect("config");
-    let host =
-        ModelsHost::new(Duration::from_secs(2), Duration::from_secs(2)).with_model_catalog(catalog);
+    let host = ModelsHost::new(Duration::from_secs(2), Duration::from_secs(2))
+        .with_model_catalog(catalog)
+        .with_model_plan(
+            "plan",
+            ModelPlan {
+                catalogs: vec!["a-plan-coding-plan".to_owned(), "acme".to_owned()],
+                membership_catalogs: vec!["a-plan-coding-plan".to_owned()],
+                ..ModelPlan::default()
+            },
+        );
     let config_path = directory.path().join("hofund.toml");
     let listed = host
         .list_models(&config, &config_path, "plan")

@@ -47,6 +47,8 @@ pub struct ModelPlan {
     pub models: Vec<String>,
     /// Ordered models.dev catalog ids used for model metadata and prices.
     pub catalogs: Vec<String>,
+    /// Membership catalogs whose prices are skipped during ordered price lookup.
+    pub membership_catalogs: Vec<String>,
     /// Optional quirk profile name recorded by the preset.
     pub quirks: Option<String>,
     /// Optional JSON object merged into a probe body.

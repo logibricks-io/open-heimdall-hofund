@@ -74,8 +74,8 @@ pub use generated::{
     compiled_presets, compiled_routes, declared_max_accounts,
 };
 pub use select::{
-    SelectError, Selection, catalogs_of, model_plan_of, protocol_for, resolve_region, select,
-    split_catalogs, wire_for_protocol,
+    SelectError, Selection, catalogs_of, membership_catalogs, model_plan_of, protocol_for,
+    resolve_region, select, split_catalogs, wire_for_protocol,
 };
 pub use subscription_routing::{routing_labels, storage_id};
 

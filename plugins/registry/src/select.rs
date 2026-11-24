@@ -236,6 +236,7 @@ pub fn model_plan_of(
         .iter()
         .map(|model| (*model).to_owned())
         .collect();
+    let catalogs = catalogs_of(preset, region, "");
     ModelPlan {
         chat: endpoints.chat.to_owned(),
         responses: endpoints.responses.to_owned(),
@@ -245,7 +246,8 @@ pub fn model_plan_of(
         lists: region.is_some_and(|region| region.lists),
         only: preset.only.to_owned(),
         models,
-        catalogs: catalogs_of(preset, region, ""),
+        membership_catalogs: membership_catalogs(&catalogs),
+        catalogs,
         quirks: None,
         extra_body: None,
     }
@@ -258,12 +260,15 @@ pub fn catalogs_of(
     region: Option<&CompiledRegion>,
     saved: &str,
 ) -> Vec<String> {
-    let saved = saved.trim();
+    let saved = split_catalogs(saved);
     let preset_owned = saved.is_empty()
-        || saved == preset.catalog
-        || preset.regions.iter().any(|region| saved == region.catalog);
+        || saved == split_catalogs(preset.catalog)
+        || preset
+            .regions
+            .iter()
+            .any(|region| saved == split_catalogs(region.catalog));
     if !preset_owned {
-        return split_catalogs(saved);
+        return saved;
     }
     let selected = region
         .map(|region| region.catalog)
@@ -272,13 +277,27 @@ pub fn catalogs_of(
     split_catalogs(selected)
 }
 
-/// Parses a comma-separated ordered catalog list.
+/// Returns the membership catalogs whose prices the ordered walk must skip.
+#[must_use]
+pub fn membership_catalogs(catalogs: &[String]) -> Vec<String> {
+    catalogs
+        .iter()
+        .filter(|catalog| matches!(catalog.as_str(), "zhipuai-coding-plan" | "zai-coding-plan"))
+        .cloned()
+        .collect()
+}
+
+/// Parses and normalizes an ordered catalog list.
 #[must_use]
 pub fn split_catalogs(value: &str) -> Vec<String> {
     let mut catalogs = Vec::new();
-    for catalog in value.split(',').map(str::trim).filter(|id| !id.is_empty()) {
-        if !catalogs.iter().any(|known| known == catalog) {
-            catalogs.push(catalog.to_owned());
+    for catalog in value
+        .split(|character: char| character == ',' || character.is_whitespace())
+        .filter(|id| !id.is_empty())
+        .map(str::to_ascii_lowercase)
+    {
+        if !catalogs.contains(&catalog) {
+            catalogs.push(catalog);
         }
     }
     catalogs

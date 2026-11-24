@@ -118,6 +118,7 @@ async fn state(
         config.usage.clone(),
         catalog,
         Arc::clone(&models_host),
+        &config,
     ));
     let config = Arc::new(config);
     let ops = Arc::new(ConfigOps::new(

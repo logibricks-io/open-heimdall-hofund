@@ -1,8 +1,11 @@
 //! Effective list price lookup from provider model lists.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use hofund_model_catalog::{EffectivePricer, ListPriceLookup, ModelCatalog, Price};
+use hofund_model_catalog::{
+    EffectivePricer, ListPriceLookup, ModelCatalog, Price, ProviderCatalogs,
+};
 
 use crate::ModelsHost;
 
@@ -14,10 +17,27 @@ pub(crate) fn effective_pricer(
     settings: hofund_config::UsageSettings,
     catalog: Arc<ModelCatalog>,
     models: Arc<ModelsHost>,
+    config: &hofund_config::Config,
 ) -> EffectivePricer {
-    EffectivePricer::new(settings, catalog, Arc::new(ModelsList { models }))
-        .with_doubled_one_hour_models(DOUBLED_ONE_HOUR.iter().map(|id| (*id).to_owned()).collect())
-        .with_id_aliases(role_aliases())
+    let provider_catalogs = config
+        .providers
+        .iter()
+        .filter_map(|provider| {
+            models
+                .price_catalogs(provider)
+                .map(|catalogs| (provider.id.clone(), catalogs))
+        })
+        .collect();
+    EffectivePricer::new(
+        settings,
+        catalog,
+        Arc::new(ModelsList {
+            models,
+            provider_catalogs,
+        }),
+    )
+    .with_doubled_one_hour_models(DOUBLED_ONE_HOUR.iter().map(|id| (*id).to_owned()).collect())
+    .with_id_aliases(role_aliases())
 }
 
 fn role_aliases() -> Vec<(String, String)> {
@@ -29,6 +49,7 @@ fn role_aliases() -> Vec<(String, String)> {
 
 struct ModelsList {
     models: Arc<ModelsHost>,
+    provider_catalogs: HashMap<String, ProviderCatalogs>,
 }
 
 impl ListPriceLookup for ModelsList {
@@ -43,6 +64,10 @@ impl ListPriceLookup for ModelsList {
             cache_write: 0.0,
             cache_write_1h: 0.0,
         })
+    }
+
+    fn provider_catalogs(&self, provider_id: &str) -> Option<ProviderCatalogs> {
+        self.provider_catalogs.get(provider_id).cloned()
     }
 }
 

@@ -1613,6 +1613,12 @@ fn expected_credential(wire: Wire) -> Credential {
 
 fn expected_model_plan(row: &Row, region: Option<&Region>) -> ModelPlan {
     let details = details(row);
+    let catalogs = hofund_plugin_registry::split_catalogs(
+        region
+            .map(|region| region.catalog)
+            .filter(|catalog| !catalog.is_empty())
+            .unwrap_or(row.catalog),
+    );
     ModelPlan {
         chat: endpoint(row, region, Wire::Chat).to_owned(),
         responses: endpoint(row, region, Wire::Responses).to_owned(),
@@ -1627,12 +1633,8 @@ fn expected_model_plan(row: &Row, region: Option<&Region>) -> ModelPlan {
             .iter()
             .map(|model| (*model).to_owned())
             .collect(),
-        catalogs: hofund_plugin_registry::split_catalogs(
-            region
-                .map(|region| region.catalog)
-                .filter(|catalog| !catalog.is_empty())
-                .unwrap_or(row.catalog),
-        ),
+        membership_catalogs: hofund_plugin_registry::membership_catalogs(&catalogs),
+        catalogs,
         quirks: None,
         extra_body: None,
     }

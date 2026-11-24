@@ -649,6 +649,22 @@ impl ModelsHost {
         self
     }
 
+    /// Ordered catalog metadata used when usage pricing cannot use a listed price.
+    pub(crate) fn price_catalogs(
+        &self,
+        provider: &hofund_config::Provider,
+    ) -> Option<hofund_model_catalog::ProviderCatalogs> {
+        self.model_plan(provider).ok().flatten().and_then(|plan| {
+            if plan.catalogs.is_empty() {
+                return None;
+            }
+            Some(hofund_model_catalog::ProviderCatalogs {
+                catalogs: plan.catalogs,
+                membership_catalogs: plan.membership_catalogs,
+            })
+        })
+    }
+
     /// Replaces the public drawer feed for a local mock.
     ///
     /// An explicit override also enables the drawer rule for a mock base host.
@@ -1747,9 +1763,13 @@ impl ModelsHost {
             return Ok(Some(plan.clone()));
         }
         let Some(preset) = provider.preset.as_deref() else {
-            return Ok((!provider.catalog.trim().is_empty()).then(|| ModelPlan {
-                catalogs: super::registry::split_catalogs(&provider.catalog),
-                ..ModelPlan::default()
+            return Ok((!provider.catalog.trim().is_empty()).then(|| {
+                let catalogs = super::registry::split_catalogs(&provider.catalog);
+                ModelPlan {
+                    membership_catalogs: super::registry::membership_catalogs(&catalogs),
+                    catalogs,
+                    ..ModelPlan::default()
+                }
             }));
         };
         if let Some((compiled, alias_region)) = lookup(preset) {
@@ -1760,6 +1780,7 @@ impl ModelsHost {
             .map_err(show)?;
             let mut plan = super::registry::model_plan_of(compiled, region);
             plan.catalogs = super::registry::catalogs_of(compiled, region, &provider.catalog);
+            plan.membership_catalogs = super::registry::membership_catalogs(&plan.catalogs);
             return Ok(Some(plan));
         }
         Ok(None)
@@ -2011,7 +2032,14 @@ impl ModelsHost {
         if let Some(catalog) = &self.model_catalog {
             planned = planned
                 .into_iter()
-                .map(|model| decorate_model(model, catalog, &model_plan.catalogs))
+                .map(|model| {
+                    decorate_model(
+                        model,
+                        catalog,
+                        &model_plan.catalogs,
+                        &model_plan.membership_catalogs,
+                    )
+                })
                 .collect();
         }
         Ok(planned)
@@ -2332,6 +2360,7 @@ fn decorate_model(
     mut model: ModelSpec,
     catalog: &hofund_model_catalog::ModelCatalog,
     catalogs: &[String],
+    membership_catalogs: &[String],
 ) -> ModelSpec {
     let Some(entry) = catalog.resolve_in(catalogs, model.id()) else {
         return model;
@@ -2361,7 +2390,7 @@ fn decorate_model(
     let (input, output, _) = model.prices();
     if input.is_none()
         && output.is_none()
-        && let Some(price) = catalog.price_in(catalogs, model.id())
+        && let Some(price) = catalog.price_in(catalogs, membership_catalogs, model.id())
     {
         model = model.with_prices(
             price_micros(price.input),
