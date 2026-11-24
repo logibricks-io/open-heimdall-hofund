@@ -1940,6 +1940,9 @@ fn region_key(provider: &str, model: &str) -> String {
 impl DispatchState {
     /// Whether failover may ask a later member on this request.
     fn another_candidate_follows(&self, index: usize) -> bool {
+        if !self.hand_on.is_empty() {
+            return true;
+        }
         for hop in self.resolved.hops.iter().skip(index + 1) {
             let upstream_model = hop.wire_model.as_deref().unwrap_or(&self.resolved.bare);
             let plugin_id = hop.member.plugin_id();

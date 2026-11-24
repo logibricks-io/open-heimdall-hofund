@@ -29,6 +29,7 @@ struct Fake {
     id: &'static str,
     member_id: MemberId,
     seen: Arc<Mutex<Vec<&'static str>>>,
+    another: Arc<Mutex<Vec<bool>>>,
     reply: Reply,
 }
 
@@ -46,8 +47,15 @@ impl Member for Fake {
         "test"
     }
 
-    async fn execute(&self, _request: Request, _inbound: &str) -> Result<Completion, PluginError> {
+    async fn execute(&self, request: Request, _inbound: &str) -> Result<Completion, PluginError> {
         self.seen.lock().expect("seen").push(self.id);
+        self.another.lock().expect("another").push(
+            request
+                .extensions
+                .get(hofund_plugin_api::ANOTHER_ROUTING_CANDIDATE)
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        );
         match self.reply {
             Reply::Unary => Ok(Completion::Unary(Box::new(answer()))),
             Reply::Status(status, message) => Err(PluginError::status_error(status, message)),
@@ -100,6 +108,7 @@ struct Fixture {
     now: Arc<Mutex<Instant>>,
     book: Arc<Cooldowns>,
     seen: Arc<Mutex<Vec<&'static str>>>,
+    another: Arc<Mutex<Vec<bool>>>,
 }
 
 impl Fixture {
@@ -113,6 +122,7 @@ impl Fixture {
                 Arc::new(move || *clock.lock().expect("clock")),
             )),
             seen: Arc::new(Mutex::new(Vec::new())),
+            another: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -152,6 +162,7 @@ impl Fixture {
                     id,
                     member_id: member_id(id),
                     seen: Arc::clone(&self.seen),
+                    another: Arc::clone(&self.another),
                     reply: *reply,
                 }) as Arc<dyn Member>)
             })
@@ -175,6 +186,10 @@ impl Fixture {
 
     fn seen(&self) -> Vec<&'static str> {
         self.seen.lock().expect("seen").clone()
+    }
+
+    fn another(&self) -> Vec<bool> {
+        self.another.lock().expect("another").clone()
     }
 }
 
@@ -318,6 +333,19 @@ async fn d265_each_last_failure_asks_one_more_left_out_member() {
     let routed = dispatch(&router).await.expect("second hand-on");
     assert_eq!(routed.upstream_id, "third");
     assert_eq!(fixture.seen(), ["first", "second", "third"]);
+}
+
+#[tokio::test]
+async fn d265_probe_marks_hand_on_as_another_routing_candidate() {
+    let fixture = Fixture::new();
+    fixture.rest("first", Rest::Rate);
+    fixture.rest("second", Rest::Rate);
+    let router = fixture.router(&[
+        ("first", Reply::Status(503, "unavailable")),
+        ("second", Reply::Unary),
+    ]);
+    dispatch(&router).await.expect("hand-on");
+    assert_eq!(fixture.another(), [true, false]);
 }
 
 #[tokio::test]
