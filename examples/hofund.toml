@@ -45,6 +45,9 @@ id = "primary"
 protocol = "openai-chat"
 base_url = "http://127.0.0.1:4000/v1"
 api_key = "replace-me"
+# Optional ordered models.dev catalog ids for model metadata and list prices.
+# Empty follows the selected preset region. A user-named value stays unchanged.
+# catalog = "plan-catalog, metered-catalog"
 # patience is optional. A direct request to this provider waits out busy
 # failures for 60 seconds by default, with pauses doubling to 30 seconds.
 # Set seconds or a duration up to 240 seconds, or "off" to disable retries.

@@ -97,8 +97,6 @@ async fn state(
     let env = hofund_config::addr_env();
     let (listen, source) =
         hofund_config::effective_listen(&config, env.as_deref()).map_err(show)?;
-    let models_host = Arc::new(models_host);
-    runtime.attach_models(Arc::clone(&models_host));
     let events = Arc::new(EventBus::new());
     let (fatal, _fatal_reported) = tokio::sync::watch::channel(None);
     let listener = ModelListener::new(
@@ -114,10 +112,13 @@ async fn state(
         ),
     )
     .map_err(|error| show(error.to_string()))?;
+    let models_host = Arc::new(models_host.with_model_catalog(Arc::clone(&catalog)));
+    runtime.attach_models(Arc::clone(&models_host));
     let session_pricing = Arc::new(crate::pricing::effective_pricer(
         config.usage.clone(),
         catalog,
         Arc::clone(&models_host),
+        Arc::clone(&runtime),
     ));
     let config = Arc::new(config);
     let ops = Arc::new(ConfigOps::new(

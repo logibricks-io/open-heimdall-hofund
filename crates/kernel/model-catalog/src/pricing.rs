@@ -9,10 +9,24 @@ use crate::spec::Price;
 
 const ANY_PROVIDER: &str = "*/";
 
+/// Ordered models.dev catalogs and the membership subset excluded from pricing.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProviderCatalogs {
+    /// Catalog ids in lookup order.
+    pub catalogs: Vec<String>,
+    /// Membership catalog ids whose published costs are not list prices.
+    pub membership_catalogs: Vec<String>,
+}
+
 /// Looks up a provider's live model list price.
 pub trait ListPriceLookup: Send + Sync {
     /// Returns the provider catalog price for `model`, when listed.
     fn list_price(&self, provider_id: &str, model: &str) -> Option<Price>;
+
+    /// Returns ordered catalog ids for fallback pricing, when the provider declares them.
+    fn provider_catalogs(&self, _provider_id: &str) -> Option<ProviderCatalogs> {
+        None
+    }
 }
 
 /// Resolves the effective USD list price for one answered request.
@@ -91,12 +105,14 @@ impl EffectivePricer {
         if let Some(price) = self.custom_price(provider_id, model) {
             return Some(price);
         }
+        let provider_catalogs = self.list.provider_catalogs(provider_id);
         if let Some(price) = self.list.list_price(provider_id, model) {
             return Some(enrich_from_catalog(
                 self.catalog.as_ref(),
                 provider_id,
                 model,
                 price,
+                provider_catalogs.as_ref(),
                 &self.doubled_one_hour,
             ));
         }
@@ -108,10 +124,11 @@ impl EffectivePricer {
                 provider_id,
                 served,
                 price,
+                provider_catalogs.as_ref(),
                 &self.doubled_one_hour,
             ));
         }
-        if let Some(price) = self.catalog_price(provider_id, model) {
+        if let Some(price) = self.catalog_price(provider_id, model, provider_catalogs.as_ref()) {
             return Some(price);
         }
         if let Some(alias) = priced_alias(model, &self.aliases) {
@@ -124,15 +141,17 @@ impl EffectivePricer {
                     provider_id,
                     alias,
                     price,
+                    provider_catalogs.as_ref(),
                     &self.doubled_one_hour,
                 ));
             }
-            if let Some(price) = self.catalog_price(provider_id, alias) {
+            if let Some(price) = self.catalog_price(provider_id, alias, provider_catalogs.as_ref())
+            {
                 return Some(price);
             }
         }
         if let Some(served) = served.filter(|served| *served != model)
-            && let Some(price) = self.catalog_price(provider_id, served)
+            && let Some(price) = self.catalog_price(provider_id, served, provider_catalogs.as_ref())
         {
             return Some(price);
         }
@@ -160,7 +179,19 @@ impl EffectivePricer {
         None
     }
 
-    fn catalog_price(&self, provider_id: &str, model: &str) -> Option<Price> {
+    fn catalog_price(
+        &self,
+        provider_id: &str,
+        model: &str,
+        provider_catalogs: Option<&ProviderCatalogs>,
+    ) -> Option<Price> {
+        if let Some(provider_catalogs) = provider_catalogs {
+            return self.catalog.price_in(
+                &provider_catalogs.catalogs,
+                &provider_catalogs.membership_catalogs,
+                model,
+            );
+        }
         self.catalog
             .resolve(&format!("{provider_id}/{model}"))
             .or_else(|| self.catalog.resolve(model))
@@ -218,13 +249,22 @@ fn enrich_from_catalog(
     provider_id: &str,
     model: &str,
     mut price: Price,
+    provider_catalogs: Option<&ProviderCatalogs>,
     doubled: &[String],
 ) -> Price {
-    if let Some(entry) = catalog
-        .resolve(&format!("{provider_id}/{model}"))
-        .or_else(|| catalog.resolve(model))
-        && let Some(catalog_price) = &entry.price
-    {
+    let catalog_price = if let Some(provider_catalogs) = provider_catalogs {
+        catalog.price_in(
+            &provider_catalogs.catalogs,
+            &provider_catalogs.membership_catalogs,
+            model,
+        )
+    } else {
+        catalog
+            .resolve(&format!("{provider_id}/{model}"))
+            .or_else(|| catalog.resolve(model))
+            .and_then(|entry| entry.price.clone())
+    };
+    if let Some(catalog_price) = catalog_price {
         if price.cache_write == 0.0 {
             price.cache_write = catalog_price.cache_write;
         }
