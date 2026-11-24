@@ -20,7 +20,7 @@ pub use parse::{
     CatalogIndex, DEFAULT_CATALOG_URL, DevCatalog, ResolvedEntry, build_index, is_deprecated,
     parse_catalog,
 };
-pub use pricing::{EffectivePricer, ListPriceLookup};
+pub use pricing::{EffectivePricer, ListPriceLookup, ProviderCatalogs};
 pub use spec::{LEAST_WINDOW, ModelSpec, Price};
 pub use sync::{CatalogFetcher, FetchResponse, FetchResult, Syncer, envelope_etag, is_stale};
 pub use visibility::{
@@ -121,6 +121,31 @@ impl ModelCatalog {
             .read()
             .ok()
             .and_then(|guard| guard.as_ref()?.resolve(model).cloned())
+    }
+
+    /// First model row in an ordered list of catalog ids.
+    #[must_use]
+    pub fn resolve_in(&self, catalogs: &[String], model: &str) -> Option<ResolvedEntry> {
+        self.index
+            .read()
+            .ok()
+            .and_then(|guard| guard.as_ref()?.resolve_in(catalogs, model).cloned())
+    }
+
+    /// First usable price in catalog order, excluding the named membership catalogs.
+    #[must_use]
+    pub fn price_in(
+        &self,
+        catalogs: &[String],
+        membership_catalogs: &[String],
+        model: &str,
+    ) -> Option<Price> {
+        self.index.read().ok().and_then(|guard| {
+            guard
+                .as_ref()?
+                .price_in(catalogs, membership_catalogs, model)
+                .cloned()
+        })
     }
 
     /// Settings this catalog was opened with.
