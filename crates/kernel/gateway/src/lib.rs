@@ -2517,22 +2517,24 @@ async fn count_tokens(
             codec.encode_token_count(count.tokens, count.estimated),
         ),
         Err(error) => {
-            let (status, message) = match &error {
-                RouterError::NoRoute { .. } => (StatusCode::NOT_FOUND, error.to_string()),
+            let (status, message, retry_after) = match &error {
+                RouterError::NoRoute { .. } => (StatusCode::NOT_FOUND, error.to_string(), None),
                 RouterError::Ambiguous { .. } | RouterError::PreviousResponseNotFound { .. } => {
-                    (StatusCode::BAD_REQUEST, error.to_string())
+                    (StatusCode::BAD_REQUEST, error.to_string(), None)
                 }
                 RouterError::ModelScope { .. } | RouterError::AccountScope { .. } => {
-                    (StatusCode::FORBIDDEN, scope_error(&error, &identity))
+                    (StatusCode::FORBIDDEN, scope_error(&error, &identity), None)
                 }
                 RouterError::SpendCapReached { retry_after } => {
                     return spend_cap_response(codec.as_ref(), *retry_after);
                 }
-                RouterError::Upstream { error, .. } => {
-                    (status_of(error), error.message().to_owned())
-                }
+                RouterError::Upstream { error, .. } => (
+                    status_of(error),
+                    error.message().to_owned(),
+                    client_retry_after(error),
+                ),
             };
-            coded(codec.as_ref(), status, &message)
+            coded_with_retry(codec.as_ref(), status, &message, retry_after)
         }
     }
 }
@@ -3205,16 +3207,25 @@ fn failure(
             &ledger.session_id,
         );
     }
-    let (status, upstream, message) = match &error {
-        RouterError::NoRoute { .. } => (StatusCode::NOT_FOUND, String::new(), error.to_string()),
+    let (status, upstream, message, retry_after) = match &error {
+        RouterError::NoRoute { .. } => (
+            StatusCode::NOT_FOUND,
+            String::new(),
+            error.to_string(),
+            None,
+        ),
         RouterError::PreviousResponseNotFound { .. } => unreachable!(),
-        RouterError::Ambiguous { .. } => {
-            (StatusCode::BAD_REQUEST, String::new(), error.to_string())
-        }
+        RouterError::Ambiguous { .. } => (
+            StatusCode::BAD_REQUEST,
+            String::new(),
+            error.to_string(),
+            None,
+        ),
         RouterError::ModelScope { .. } | RouterError::AccountScope { .. } => (
             StatusCode::FORBIDDEN,
             String::new(),
             scope_error(&error, identity),
+            None,
         ),
         RouterError::SpendCapReached { retry_after } => {
             return with_named_session(spend_cap_response(codec, *retry_after), &ledger.session_id);
@@ -3223,6 +3234,7 @@ fn failure(
             status_of(error),
             upstream_id.clone(),
             error.message().to_owned(),
+            client_retry_after(error),
         ),
     };
     write_usage_app(
@@ -3262,7 +3274,10 @@ fn failure(
             &ledger.session_id,
         );
     }
-    with_named_session(coded(codec, status, &message), &ledger.session_id)
+    with_named_session(
+        coded_with_retry(codec, status, &message, retry_after),
+        &ledger.session_id,
+    )
 }
 
 /// Text that ends a stream that broke off after it began; an inbound
@@ -3295,10 +3310,37 @@ pub(crate) fn spend_cap_plugin_error(retry_after: Option<u64>) -> PluginError {
 
 fn status_of(error: &PluginError) -> StatusCode {
     let code = match error.kind() {
-        PluginErrorKind::Status => error.status().unwrap_or(502),
+        PluginErrorKind::Status | PluginErrorKind::Quota => error.status().unwrap_or(502),
         _ => 502,
     };
     StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_GATEWAY)
+}
+
+/// Seconds until a quota rest ends, for a 429 `Retry-After` header.
+///
+/// A written reset wins over a header hint. A fraction of a second rounds up.
+fn client_retry_after(error: &PluginError) -> Option<u64> {
+    if error.kind() != PluginErrorKind::Quota || error.status() != Some(429) {
+        return None;
+    }
+    let after = error.reset_after().or_else(|| error.retry_after())?;
+    let seconds = after.as_secs() + u64::from(after.subsec_nanos() > 0);
+    (seconds > 0).then_some(seconds)
+}
+
+fn coded_with_retry(
+    codec: &dyn Codec,
+    status: StatusCode,
+    message: &str,
+    retry_after: Option<u64>,
+) -> Response {
+    let mut response = coded(codec, status, message);
+    if let Some(seconds) = retry_after
+        && let Ok(value) = HeaderValue::from_str(&seconds.to_string())
+    {
+        response.headers_mut().insert(header::RETRY_AFTER, value);
+    }
+    response
 }
 
 struct UsageMeta {
