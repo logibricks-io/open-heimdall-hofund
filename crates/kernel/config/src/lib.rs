@@ -400,6 +400,8 @@ pub struct Provider {
     pub family: Option<String>,
     /// Preset id. The daemon fills the endpoint from the preset catalog.
     pub preset: Option<String>,
+    /// Ordered models.dev catalog ids. Empty follows the selected preset region.
+    pub catalog: String,
     /// Codec id, such as `openai-chat`. Absent when the preset has one protocol.
     ///
     /// The daemon converts this with `ProtocolId::try_from`. This crate stores
@@ -1068,6 +1070,7 @@ impl fmt::Debug for Provider {
             .field("id", &self.id)
             .field("family", &self.family)
             .field("preset", &self.preset)
+            .field("catalog", &self.catalog)
             .field("protocol", &self.protocol)
             .field("base_url", &self.base_url)
             .field("api_key", &"<redacted>")
@@ -1357,6 +1360,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             listed: provider.listed,
             family,
             preset: provider.preset,
+            catalog: provider.catalog,
             protocol,
             base_url: provider.base_url,
             api_key: provider.api_key,
@@ -2528,6 +2532,8 @@ struct RawProvider {
     family: Option<String>,
     #[serde(default)]
     preset: Option<String>,
+    #[serde(default)]
+    catalog: String,
     /// Accepted for one release, then rewritten to a codec id.
     #[serde(default)]
     kind: Option<String>,
@@ -2629,6 +2635,7 @@ impl fmt::Debug for RawProvider {
             .debug_struct("RawProvider")
             .field("id", &self.id)
             .field("preset", &self.preset)
+            .field("catalog", &self.catalog)
             .field("kind", &self.kind)
             .field("protocol", &self.protocol)
             .field("base_url", &self.base_url)

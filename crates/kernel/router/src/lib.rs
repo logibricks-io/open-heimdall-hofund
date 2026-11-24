@@ -1082,11 +1082,54 @@ impl Router {
         inbound_protocol: &str,
         scope: Option<&RouteScope>,
     ) -> Result<InputCount, RouterError> {
+        self.count_scoped_conversation(request, inbound_protocol, scope, None)
+            .await
+    }
+
+    /// Counts input for one conversation.
+    ///
+    /// Under strict stays, a conversation that already has an answerer is
+    /// counted only on that account. When that account is not among the
+    /// candidates, the result is the local estimate. Other stay modes count
+    /// as [`Self::count`] does.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::count_scoped`].
+    pub async fn count_scoped_conversation(
+        &self,
+        request: &Request,
+        inbound_protocol: &str,
+        scope: Option<&RouteScope>,
+        conversation: Option<&affinity::Conversation>,
+    ) -> Result<InputCount, RouterError> {
         let mut resolved = self.resolve(&request.model)?;
         resolved.hops = scoped_hops(&request.model, &resolved, scope)?;
         resolved.hops = self.without_skipped_hops(&request.model, &resolved);
         self.refresh_free(&mut resolved).await;
         resolved.hops = self.order_hops(&resolved);
+        if resolved.stays == affinity::Stays::Strict
+            && let Some(conversation) = conversation
+            && let Some(member) = self
+                .affinity
+                .stick(&conversation.key)
+                .map(|stick| stick.member)
+        {
+            let stuck = resolved
+                .hops
+                .iter()
+                .filter(|hop| hop.member.id().to_string() == member)
+                .cloned()
+                .collect::<Vec<_>>();
+            if stuck.is_empty() {
+                return Ok(InputCount {
+                    tokens: estimate_input_tokens(request),
+                    estimated: true,
+                    upstream_id: String::new(),
+                });
+            }
+            resolved.hops = stuck;
+        }
         let policy = self.policy.clone();
         let mut last = None;
         let mut unsupported = false;
