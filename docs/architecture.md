@@ -496,7 +496,9 @@ Offline, the next member is still asked, and the last member's failure goes to
 the client, but nobody rests. The router puts ready members first and retains
 the soonest cooling member as a probe. In a group, a last candidate's passing
 failure can also hand the request to one left-out member whose rate, outage,
-slow-start, or overload rest was guessed, soonest first. The shared cooldown
+slow-start, or overload rest was guessed, soonest first. Fit does not treat a
+guessed quota, credit, key, or vendor-timed rest as a member that can hold the
+prompt; when no eligible member fits, the soonest probe is still asked. The shared cooldown
 book prevents another hand-on to that resting member for 30 seconds. A
 vendor-timed quota rest is the exception: when every member still to be asked
 rests that way, the stored refusal is returned with `Retry-After` at the
