@@ -59,9 +59,59 @@ pub fn hashed_id(body: &[u8]) -> String {
 }
 
 fn digest_bytes(bytes: &[u8]) -> String {
+    prefixed_digest("hofund-", bytes)
+}
+
+/// Hash of an answered history, from its opening through the first reply.
+///
+/// System and developer items are skipped. A content array of one text part
+/// is read as that text, and cache marks are omitted, the same way an
+/// opening id is written. `None` when the body has no reply to name: a
+/// user-only history, a history that starts with a reply, or a body that
+/// is not a message list.
+#[must_use]
+pub fn history_id(body: &[u8]) -> Option<String> {
+    let value = serde_json::from_slice::<Value>(body).ok()?;
+    let object = value.as_object()?;
+    let messages = object
+        .get("messages")
+        .and_then(Value::as_array)
+        .filter(|items| !items.is_empty());
+    let items = if let Some(messages) = messages {
+        messages
+    } else {
+        object
+            .get("input")
+            .and_then(Value::as_array)
+            .filter(|items| !items.is_empty())?
+    };
+    let mut out = Vec::new();
+    let mut counted = 0usize;
+    for item in items {
+        let object = item.as_object()?;
+        let role = object.get("role").and_then(Value::as_str).unwrap_or("");
+        if role == "system" || role == "developer" {
+            continue;
+        }
+        if counted > 0 {
+            out.push(b'\n');
+        }
+        counted += 1;
+        write_opening(&mut out, item);
+        if role != "user" {
+            if counted == 1 {
+                return None;
+            }
+            return Some(prefixed_digest("hofund-history-", &out));
+        }
+    }
+    None
+}
+
+fn prefixed_digest(prefix: &str, bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     format!(
-        "hofund-{}",
+        "{prefix}{}",
         digest[..12]
             .iter()
             .map(|byte| format!("{byte:02x}"))
@@ -247,7 +297,7 @@ fn one_text_part(content: Option<&Value>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::hashed_id;
+    use super::{hashed_id, history_id};
 
     const OPENING_ENV: &str = "<environment_context>cwd=/w/proj ...</environment_context>";
 
@@ -319,5 +369,38 @@ mod tests {
             .as_bytes(),
         );
         assert_eq!(env_only, with_result);
+    }
+
+    #[test]
+    fn d244_history_id_names_an_answered_opening() {
+        let plain = br#"{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"from parent"},{"role":"user","content":"more"}]}"#;
+        let marked = br#"{"messages":[{"role":"system","content":"instructions"},{"role":"user","content":[{"type":"text","text":"hi"}]},{"role":"assistant","content":[{"type":"text","text":"from parent","cache_control":{"type":"ephemeral"}}]},{"role":"user","content":"branch"}]}"#;
+        let named = history_id(plain).expect("answered history");
+        assert_eq!(history_id(marked), Some(named.clone()));
+        assert!(named.starts_with("hofund-history-"));
+        assert_eq!(named.len(), "hofund-history-".len() + 24);
+        assert_ne!(
+            history_id(plain),
+            history_id(
+                br#"{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"from other"}]}"#
+            )
+        );
+        assert_eq!(
+            history_id(
+                br#"{"input":[{"role":"user","content":"hi"},{"role":"assistant","content":"from parent"}]}"#
+            ),
+            Some(named)
+        );
+        assert_eq!(
+            history_id(br#"{"messages":[{"role":"user","content":"hi"}]}"#),
+            None
+        );
+        assert_eq!(
+            history_id(
+                br#"{"messages":[{"role":"assistant","content":"cut"},{"role":"user","content":"hi"}]}"#
+            ),
+            None
+        );
+        assert_eq!(history_id(br#"{"input":"just text"}"#), None);
     }
 }
