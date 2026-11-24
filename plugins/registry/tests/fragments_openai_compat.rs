@@ -935,7 +935,7 @@ const BATCH_DETAILS: &[(&str, Details)] = &[
                     chat: "https://api.z.ai/api/paas/v4",
                     responses: "",
                     anthropic: "https://api.z.ai/api/anthropic",
-                    catalog: "",
+                    catalog: "zhipuai",
                     website: "",
                     keys_url: "",
                     ..NO_REGION
@@ -946,7 +946,7 @@ const BATCH_DETAILS: &[(&str, Details)] = &[
                     chat: "https://api.z.ai/api/coding/paas/v4",
                     responses: "https://api.z.ai/api/v1",
                     anthropic: "https://api.z.ai/api/anthropic",
-                    catalog: "",
+                    catalog: "zai-coding-plan, zhipuai",
                     website: "",
                     keys_url: "",
                     ..NO_REGION
@@ -1404,6 +1404,7 @@ const BATCH_DETAILS: &[(&str, Details)] = &[
                     name: "Pay as you go",
                     chat: "https://open.bigmodel.cn/api/paas/v4",
                     anthropic: "https://open.bigmodel.cn/api/anthropic",
+                    catalog: "zhipuai",
                     ..NO_REGION
                 },
                 Region {
@@ -1412,6 +1413,7 @@ const BATCH_DETAILS: &[(&str, Details)] = &[
                     chat: "https://open.bigmodel.cn/api/coding/paas/v4",
                     responses: "https://open.bigmodel.cn/api/v1",
                     anthropic: "https://open.bigmodel.cn/api/anthropic",
+                    catalog: "zhipuai-coding-plan, zhipuai",
                     ..NO_REGION
                 },
             ],
@@ -1611,6 +1613,12 @@ fn expected_credential(wire: Wire) -> Credential {
 
 fn expected_model_plan(row: &Row, region: Option<&Region>) -> ModelPlan {
     let details = details(row);
+    let catalogs = hofund_plugin_registry::split_catalogs(
+        region
+            .map(|region| region.catalog)
+            .filter(|catalog| !catalog.is_empty())
+            .unwrap_or(row.catalog),
+    );
     ModelPlan {
         chat: endpoint(row, region, Wire::Chat).to_owned(),
         responses: endpoint(row, region, Wire::Responses).to_owned(),
@@ -1625,6 +1633,8 @@ fn expected_model_plan(row: &Row, region: Option<&Region>) -> ModelPlan {
             .iter()
             .map(|model| (*model).to_owned())
             .collect(),
+        membership_catalogs: hofund_plugin_registry::membership_catalogs(&catalogs),
+        catalogs,
         quirks: None,
         extra_body: None,
     }

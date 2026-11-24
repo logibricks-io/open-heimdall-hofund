@@ -10,6 +10,7 @@ use hofund_plugin_api::{
 use hofund_plugin_sdk::json::{self, json};
 use hofund_plugin_sdk::oauth::{SecretObject, TokenCache};
 
+use crate::image_cap;
 use crate::models::Book;
 use crate::session::MARGIN;
 use crate::upstream::CopilotUpstream;
@@ -119,17 +120,22 @@ fn user_message(text: &str, images: &[u32]) -> Message {
 /// `history` earlier user turns with one image each, then the latest user
 /// message with `latest` images of its own.
 fn image_chat(model: &str, history: u32, latest: u32) -> Request {
+    let history_shots: Vec<u32> = (0..history).collect();
+    let latest_shots: Vec<u32> = (0..latest).map(|index| 90 + index).collect();
+    image_chat_shots(model, &history_shots, &latest_shots)
+}
+
+fn image_chat_shots(model: &str, history: &[u32], latest: &[u32]) -> Request {
     let mut messages = Vec::new();
-    for index in 0..history {
-        messages.push(user_message(&format!("look at screen {index}"), &[index]));
+    for (index, shot) in history.iter().enumerate() {
+        messages.push(user_message(&format!("look at screen {index}"), &[*shot]));
         let mut reply = Message::new(Role::Assistant);
         reply
             .content
             .push(ContentPart::text(format!("seen {index}")));
         messages.push(reply);
     }
-    let latest_shots: Vec<u32> = (0..latest).map(|index| 90 + index).collect();
-    messages.push(user_message("the latest ask", &latest_shots));
+    messages.push(user_message("the latest ask", latest));
     Request::new(model).with_messages(messages)
 }
 
@@ -516,4 +522,117 @@ fn d229_model_list_max_prompt_images_is_not_enforced() {
     let bodies = chat_bodies(&fix.host);
     assert_eq!(bodies.len(), 1);
     assert_images(&bodies[0], &[], &[0, 1, 90], 0);
+}
+
+fn fitted(request: Request, cap: usize) -> Request {
+    let book = Book::default();
+    let account = AccountId::from_static("a-d261-fit");
+    image_cap::learn(&book, &account, MODEL, cap);
+    image_cap::within(&book, &account, request)
+}
+
+fn assert_fitted(
+    request: &Request,
+    gone: &[u32],
+    kept: &[u32],
+    omitted: usize,
+    shown_later: usize,
+) {
+    let text = json::to_string(request).expect("request JSON");
+    for n in gone {
+        let id = format!("SHOT{n:02}");
+        assert!(!text.contains(&id), "{id} was still present");
+    }
+    for n in kept {
+        let id = format!("SHOT{n:02}");
+        assert_eq!(text.matches(&id).count(), 1, "{id} was not kept once");
+    }
+    assert_eq!(
+        text.matches("\"type\":\"image\"").count(),
+        kept.len(),
+        "remaining images"
+    );
+    assert_eq!(text.matches(OMITTED).count(), omitted, "cap placeholders");
+    assert_eq!(
+        text.matches(image_cap::SHOWN_LATER).count(),
+        shown_later,
+        "shown-later placeholders"
+    );
+}
+
+#[test]
+fn d261_earlier_copies_are_omitted_before_unique_images() {
+    let request = image_chat_shots(MODEL, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 5, 5], &[90]);
+    let fitted = fitted(request, 10);
+    assert_fitted(&fitted, &[], &[0, 1, 2, 3, 4, 5, 6, 7, 8, 90], 0, 2);
+    let text = json::to_string(&fitted).expect("request JSON");
+    let last_copy = text.find("SHOT05").expect("last copy");
+    let last_turn = text.find("look at screen 10").expect("last turn");
+    assert!(last_copy > last_turn, "the last copy was not kept");
+}
+
+#[test]
+fn d261_history_copy_of_latest_image_is_omitted_before_the_oldest_group() {
+    let request = image_chat_shots(MODEL, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 90], &[90]);
+    let fitted = fitted(request, 10);
+    assert_fitted(&fitted, &[0], &[1, 2, 3, 4, 5, 6, 7, 8, 9, 90], 1, 1);
+    let text = json::to_string(&fitted).expect("request JSON");
+    let latest = text.find("the latest ask").expect("latest ask");
+    let copy = text.find("SHOT90").expect("latest image");
+    assert!(copy > latest, "the latest user message was not kept whole");
+}
+
+#[test]
+fn d261_an_image_omitted_for_the_cap_takes_every_earlier_copy() {
+    let request = image_chat_shots(MODEL, &[0, 1, 0, 2, 3, 4, 5, 6, 7, 8, 9, 10], &[90]);
+    let fitted = fitted(request, 10);
+    assert_fitted(&fitted, &[0, 1], &[2, 3, 4, 5, 6, 7, 8, 9, 10, 90], 3, 0);
+}
+
+#[test]
+fn d261_copies_within_the_cap_and_in_an_over_cap_latest_message_are_unchanged() {
+    let at_cap = image_chat_shots(MODEL, &[0, 1, 2, 3, 3, 3, 4, 5, 6], &[7]);
+    let before = json::to_vec(&at_cap).expect("request JSON");
+    assert_eq!(
+        json::to_vec(&fitted(at_cap, 10)).expect("request JSON"),
+        before
+    );
+
+    let latest_over = image_chat_shots(MODEL, &[0], &[90; 11]);
+    let before = json::to_vec(&latest_over).expect("request JSON");
+    assert_eq!(
+        json::to_vec(&fitted(latest_over, 10)).expect("request JSON"),
+        before
+    );
+}
+
+#[test]
+fn d261_refusal_resend_and_prefit_omit_earlier_copies_first() {
+    let fix = fix();
+    let upstream = fix.account("a-d261-image-copies", "gho-d261");
+    fix.prime();
+    fix.host
+        .http()
+        .enqueue_response(400, &[], too_many(MODEL, 10, 12));
+    fix.host.http().enqueue(chat_ok());
+    fix.host.http().enqueue(chat_ok());
+
+    let request = image_chat_shots(MODEL, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 5, 5], &[90]);
+    block_on(upstream.execute(request.clone(), ProtocolId::OPENAI_CHAT)).expect("refitted turn");
+    block_on(upstream.execute(request, ProtocolId::OPENAI_CHAT)).expect("pre-fitted turn");
+
+    let bodies = chat_bodies(&fix.host);
+    assert_eq!(bodies.len(), 3, "one refusal, one resend, one prefit");
+    assert_eq!(shots(&bodies[0]).len(), 12, "the first turn is untouched");
+    for body in &bodies[1..] {
+        assert_images(body, &[], &[0, 1, 2, 3, 4, 5, 6, 7, 8, 90], 0);
+        assert_eq!(
+            String::from_utf8_lossy(body)
+                .matches(image_cap::SHOWN_LATER)
+                .count(),
+            2,
+            "shown-later placeholders"
+        );
+        assert_history_text(body, 11);
+    }
 }
