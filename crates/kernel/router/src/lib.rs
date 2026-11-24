@@ -43,6 +43,7 @@ use hofund_plugin_api::{BodyStream, CountOutcome, Forward, PluginErrorKind, RawA
 use tracing::Instrument;
 
 pub use attempt::{Attempt, AttemptError, AttemptHook, MemberAttempt};
+use cooldown::HandOnRest;
 pub use cooldown::{CooldownCause, CooldownPolicy, Cooldowns, Cooling, PersistedRest};
 pub use decision::{region_agent_note, with_region_agent_note};
 pub use hofund_plugin_api::{Completion, MemberId, PluginError, Request};
@@ -382,6 +383,7 @@ impl Resolved {
 
 struct Ordered {
     hops: Vec<Hop>,
+    hand_on: Vec<Hop>,
     reserves: BTreeMap<String, usize>,
     affinity: Option<ReplyRoute>,
     drain_moves: Vec<RoundMove>,
@@ -981,6 +983,11 @@ impl Router {
             request: request.clone(),
             inbound_protocol: inbound_protocol.to_owned(),
             hook,
+            hand_on: if resolved.pool_asked {
+                ordered.hand_on
+            } else {
+                Vec::new()
+            },
             resolved,
             policy: self.policy.clone(),
             input_tokens,
@@ -1230,10 +1237,10 @@ impl Router {
     ) -> Ordered {
         let mut moves = PoolMoves::default();
         let ordered = self.order_level(resolved, 0, resolved.hops.clone(), &mut moves);
-        let ordered = if let Some(cooldowns) = &self.cooldowns {
+        let (ordered, hand_on) = if let Some(cooldowns) = &self.cooldowns {
             order_hops(ordered, cooldowns, &resolved.bare)
         } else {
-            ordered
+            (ordered, Vec::new())
         };
         let ids = ordered
             .iter()
@@ -1369,16 +1376,17 @@ impl Router {
                 }
             }
         }
-        let mut hops = if strict {
-            ordered
+        let (mut hops, _) = if strict {
+            (ordered, Vec::new())
         } else if let Some(cooldowns) = &self.cooldowns {
             order_hops(ordered, cooldowns, &resolved.bare)
         } else {
-            ordered
+            (ordered, Vec::new())
         };
         self.reorder_last_on_credits(&mut hops, resolved);
         Ordered {
             hops,
+            hand_on,
             reserves,
             affinity: conversation
                 .zip(decision)
@@ -1836,6 +1844,7 @@ struct DispatchState {
     request: Request,
     inbound_protocol: String,
     hook: Option<Arc<dyn AttemptHook>>,
+    hand_on: Vec<Hop>,
     resolved: Resolved,
     policy: FailoverPolicy,
     input_tokens: u64,
@@ -1997,6 +2006,45 @@ impl DispatchState {
         )
     }
 
+    fn take_hand_on(&mut self) -> Option<usize> {
+        let error = &self.last.as_ref()?.1;
+        if error.status() == Some(400)
+            || decision::outgrown(error)
+            || decision::context_overflow_memory(error)
+            || decision::content_refused(error)
+            || !(self.policy.allows(error) || decision::asks_next(error))
+        {
+            return None;
+        }
+        let momentary = matches!(
+            error.kind(),
+            PluginErrorKind::Connect
+                | PluginErrorKind::Timeout
+                | PluginErrorKind::Transport
+                | PluginErrorKind::Interrupted
+        ) || patience::busy(error, 0, PoolMemberPatience::Off, self.now())
+            .is_some();
+        let cooldowns = self.cooldowns.clone()?;
+        let bare = self.resolved.bare.clone();
+        let position = self.hand_on.iter().position(|hop| {
+            let model = hop.wire_model.as_deref().unwrap_or(&bare);
+            let Some(cooling) = cooldowns.cooling_for_model(hop.member.id(), model) else {
+                return false;
+            };
+            let accepts = match cooling.hand_on() {
+                Some(HandOnRest::Rate) => true,
+                Some(HandOnRest::Momentary) => momentary,
+                None => false,
+            };
+            accepts && cooldowns.claim_hand_on(hop.member.id())
+        })?;
+        let hop = self.hand_on.remove(position);
+        let index = self.resolved.hops.len();
+        self.resolved.spent.push(false);
+        self.resolved.hops.push(hop);
+        Some(index)
+    }
+
     async fn run(mut self, start: usize) -> Result<Routed, RouterError> {
         let mut round = 0_u32;
         let mut wait_from = None;
@@ -2073,6 +2121,12 @@ impl DispatchState {
                     }
                     return Err(error);
                 }
+            }
+            if ending != Ending::Answered
+                && let Some(next) = self.take_hand_on()
+            {
+                asking = vec![next];
+                continue;
             }
             let now = self.now();
             // Every member asked has failed with nothing of a reply sent.
@@ -2217,6 +2271,11 @@ impl DispatchState {
                     );
                 }
                 continue;
+            }
+            if !self.hand_on.is_empty()
+                && let Some(cooldowns) = &self.cooldowns
+            {
+                cooldowns.note_asked_while_cooling(hop.member.id(), &upstream_model);
             }
             if self.another_candidate_follows(index) {
                 attempt.extensions.insert(
@@ -2728,7 +2787,7 @@ fn cooling_labels(cooldowns: Option<&Arc<Cooldowns>>, resolved: &Resolved) -> Ve
         .collect()
 }
 
-fn order_hops(hops: Vec<Hop>, cooldowns: &Cooldowns, bare: &str) -> Vec<Hop> {
+fn order_hops(hops: Vec<Hop>, cooldowns: &Cooldowns, bare: &str) -> (Vec<Hop>, Vec<Hop>) {
     let mut ready = Vec::with_capacity(hops.len());
     let mut cooling = Vec::new();
     for hop in hops {
@@ -2739,6 +2798,10 @@ fn order_hops(hops: Vec<Hop>, cooldowns: &Cooldowns, bare: &str) -> Vec<Hop> {
             ready.push(hop);
         }
     }
+    if cooling.len() < 2 {
+        ready.extend(cooling.into_iter().map(|(hop, _)| hop));
+        return (ready, Vec::new());
+    }
     let mut probe = None;
     for (index, (_, until)) in cooling.iter().enumerate() {
         if probe.is_none_or(|(_, soonest): (usize, Instant)| *until < soonest) {
@@ -2746,6 +2809,7 @@ fn order_hops(hops: Vec<Hop>, cooldowns: &Cooldowns, bare: &str) -> Vec<Hop> {
         }
     }
     let probe = probe.map(|(index, _)| index);
+    let mut left = Vec::new();
     for (index, (hop, until)) in cooling.into_iter().enumerate() {
         if probe == Some(index) {
             ready.push(hop);
@@ -2755,9 +2819,11 @@ fn order_hops(hops: Vec<Hop>, cooldowns: &Cooldowns, bare: &str) -> Vec<Hop> {
                 "cooldown.until" = ?until,
                 "member_cooldown_skip"
             );
+            left.push((hop, until));
         }
     }
-    ready
+    left.sort_by_key(|(_, until)| *until);
+    (ready, left.into_iter().map(|(hop, _)| hop).collect())
 }
 
 fn apply_wire(request: &mut Request, hop: &Hop, bare: &str, served: &[hofund_codec::ServedModel]) {

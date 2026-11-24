@@ -493,9 +493,11 @@ one, and not hosts on this computer or its local network) for 2 seconds each.
 No connection means offline; with nothing else to dial, a route out counts as
 online. The answer is kept for 5 seconds and one request asks at a time.
 Offline, the next member is still asked, and the last member's failure goes to
-the client, but nobody rests. The router only orders
-members, putting ready members first and retaining the soonest cooling member
-as a probe.
+the client, but nobody rests. The router puts ready members first and retains
+the soonest cooling member as a probe. In a group, a last candidate's passing
+failure can also hand the request to one left-out member whose rate, outage,
+slow-start, or overload rest was guessed, soonest first. The shared cooldown
+book prevents another hand-on to that resting member for 30 seconds.
 
 ## Failover decisions
 

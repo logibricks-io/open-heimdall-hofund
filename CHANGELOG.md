@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- D-265: A routing group no longer strands a usable member behind the single soonest cooling probe. When the last candidate fails before content, a member left out for a guessed rate, outage, slow-start, or overload rest can be asked next, soonest to recover first. Rate-rested members accept any own failure allowed for failover, including 401-404 and quota 429; outage, slow-start, and overload rests accept only momentary failures. A resting member asked by the probe or hand-on receives no other hand-on for 30 seconds unless it answers. Request 400s, context overflow, quota, credit, key, and `Retry-After` rests, and explicitly named providers keep their previous behavior.
+
 ### Security
 
 - Lockfile: `url` 2.5.8 -> 2.5.9 (RUSTSEC-2026-0592, stack overflow in `Url::origin()` on nested `blob:` URLs) and `cookie` 0.18.2 -> 0.18.3 (RUSTSEC-2026-0594, private cookie nonces can repeat after `fork`); `form_urlencoded` 1.2.2 -> 1.2.3 comes with `url` 2.5.9. `cargo-deny` fails on both advisories without this update.
