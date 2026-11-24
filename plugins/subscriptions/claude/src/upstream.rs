@@ -215,6 +215,11 @@ impl UpstreamProvider for ClaudeUpstream {
         _inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
         reject_non_text(&request)?;
+        if let Some(error) =
+            crate::said_out::block_request(&self.host, &self.account, &request.model)
+        {
+            return Err(error);
+        }
         self.bridge.use_ask(self.host.ask().clone());
         let mut request = request;
         let advisor_model = crate::bridge::advisor::prepare(&mut request, self.host.ask());
@@ -480,6 +485,13 @@ impl ClaudeUpstream {
         let (events, calls, session) = match result {
             Ok(decoded) => decoded,
             Err(error) => {
+                crate::said_out::note_bridge(
+                    &self.host,
+                    &self.account,
+                    &request.model,
+                    &error,
+                    self.host.clock().now(),
+                );
                 if let Some(run_id) = run_id {
                     self.bridge
                         .ended(run_id, &self.account, request, "", TurnStop::Other, false);

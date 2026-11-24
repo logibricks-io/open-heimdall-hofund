@@ -116,6 +116,8 @@ pub struct QuotaWindow {
     runs_out_at: Option<SystemTime>,
     runs_out: Option<f64>,
     window_span: Option<Duration>,
+    /// The vendor refused further use of this window until it resets.
+    held: bool,
 }
 
 /// Account-level labels and windows from one quota poll.
@@ -208,7 +210,16 @@ impl QuotaWindow {
             runs_out_at: None,
             runs_out: None,
             window_span: None,
+            held: false,
         })
+    }
+
+    /// The vendor refused further use until reset, so a sign-in switch must
+    /// not choose this account while the window stands.
+    #[must_use]
+    pub const fn with_held(mut self, held: bool) -> Self {
+        self.held = held;
+        self
     }
 
     /// Whether an exhausted window stops routing to the account. The default is `true`.
@@ -313,6 +324,12 @@ impl QuotaWindow {
     #[must_use]
     pub const fn blocking(&self) -> bool {
         self.blocking
+    }
+
+    /// Whether the vendor refused further use until this window resets.
+    #[must_use]
+    pub const fn held(&self) -> bool {
+        self.held
     }
 
     /// The one model this window covers, when it is not account-wide.
