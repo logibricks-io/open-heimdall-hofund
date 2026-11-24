@@ -1584,6 +1584,7 @@ async fn d9i_equal_wire_name_keeps_the_dated_upstream_model() {
 enum EdgeFailure {
     Status(u16, &'static str),
     Transport,
+    QuotaReset,
 }
 
 struct Fails {
@@ -1616,6 +1617,12 @@ impl Member for Fails {
         Err(match self.failure {
             EdgeFailure::Status(status, message) => PluginError::status_error(status, message),
             EdgeFailure::Transport => PluginError::transport("reset after the request body"),
+            EdgeFailure::QuotaReset => {
+                PluginError::quota_status(429, "Third-party quota reached. Resets in 3h22m19s.")
+                    .with_reset_after(std::time::Duration::from_secs(12_139))
+                    .with_retry_after(std::time::Duration::from_secs(12_139))
+                    .with_model_scope()
+            }
         })
     }
 }
@@ -1666,6 +1673,40 @@ fn protocol_app(members: Vec<Arc<dyn Member>>) -> (axum::Router, tempfile::TempD
     )
     .into_router();
     (app, dir)
+}
+
+#[tokio::test]
+async fn d260_quota_reset_is_a_429_with_retry_after() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let (app, dir) = protocol_app(vec![failure("first", &hits, EdgeFailure::QuotaReset)]);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("authorization", "Bearer secret")
+                .body(Body::from(
+                    r#"{"model":"demo","messages":[{"role":"user","content":"hi"}]}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+        Some("12139")
+    );
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let body = String::from_utf8_lossy(&bytes);
+    assert!(body.contains("Third-party quota reached"), "{body}");
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]

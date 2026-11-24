@@ -47,6 +47,7 @@ fn pool_quota(error: PluginError) -> PluginError {
 pub fn is_model_pool_quota(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     lower.contains("individual quota reached")
+        || lower.contains("third-party quota reached")
         || lower.contains("exhausted your capacity on this model")
 }
 
@@ -152,5 +153,25 @@ mod tests {
         assert!(!asks_for_verification(
             "The caller does not have permission"
         ));
+    }
+
+    #[test]
+    fn d260_third_party_quota_scopes_the_model_until_the_written_reset() {
+        let notice = "Third-party quota reached. Resets in 3h22m19s.";
+        assert!(is_model_pool_quota(notice));
+        assert!(is_model_pool_quota(&notice.to_ascii_uppercase()));
+        assert!(!is_model_pool_quota("Quota exceeded. Resets in 3h22m19s."));
+        let pooled = note_google_sign_in(PluginError::quota_status(429, notice));
+        assert!(pooled.scopes_model());
+        assert_eq!(pooled.kind(), PluginErrorKind::Quota);
+        assert!(!pooled.verifies_account());
+        let promoted = note_google_sign_in(PluginError::status_error(429, notice));
+        assert_eq!(promoted.kind(), PluginErrorKind::Quota);
+        assert!(promoted.scopes_model());
+        assert_eq!(promoted.status(), Some(429));
+        assert_eq!(
+            crate::transport::retry_after_from_body(notice.as_bytes()),
+            Some(std::time::Duration::from_secs(12_139))
+        );
     }
 }

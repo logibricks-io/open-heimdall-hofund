@@ -873,6 +873,45 @@ fn d222_written_capacity_reset_rests_only_the_model() {
 }
 
 #[test]
+fn d260_third_party_quota_body_scopes_the_model_until_the_reset() {
+    let notice = "Third-party quota reached. Please switch to Gemini models or upgrade your subscription to increase your limits. Resets in 3h22m19s.";
+    let body =
+        format!(r#"{{"type":"error","error":{{"type":"rate_limit_error","message":"{notice}"}}}}"#);
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(
+        &host,
+        "a-0000000000000001",
+        "u@example.test",
+        signed_in_blob("proj-1"),
+    );
+    let sub = subscription(&host);
+    host.http().enqueue(token_reply("acc-1", None));
+    host.http().enqueue_response(
+        429,
+        &[("content-type", "application/json")],
+        body.into_bytes(),
+    );
+    let request: hofund_plugin_api::Request = hofund_plugin_sdk::json::from_value(json!({
+        "model": "gemini-3-flash",
+        "messages": [{"role":"user","content":[{"type":"text","text":"hello"}]}]
+    }))
+    .expect("request");
+    let error = block_on(
+        sub.upstream(&id, host.context())
+            .expect("upstream")
+            .execute(request, ProtocolId::GENERATIVE_LANGUAGE),
+    )
+    .err()
+    .expect("third-party quota");
+    assert_eq!(error.reset_after(), Some(Duration::from_secs(12_139)));
+    assert!(error.scopes_model());
+    assert!(!error.verifies_account());
+    assert_eq!(error.kind(), PluginErrorKind::Quota);
+    assert!(error.message().contains("Third-party quota reached"));
+}
+
+#[test]
 fn r49c_a_401_refreshes_once_and_resends() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
