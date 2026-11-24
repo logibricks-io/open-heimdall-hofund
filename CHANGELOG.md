@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- D-263: Chat usage counts a top-level `reasoning_tokens` as reasoning when `completion_tokens_details` has no positive count, on a whole reply and on a stream. A positive count in `completion_tokens_details` is kept, and the two numbers are not added.
+
 ### Security
 
 - Lockfile: `url` 2.5.8 -> 2.5.9 (RUSTSEC-2026-0592, stack overflow in `Url::origin()` on nested `blob:` URLs) and `cookie` 0.18.2 -> 0.18.3 (RUSTSEC-2026-0594, private cookie nonces can repeat after `fork`); `form_urlencoded` 1.2.2 -> 1.2.3 comes with `url` 2.5.9. `cargo-deny` fails on both advisories without this update.
