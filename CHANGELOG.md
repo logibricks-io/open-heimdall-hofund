@@ -9,9 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- D-254: a Claude Code sign-in that has hit its limit, or whose `/usage` failed on a limit line or a session refusal since that account was in use, switches off until the named reset. A 401 stays put. `/usage` waits 45 seconds. A bridge rejection records the reset the vendor named, including a limit of one model family.
-
-- D-254: the account in use and the session scan share one agent home, `CLAUDE_CONFIG_DIR` when set and otherwise `~/.claude`. A later bridge rate-limit event replaces an earlier rejected reset.
+- D-263: Chat usage counts a top-level `reasoning_tokens` as reasoning when `completion_tokens_details` has no positive count, on a whole reply and on a stream. A positive count in `completion_tokens_details` is kept, and the two numbers are not added.
 
 ### Security
 
