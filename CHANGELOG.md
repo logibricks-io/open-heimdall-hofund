@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Fixed D-254: a Claude Code sign-in that has hit its limit, or whose `/usage` failed on a limit line or a session refusal since that account was in use, switches off until the named reset. A 401 stays put. `/usage` waits 45 seconds. A bridge rejection records the reset the vendor named, including a limit of one model family.
+### Fixed
+
+- D-254: a Claude Code sign-in that has hit its limit, or whose `/usage` failed on a limit line or a session refusal since that account was in use, switches off until the named reset. A 401 stays put. `/usage` waits 45 seconds. A bridge rejection records the reset the vendor named, including a limit of one model family.
 
 ## [0.2.0-rc.3] - 2026-11-20
 
