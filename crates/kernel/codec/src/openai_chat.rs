@@ -1321,62 +1321,52 @@ fn decode_usage(mut object: Object) -> Result<Usage, CodecError> {
     let input_tokens = take_u64(&mut object, "prompt_tokens")?;
     let output_tokens = take_u64(&mut object, "completion_tokens")?;
     let total_tokens = take_u64(&mut object, "total_tokens")?;
+    // Taken before the rest of the object becomes extensions, so a later
+    // encode does not write this key beside `completion_tokens_details`.
+    let top_level_reasoning = take_u64(&mut object, "reasoning_tokens")?;
     let mut details = Object::new();
-    if let Some(mut prompt) = take_object(&mut object, "prompt_tokens_details")? {
-        let cache_read_tokens = take_u64(&mut prompt, "cached_tokens")?;
-        let cache_write_tokens = take_u64(&mut prompt, "cache_write_tokens")?;
-        for (key, value) in prompt {
-            details.entry(key).or_insert(value);
-        }
+    let (cache_read_tokens, cache_write_tokens) =
+        if let Some(mut prompt) = take_object(&mut object, "prompt_tokens_details")? {
+            let cache_read_tokens = take_u64(&mut prompt, "cached_tokens")?;
+            let cache_write_tokens = take_u64(&mut prompt, "cache_write_tokens")?;
+            for (key, value) in prompt {
+                details.entry(key).or_insert(value);
+            }
+            (cache_read_tokens, cache_write_tokens)
+        } else {
+            (None, None)
+        };
+    let detail_reasoning =
         if let Some(mut completion) = take_object(&mut object, "completion_tokens_details")? {
             let reasoning = take_u64(&mut completion, "reasoning_tokens")?;
             for (key, value) in completion {
                 details.entry(key).or_insert(value);
             }
-            return usage_from(
-                input_tokens,
-                output_tokens,
-                total_tokens,
-                (cache_read_tokens, cache_write_tokens),
-                reasoning,
-                object,
-                details,
-            );
-        }
-        return usage_from(
-            input_tokens,
-            output_tokens,
-            total_tokens,
-            (cache_read_tokens, cache_write_tokens),
-            None,
-            object,
-            details,
-        );
-    }
-    if let Some(mut completion) = take_object(&mut object, "completion_tokens_details")? {
-        let reasoning = take_u64(&mut completion, "reasoning_tokens")?;
-        for (key, value) in completion {
-            details.entry(key).or_insert(value);
-        }
-        return usage_from(
-            input_tokens,
-            output_tokens,
-            total_tokens,
-            (None, None),
-            reasoning,
-            object,
-            details,
-        );
-    }
+            reasoning
+        } else {
+            None
+        };
     usage_from(
         input_tokens,
         output_tokens,
         total_tokens,
-        (None, None),
-        None,
+        (cache_read_tokens, cache_write_tokens),
+        counted_reasoning(detail_reasoning, top_level_reasoning),
         object,
         details,
     )
+}
+
+/// A provider that reports top-level `reasoning_tokens` counts those as
+/// reasoning when `completion_tokens_details` has no positive count.
+///
+/// A positive details count wins, so the two numbers are not added. A details
+/// count of zero falls back the same way an absent details object does.
+fn counted_reasoning(details: Option<u64>, top_level: Option<u64>) -> Option<u64> {
+    match details {
+        Some(count) if count > 0 => Some(count),
+        other => top_level.or(other),
+    }
 }
 
 fn usage_from(

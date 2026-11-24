@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- D-265: A routing group no longer strands a usable member behind the single soonest cooling probe. When the last candidate fails before content, a member left out for a guessed rate, outage, slow-start, or overload rest can be asked next, soonest to recover first. Rate-rested members accept any own failure allowed for failover, including 401-404 and quota 429; outage, slow-start, and overload rests accept only momentary failures. A resting member asked by the probe or hand-on receives no other hand-on for 30 seconds unless it answers. Strict conversation stays keep the request on the pinned member and never use hand-on. Request 400s, context overflow, quota, credit, key, and `Retry-After` rests, and explicitly named providers keep their previous behavior.
+- D-263: Chat usage counts a top-level `reasoning_tokens` as reasoning when `completion_tokens_details` has no positive count, on a whole reply and on a stream. A positive count in `completion_tokens_details` is kept, and the two numbers are not added.
 
 ### Security
 
