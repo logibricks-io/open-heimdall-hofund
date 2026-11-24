@@ -418,6 +418,25 @@ async fn d265_probe_marks_hand_on_as_another_routing_candidate() {
 }
 
 #[tokio::test]
+async fn d265_non_hand_on_rests_do_not_mark_another_candidate() {
+    for rest in [
+        Rest::Quota,
+        Rest::Credit,
+        Rest::Key,
+        Rest::RetryRate,
+        Rest::RetryOutage,
+    ] {
+        let fixture = Fixture::new();
+        fixture.rest("first", Rest::Rate);
+        fixture.rest("second", rest);
+        let router = fixture.router(&[("first", Reply::Unary), ("second", Reply::Unary)]);
+        dispatch(&router).await.expect("probe answer");
+        assert_eq!(fixture.seen(), ["first"]);
+        assert_eq!(fixture.another(), [false]);
+    }
+}
+
+#[tokio::test]
 async fn d265_stream_failure_before_content_hands_on() {
     let fixture = Fixture::new();
     fixture.rest("first", Rest::Rate);

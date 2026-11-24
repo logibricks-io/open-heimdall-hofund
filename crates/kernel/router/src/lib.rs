@@ -1940,7 +1940,15 @@ fn region_key(provider: &str, model: &str) -> String {
 impl DispatchState {
     /// Whether failover may ask a later member on this request.
     fn another_candidate_follows(&self, index: usize) -> bool {
-        if !self.hand_on.is_empty() {
+        let hand_on_follows = self.hand_on.iter().any(|hop| {
+            let model = hop.wire_model.as_deref().unwrap_or(&self.resolved.bare);
+            self.cooldowns
+                .as_ref()
+                .and_then(|cooldowns| cooldowns.cooling_for_model(hop.member.id(), model))
+                .and_then(|cooling| cooling.hand_on())
+                .is_some()
+        });
+        if hand_on_follows {
             return true;
         }
         for hop in self.resolved.hops.iter().skip(index + 1) {
