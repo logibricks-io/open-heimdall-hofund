@@ -250,6 +250,7 @@ fn batch7_rows_model_plan_like_the_old_catalog() {
                 lists: false,
                 only: String::new(),
                 models: Vec::new(),
+                catalogs: hofund_plugin_registry::split_catalogs(row.catalog),
                 quirks: None,
                 extra_body: None,
             }

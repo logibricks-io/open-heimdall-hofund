@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- D-264: Zhipu and Z.ai Coding Plan providers read model capabilities from their region's models.dev plan catalog first, then `zhipuai`; preset-owned saved catalogs follow the selected region while a user-named catalog stays unchanged. Plan-only models now retain image input, context and output limits, and reasoning levels. Membership plan prices are never used as list prices: established models fall back to the metered catalog price, plan-only models stay unpriced, unrelated catalogs do not borrow plan metadata, and genuinely free non-membership models can still cost $0. Verified with fixture catalogs and loopback mocks only.
+
 ### Security
 
 - Lockfile: `url` 2.5.8 -> 2.5.9 (RUSTSEC-2026-0592, stack overflow in `Url::origin()` on nested `blob:` URLs) and `cookie` 0.18.2 -> 0.18.3 (RUSTSEC-2026-0594, private cookie nonces can repeat after `fork`); `form_urlencoded` 1.2.2 -> 1.2.3 comes with `url` 2.5.9. `cargo-deny` fails on both advisories without this update.

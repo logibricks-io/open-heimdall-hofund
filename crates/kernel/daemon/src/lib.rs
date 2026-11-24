@@ -534,7 +534,8 @@ async fn start_inner(
     let runtime = runtime::Runtime::new(Arc::clone(&registry), path, max_idle_per_host);
     let mut models_host = ModelsHost::new(config.connect_timeout, config.read_timeout)
         .with_state_root(beside(path, ".hofund"))
-        .with_registry(Arc::clone(&registry));
+        .with_registry(Arc::clone(&registry))
+        .with_model_catalog(Arc::clone(&model_catalog));
     account_discovery::import_if_configured(path, &config)?;
     let snapshot = runtime.initial_snapshot(&config, Some(&mut models_host))?;
     runtime.attach_spend_caps(Arc::clone(&usage), &config.providers);

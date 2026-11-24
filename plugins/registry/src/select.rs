@@ -245,9 +245,43 @@ pub fn model_plan_of(
         lists: region.is_some_and(|region| region.lists),
         only: preset.only.to_owned(),
         models,
+        catalogs: catalogs_of(preset, region, ""),
         quirks: None,
         extra_body: None,
     }
+}
+
+/// Resolves ordered catalog ids, following a region unless the user named another catalog.
+#[must_use]
+pub fn catalogs_of(
+    preset: &CompiledPreset,
+    region: Option<&CompiledRegion>,
+    saved: &str,
+) -> Vec<String> {
+    let saved = saved.trim();
+    let preset_owned = saved.is_empty()
+        || saved == preset.catalog
+        || preset.regions.iter().any(|region| saved == region.catalog);
+    if !preset_owned {
+        return split_catalogs(saved);
+    }
+    let selected = region
+        .map(|region| region.catalog)
+        .filter(|catalog| !catalog.is_empty())
+        .unwrap_or(preset.catalog);
+    split_catalogs(selected)
+}
+
+/// Parses a comma-separated ordered catalog list.
+#[must_use]
+pub fn split_catalogs(value: &str) -> Vec<String> {
+    let mut catalogs = Vec::new();
+    for catalog in value.split(',').map(str::trim).filter(|id| !id.is_empty()) {
+        if !catalogs.iter().any(|known| known == catalog) {
+            catalogs.push(catalog.to_owned());
+        }
+    }
+    catalogs
 }
 
 fn finish(

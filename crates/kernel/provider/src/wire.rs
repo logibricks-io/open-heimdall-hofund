@@ -45,6 +45,8 @@ pub struct ModelPlan {
     pub only: String,
     /// Static ids, with a region's ids replacing the preset's ids.
     pub models: Vec<String>,
+    /// Ordered models.dev catalog ids used for model metadata and prices.
+    pub catalogs: Vec<String>,
     /// Optional quirk profile name recorded by the preset.
     pub quirks: Option<String>,
     /// Optional JSON object merged into a probe body.

@@ -328,6 +328,7 @@ pub struct Cached {
 pub struct ModelsHost {
     limits: HttpLimits,
     catalog_limits: Option<Arc<dyn ModelLimits>>,
+    model_catalog: Option<Arc<hofund_model_catalog::ModelCatalog>>,
     public_drawers_url: String,
     public_drawers_override: bool,
     plan_overrides: HashMap<String, ModelPlan>,
@@ -357,6 +358,7 @@ impl ModelsHost {
         Self {
             limits: HttpLimits::new(connect_timeout, read_timeout),
             catalog_limits: None,
+            model_catalog: None,
             public_drawers_url: PUBLIC_DRAWERS.to_owned(),
             public_drawers_override: false,
             plan_overrides: HashMap::new(),
@@ -637,6 +639,13 @@ impl ModelsHost {
     #[must_use]
     pub fn with_catalog_limits(mut self, limits: Arc<dyn ModelLimits>) -> Self {
         self.catalog_limits = Some(limits);
+        self
+    }
+
+    /// Installs the models.dev catalog used to decorate listed rows.
+    #[must_use]
+    pub fn with_model_catalog(mut self, catalog: Arc<hofund_model_catalog::ModelCatalog>) -> Self {
+        self.model_catalog = Some(catalog);
         self
     }
 
@@ -1738,7 +1747,10 @@ impl ModelsHost {
             return Ok(Some(plan.clone()));
         }
         let Some(preset) = provider.preset.as_deref() else {
-            return Ok(None);
+            return Ok((!provider.catalog.trim().is_empty()).then(|| ModelPlan {
+                catalogs: super::registry::split_catalogs(&provider.catalog),
+                ..ModelPlan::default()
+            }));
         };
         if let Some((compiled, alias_region)) = lookup(preset) {
             let region = super::registry::resolve_region(
@@ -1746,7 +1758,9 @@ impl ModelsHost {
                 option_present(provider, "region")?.or(alias_region),
             )
             .map_err(show)?;
-            return Ok(Some(super::registry::model_plan_of(compiled, region)));
+            let mut plan = super::registry::model_plan_of(compiled, region);
+            plan.catalogs = super::registry::catalogs_of(compiled, region, &provider.catalog);
+            return Ok(Some(plan));
         }
         Ok(None)
     }
@@ -1958,37 +1972,46 @@ impl ModelsHost {
             return Ok(live);
         };
         let static_ids = &model_plan.models;
-        if model_plan.only.is_empty() && (static_ids.is_empty() || !live.is_empty()) {
-            return Ok(live);
-        }
-        let mut planned = live
-            .into_iter()
-            .filter(|model| model.id().starts_with(&model_plan.only))
-            .collect::<Vec<_>>();
-        if planned.is_empty() {
-            planned = static_models(static_ids)?;
-        }
-        if let Some(limits) = &self.catalog_limits {
+        let use_live = model_plan.only.is_empty() && (static_ids.is_empty() || !live.is_empty());
+        let mut planned = if use_live {
+            live
+        } else {
+            let mut planned = live
+                .into_iter()
+                .filter(|model| model.id().starts_with(&model_plan.only))
+                .collect::<Vec<_>>();
+            if planned.is_empty() {
+                planned = static_models(static_ids)?;
+            }
+            if let Some(limits) = &self.catalog_limits {
+                planned = planned
+                    .into_iter()
+                    .map(|model| {
+                        let id = model
+                            .id()
+                            .strip_prefix(&model_plan.only)
+                            .unwrap_or(model.id());
+                        let (context, output) = limits.limits(id);
+                        let context = if model.context() == 0 {
+                            context
+                        } else {
+                            model.context()
+                        };
+                        let output = if model.max_output() == 0 {
+                            output
+                        } else {
+                            model.max_output()
+                        };
+                        model.with_context(context).with_max_output(output)
+                    })
+                    .collect();
+            }
+            planned
+        };
+        if let Some(catalog) = &self.model_catalog {
             planned = planned
                 .into_iter()
-                .map(|model| {
-                    let id = model
-                        .id()
-                        .strip_prefix(&model_plan.only)
-                        .unwrap_or(model.id());
-                    let (context, output) = limits.limits(id);
-                    let context = if model.context() == 0 {
-                        context
-                    } else {
-                        model.context()
-                    };
-                    let output = if model.max_output() == 0 {
-                        output
-                    } else {
-                        model.max_output()
-                    };
-                    model.with_context(context).with_max_output(output)
-                })
+                .map(|model| decorate_model(model, catalog, &model_plan.catalogs))
                 .collect();
         }
         Ok(planned)
@@ -2303,6 +2326,57 @@ fn static_models(ids: &[String]) -> Result<Vec<ModelSpec>, DaemonError> {
     ids.iter()
         .map(|id| ModelSpec::new(id, Some(id.clone())).map_err(show))
         .collect()
+}
+
+fn decorate_model(
+    mut model: ModelSpec,
+    catalog: &hofund_model_catalog::ModelCatalog,
+    catalogs: &[String],
+) -> ModelSpec {
+    let Some(entry) = catalog.resolve_in(catalogs, model.id()) else {
+        return model;
+    };
+    if model.context() == 0
+        && let Some(context) = entry.spec.context_window
+    {
+        model = model.with_context(u64::from(context));
+    }
+    if model.max_output() == 0
+        && let Some(output) = entry.spec.max_output
+    {
+        model = model.with_max_output(u64::from(output));
+    }
+    if model.input_modalities().is_empty() {
+        model = model.with_input_modalities(entry.spec.input_modalities.clone());
+    }
+    if model.output_modalities().is_empty() {
+        model = model.with_output_modalities(entry.spec.output_modalities.clone());
+    }
+    if model.image_input().is_none() && !entry.spec.input_modalities.is_empty() {
+        model = model.with_image_input(Some(entry.spec.vision));
+    }
+    if model.efforts().is_empty() {
+        model = model.with_efforts(entry.spec.reasoning_levels.clone());
+    }
+    let (input, output, _) = model.prices();
+    if input.is_none()
+        && output.is_none()
+        && let Some(price) = catalog.price_in(catalogs, model.id())
+    {
+        model = model.with_prices(
+            price_micros(price.input),
+            price_micros(price.output),
+            price_micros(price.cache_read),
+        );
+    }
+    model
+}
+
+fn price_micros(value: f64) -> u64 {
+    if value <= 0.0 {
+        return 0;
+    }
+    (value * 1_000_000.0).round() as u64
 }
 
 struct Selected {

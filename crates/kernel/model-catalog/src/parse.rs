@@ -142,7 +142,7 @@ pub fn build_index(
                     &catalog.providers,
                     toggle_providers,
                 ),
-                price: model.cost.as_ref().map(dev_price),
+                price: price_for(provider_id, model.cost.as_ref()),
                 release_date: non_empty(&model.release_date),
                 deprecated: is_deprecated(&model.status),
                 retired: model.status.eq_ignore_ascii_case("retired"),
@@ -230,6 +230,32 @@ impl CatalogIndex {
         }
         self.by_bare_id.get(&bare_id(model))
     }
+
+    /// Resolves a model in the first catalog that lists it.
+    #[must_use]
+    pub fn resolve_in(&self, catalogs: &[String], model: &str) -> Option<&ResolvedEntry> {
+        catalogs
+            .iter()
+            .find_map(|catalog| self.in_catalog(catalog, model))
+    }
+
+    /// Returns the first usable price in catalog order.
+    #[must_use]
+    pub fn price_in(&self, catalogs: &[String], model: &str) -> Option<&Price> {
+        catalogs
+            .iter()
+            .filter_map(|catalog| self.in_catalog(catalog, model))
+            .find_map(|entry| entry.price.as_ref())
+    }
+
+    fn in_catalog(&self, catalog: &str, model: &str) -> Option<&ResolvedEntry> {
+        self.by_provider_model
+            .get(&format!("{catalog}/{model}"))
+            .or_else(|| {
+                self.by_provider_model
+                    .get(&format!("{catalog}/{}", bare_id(model)))
+            })
+    }
 }
 
 fn display_name(model: &DevModel, id: &str) -> String {
@@ -303,6 +329,13 @@ fn dev_price(price: &DevPrice) -> Price {
         cache_write: price.cache_write,
         cache_write_1h: price.cache_write_1h.unwrap_or(0.0),
     }
+}
+
+fn price_for(provider_id: &str, price: Option<&DevPrice>) -> Option<Price> {
+    if provider_id.ends_with("-coding-plan") {
+        return None;
+    }
+    price.map(dev_price)
 }
 
 fn effective_window(limit: &DevLimit) -> Option<u32> {
