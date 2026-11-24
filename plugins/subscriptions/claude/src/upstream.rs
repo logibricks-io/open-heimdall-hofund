@@ -2,8 +2,8 @@
 
 use std::ffi::OsString;
 use std::path::PathBuf;
-#[cfg(test)]
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use futures_util::stream;
@@ -19,7 +19,7 @@ use crate::bridge::run::{
     SpawnPlan, StartSpec, env_deny, events_allowing_tools, events_from_stdout, has_tools,
     reject_non_text, start_plan, stdin_from_said, stdin_from_since, workdir,
 };
-use crate::bridge::session::{TurnStop, has_reply};
+use crate::bridge::session::{CancelGuard, TurnStop, has_reply, next_turn};
 use crate::launcher;
 use crate::proxy;
 use crate::{COMMAND, creds, setup_token};
@@ -212,21 +212,70 @@ impl UpstreamProvider for ClaudeUpstream {
     async fn execute(
         &self,
         request: Request,
+        inbound: ProtocolId,
+    ) -> Result<Completion, PluginError> {
+        let gone = Arc::new(AtomicBool::new(false));
+        let key = next_turn(self.account.as_str(), &request)
+            .map(|(key, _)| key)
+            .unwrap_or_default();
+        let ticket = if crate::bridge::cut::client_cache_marks(&request) {
+            None
+        } else {
+            self.bridge.watch_cancel(&key, Arc::clone(&gone)).await?
+        };
+        let guard = CancelGuard::arm(
+            self.bridge.clone(),
+            request.clone(),
+            self.account.clone(),
+            ticket,
+            gone,
+        );
+        let result = self.execute_guarded(request, inbound, &guard).await;
+        guard.defuse();
+        result
+    }
+
+    async fn probe(&self, query: &ProbeQuery) -> Result<ProbeReport, PluginError> {
+        crate::account::ask(
+            &self.host,
+            self.command.as_ref(),
+            &self.account,
+            query.model(),
+        )
+        .await?;
+        Ok(ProbeReport::new("ok"))
+    }
+}
+
+impl ClaudeUpstream {
+    async fn execute_guarded(
+        &self,
+        request: Request,
         _inbound: ProtocolId,
+        guard: &CancelGuard,
     ) -> Result<Completion, PluginError> {
         reject_non_text(&request)?;
         self.bridge.use_ask(self.host.ask().clone());
         let mut request = request;
         let advisor_model = crate::bridge::advisor::prepare(&mut request, self.host.ask());
         if let Some(found) = self.try_match(&request) {
+            guard.bind(found.run_id);
+            self.bridge.begin_turn(found.run_id, &request, None);
+            self.bridge.heard(found.run_id, &request.messages);
             return self.continue_parked(found, &request, advisor_model).await;
         }
         if let Some(resume) = self.bridge.resume(&request, &self.account) {
+            guard.bind(resume.run_id);
+            self.bridge.begin_turn(resume.run_id, &request, None);
+            self.bridge.heard(resume.run_id, &request.messages);
             return self.continue_resume(resume, &request, advisor_model).await;
         }
         // Stage D only on a resume miss.
         crate::bridge::flags::apply_stage_d(&mut request);
-        let unshelved = self.bridge.unshelve(&request, &self.account);
+        let unshelved = self
+            .bridge
+            .unshelve(&request, &self.account)
+            .or_else(|| self.bridge.retry_branch(&request, &self.account));
         self.bridge.retire(&self.account, &request);
         let room = self
             .bridge
@@ -290,6 +339,13 @@ impl UpstreamProvider for ClaudeUpstream {
                 .set_effort(id, crate::bridge::flags::from_request(&request).effort);
             self.bridge.set_room_guard(id, room);
             self.bridge.begin_reply(id, &request, advisor_model.clone());
+            let persists = spec.wsl_distro.is_none();
+            self.bridge.begin_turn(id, &request, Some(persists));
+            if persists && let Some((saved, since)) = &unshelved {
+                self.bridge
+                    .note_started_from(id, saved, &request, since.len());
+            }
+            guard.bind(id);
             run_id = Some(id);
             let token = park::new_callback_token()?;
             let handler = self.bridge.callback_handler(id, request.clone());
@@ -322,17 +378,6 @@ impl UpstreamProvider for ClaudeUpstream {
         let _ = callback_guard;
         self.finish_stdout(stdout, run_id, has_tools(&request), &request, login_version)
             .await
-    }
-
-    async fn probe(&self, query: &ProbeQuery) -> Result<ProbeReport, PluginError> {
-        crate::account::ask(
-            &self.host,
-            self.command.as_ref(),
-            &self.account,
-            query.model(),
-        )
-        .await?;
-        Ok(ProbeReport::new("ok"))
     }
 }
 
@@ -481,6 +526,9 @@ impl ClaudeUpstream {
             Ok(decoded) => decoded,
             Err(error) => {
                 if let Some(run_id) = run_id {
+                    if error.kind() == hofund_plugin_api::PluginErrorKind::Quota {
+                        self.bridge.keep_for_reset(run_id, request, &self.account);
+                    }
                     self.bridge
                         .ended(run_id, &self.account, request, "", TurnStop::Other, false);
                 }
@@ -507,7 +555,15 @@ impl ClaudeUpstream {
             .collect();
         if let Some(run_id) = run_id {
             if let Some(session) = session {
-                self.bridge.set_session(run_id, session, Vec::new());
+                let paths = account_dir(&self.host, &self.account)
+                    .map(|dir| crate::bridge::cut::session_dirs(&dir, &session))
+                    .unwrap_or_default();
+                self.bridge.set_session(run_id, session, paths);
+            }
+            if calls.is_empty()
+                && let Some(message_id) = crate::bridge::cut::completed_reply_id(&stdout)
+            {
+                self.bridge.note_completed_reply(run_id, &message_id);
             }
             for (id, name) in &calls {
                 self.bridge.register_call(run_id, id.clone(), name.clone());
