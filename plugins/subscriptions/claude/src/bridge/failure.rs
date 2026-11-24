@@ -1,6 +1,8 @@
 //! Maps Claude Code stream and process failures to [`PluginError`].
 
-use hofund_plugin_api::{PluginError, redact_token};
+use std::time::SystemTime;
+
+use hofund_plugin_api::{PluginError, PluginErrorKind, redact_token};
 
 use super::decode::ResultError;
 
@@ -44,6 +46,36 @@ pub(crate) fn classify(error: &ResultError) -> PluginError {
         &error.message,
         error.kind.as_deref(),
     )
+}
+
+/// Like [`classify`], and attaches a rejected reset when the vendor named one.
+///
+/// A quota refusal with no reset still carries none, so the router keeps its
+/// own guess. A limit of one model family rests that model only.
+#[must_use]
+pub(crate) fn classify_limited(
+    error: &ResultError,
+    rejected: Option<&super::decode::RateLimitInfo>,
+    now: SystemTime,
+) -> PluginError {
+    let mut mapped = classify(error);
+    if mapped.kind() != PluginErrorKind::Quota {
+        return mapped;
+    }
+    let kind = rejected
+        .and_then(|info| info.rate_limit_type.as_deref())
+        .unwrap_or("");
+    if crate::said_out::limit_family(kind, &error.message).is_some() {
+        mapped = mapped.with_model_scope();
+    }
+    if let Some(info) = rejected
+        && let Some(until) = crate::said_out::rejected_reset(info, now)
+        && let Ok(after) = until.duration_since(now)
+        && !after.is_zero()
+    {
+        mapped = mapped.with_reset_after(after);
+    }
+    mapped
 }
 
 /// Maps a status, message, and optional kind string to a [`PluginError`].
@@ -517,5 +549,71 @@ mod tests {
         ));
         assert_eq!(quota.kind(), PluginErrorKind::Quota);
         assert!(!quota.is_account_restricted());
+    }
+
+    fn rejected(kind: &str, resets_at: u64) -> crate::bridge::decode::RateLimitInfo {
+        crate::bridge::decode::RateLimitInfo {
+            status: Some("rejected".to_owned()),
+            rate_limit_type: Some(kind.to_owned()),
+            utilization: Some(1.0),
+            resets_at: Some(resets_at),
+            unified: std::collections::BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn d254_rejected_reset_replaces_the_fifteen_minute_guess() {
+        let now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000);
+        let info = rejected("seven_day", 1_800_000_000 + 2 * 60 * 60);
+        let error = classify_limited(
+            &result_error(
+                Some(429),
+                "You've hit your weekly limit",
+                Some("rate_limit"),
+            ),
+            Some(&info),
+            now,
+        );
+        assert_eq!(error.kind(), PluginErrorKind::Quota);
+        assert_eq!(
+            error.reset_after(),
+            Some(std::time::Duration::from_secs(2 * 60 * 60))
+        );
+        assert!(!error.scopes_model());
+    }
+
+    #[test]
+    fn d254_family_refusal_scopes_the_model() {
+        let now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000);
+        let info = rejected("seven_day_overage_included", 1_800_000_000 + 3600);
+        let error = classify_limited(
+            &result_error(Some(429), "You've hit your Fable limit", Some("rate_limit")),
+            Some(&info),
+            now,
+        );
+        assert_eq!(error.kind(), PluginErrorKind::Quota);
+        assert!(error.scopes_model());
+        assert_eq!(
+            error.reset_after(),
+            Some(std::time::Duration::from_secs(3600))
+        );
+    }
+
+    #[test]
+    fn d254_a_plain_rate_limit_carries_no_reset() {
+        let now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000);
+        let info = rejected("five_hour", 1_800_000_000 + 3600);
+        let error = classify_limited(
+            &result_error(
+                Some(429),
+                "Rate limited. Please try again later.",
+                Some("rate_limit"),
+            ),
+            Some(&info),
+            now,
+        );
+        assert_eq!(error.kind(), PluginErrorKind::Status);
+        assert!(error.reset_after().is_none());
+        assert!(!error.scopes_model());
     }
 }
