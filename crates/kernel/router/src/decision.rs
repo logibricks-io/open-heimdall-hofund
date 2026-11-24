@@ -12,7 +12,7 @@
 use std::collections::BTreeSet;
 use std::sync::LazyLock;
 
-use hofund_ir::{too_long, words_of};
+use hofund_ir::{api_refused, too_long, words_of};
 use hofund_plugin_api::{PluginError, PluginErrorKind};
 use regex::Regex;
 
@@ -191,6 +191,7 @@ pub(crate) fn allows(error: &PluginError, connect_errors: bool, statuses: &BTree
         return false;
     }
     if statuses.contains(&status)
+        || api_refused(status, &text)
         || model_retired(status, error.message(), &text)
         || status >= 400 && edge_blocked(&text)
         || error.is_credit() && (400..500).contains(&status)
@@ -284,7 +285,10 @@ pub(crate) fn asks_next(error: &PluginError) -> bool {
 /// content rests nobody either (`reference: internal/gateway/gateway.go:3475-3600`).
 pub(crate) fn rests(error: &PluginError) -> bool {
     let message = error.message();
-    if too_long(400, message)
+    if error
+        .status()
+        .is_some_and(|status| api_refused(status, message))
+        || too_long(400, message)
         || REFUSED_WORDS.is_match(message)
         || PROTECTION_WORDS.is_match(message)
         || policy_refusal(message)
@@ -429,7 +433,7 @@ fn wrong_endpoint(status: u16, text: &str) -> bool {
         return false;
     }
     let lower = text.to_lowercase();
-    WRONG_ENDPOINT.iter().any(|phrase| lower.contains(phrase))
+    WRONG_ENDPOINT.iter().any(|phrase| lower.contains(phrase)) || api_refused(status, text)
 }
 
 fn reasoning_back_refused(message: &str) -> bool {
@@ -531,6 +535,17 @@ mod tests {
         assert!(asks_next(&error));
         assert!(allows(&error, false, &none()));
         assert!(!rests(&error));
+    }
+
+    #[test]
+    fn d250_api_refusal_fails_over_without_a_listed_status_and_rests_nobody() {
+        let message = r#"{"type":"error","error":{"type":"permission_error","message":"This group does not allow /v1/messages dispatch"}}"#;
+        let error = PluginError::status_error(403, message);
+        assert!(allows(&error, false, &none()));
+        assert!(!rests(&error));
+        let other = PluginError::status_error(403, "the key is not permitted");
+        assert!(!allows(&other, false, &none()));
+        assert!(rests(&other));
     }
 
     #[test]

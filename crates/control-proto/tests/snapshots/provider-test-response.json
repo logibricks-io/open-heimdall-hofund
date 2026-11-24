@@ -5,6 +5,7 @@
     {
       "model": "model-a",
       "ok": false,
+      "unserved": false,
       "status": 429,
       "latency_ms": 12,
       "error": {

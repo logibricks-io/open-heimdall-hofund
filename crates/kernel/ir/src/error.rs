@@ -47,6 +47,16 @@ pub fn too_long(status: u16, text: &str) -> bool {
     TOO_LONG.is_match(text)
 }
 
+/// Whether an upstream refuses the API itself rather than one model. The
+/// caller uses its decoded JSON strings too, so escaped response text matches.
+#[must_use]
+pub fn api_refused(status: u16, text: &str) -> bool {
+    (400..500).contains(&status)
+        && words_of(text)
+            .to_lowercase()
+            .contains("does not allow /v1/messages dispatch")
+}
+
 /// The text with each string of its JSON appended on its own line, when the
 /// text escapes any as `\u` (`reference: internal/catalog/catalog.go:1653`).
 #[must_use]
@@ -87,7 +97,20 @@ pub fn vendor_overloaded(status: u16, message: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{too_long, vendor_overloaded};
+    use super::{api_refused, too_long, vendor_overloaded};
+
+    #[test]
+    fn d250_api_refusal_reads_plain_and_escaped_words_on_4xx() {
+        let plain = r#"{"type":"error","error":{"type":"permission_error","message":"This group does not allow /v1/messages dispatch"}}"#;
+        let escaped =
+            r#"{"error":{"message":"This group does not allow /v1/messages \u0064ispatch"}}"#;
+        assert!(api_refused(403, plain));
+        assert!(api_refused(403, escaped));
+        assert!(api_refused(400, plain));
+        assert!(!api_refused(200, plain));
+        assert!(!api_refused(500, plain));
+        assert!(!api_refused(403, "the model is not available"));
+    }
 
     #[test]
     fn d33_1_context_window_full_wording_is_overflow() {

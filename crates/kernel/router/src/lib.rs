@@ -11,6 +11,7 @@
 
 pub mod affinity;
 mod affinity_reply;
+mod api_fitness;
 pub mod at_once;
 mod attempt;
 mod cooldown;
@@ -42,6 +43,7 @@ use hofund_ir::{StreamEvent, estimate_input_tokens};
 use hofund_plugin_api::{BodyStream, CountOutcome, Forward, PluginErrorKind, RawAnswer};
 use tracing::Instrument;
 
+pub use api_fitness::ApiFitness;
 pub use attempt::{Attempt, AttemptError, AttemptHook, MemberAttempt};
 pub use cooldown::{CooldownCause, CooldownPolicy, Cooldowns, Cooling, PersistedRest};
 pub use decision::{region_agent_note, with_region_agent_note};
@@ -328,6 +330,7 @@ pub struct Router {
     affinity: affinity::AffinityState,
     sealed: affinity::sealed::SealedState,
     overflow: OverflowMemory,
+    api_fitness: ApiFitness,
     measurements: Option<Arc<dyn strategy::Measurements>>,
     member_skip: Option<MemberSkipFn>,
     spend_cap_exhausted: Option<SpendCapExhaustedFn>,
@@ -382,6 +385,8 @@ impl Resolved {
 
 struct Ordered {
     hops: Vec<Hop>,
+    /// Other APIs of a member, asked only after that member's API is refused.
+    protocol_alternates: Vec<Hop>,
     reserves: BTreeMap<String, usize>,
     affinity: Option<ReplyRoute>,
     drain_moves: Vec<RoundMove>,
@@ -453,6 +458,7 @@ impl Router {
             affinity: affinity::AffinityState::in_memory(),
             sealed: affinity::sealed::SealedState::default(),
             overflow: OverflowMemory::in_memory(),
+            api_fitness: ApiFitness::default(),
             measurements: None,
             member_skip: None,
             spend_cap_exhausted: None,
@@ -493,6 +499,13 @@ impl Router {
     #[must_use]
     pub fn with_overflow_memory(mut self, overflow: OverflowMemory) -> Self {
         self.overflow = overflow;
+        self
+    }
+
+    /// Shares API-wide provider refusal memory with later snapshots.
+    #[must_use]
+    pub fn with_api_fitness(mut self, fitness: ApiFitness) -> Self {
+        self.api_fitness = fitness;
         self
     }
 
@@ -950,6 +963,10 @@ impl Router {
         } else {
             Vec::new()
         };
+        let protocol_alternates = ordered.protocol_alternates;
+        resolved.hops =
+            splice_protocol_alternates(std::mem::take(&mut resolved.hops), &protocol_alternates);
+        let over_window = splice_protocol_alternates(over_window, &protocol_alternates);
         resolved.spent = self.spent(&resolved);
         if let Some(trace) = trace.as_mut() {
             trace.set_routing(&resolved.routing);
@@ -998,6 +1015,7 @@ impl Router {
             affinity: ordered.affinity,
             affinity_state: self.affinity.clone(),
             overflow_memory: self.overflow.clone(),
+            api_fitness: self.api_fitness.clone(),
             cooldowns: self.cooldowns.clone(),
             trace,
             strategies: Arc::clone(&self.strategies),
@@ -1251,7 +1269,8 @@ impl Router {
         conversation: Option<&affinity::Conversation>,
     ) -> Ordered {
         let mut moves = PoolMoves::default();
-        let ordered = self.order_level(resolved, 0, resolved.hops.clone(), &mut moves);
+        let (routing_hops, protocol_alternates) = split_protocol_alternates(resolved.hops.clone());
+        let ordered = self.order_level(resolved, 0, routing_hops, &mut moves);
         let ordered = if let Some(cooldowns) = &self.cooldowns {
             order_hops(ordered, cooldowns, &resolved.bare)
         } else {
@@ -1290,7 +1309,11 @@ impl Router {
         };
         let mut places = BTreeMap::new();
         if resolved.pool_asked {
-            for hop in &resolved.hops {
+            for hop in resolved
+                .hops
+                .iter()
+                .filter(|hop| hop.member.stands_in_for().is_none())
+            {
                 let next = places.len() + 1;
                 places.entry(group_member(hop)).or_insert(next);
             }
@@ -1401,6 +1424,7 @@ impl Router {
         self.reorder_last_on_credits(&mut hops, resolved);
         Ordered {
             hops,
+            protocol_alternates,
             reserves,
             affinity: conversation
                 .zip(decision)
@@ -1883,6 +1907,7 @@ struct DispatchState {
     affinity: Option<ReplyRoute>,
     affinity_state: affinity::AffinityState,
     overflow_memory: OverflowMemory,
+    api_fitness: ApiFitness,
     cooldowns: Option<Arc<Cooldowns>>,
     trace: Option<RouteTraceHandle>,
     strategies: Arc<strategy::StrategyState>,
@@ -1933,6 +1958,38 @@ fn split_over_window(hops: Vec<Hop>, tokens: u64) -> (Vec<Hop>, Vec<Hop>) {
     (fitting, small)
 }
 
+/// Separates ordinary route members from APIs that stand in after a refusal.
+fn split_protocol_alternates(hops: Vec<Hop>) -> (Vec<Hop>, Vec<Hop>) {
+    let mut routing = Vec::with_capacity(hops.len());
+    let mut alternates = Vec::new();
+    for hop in hops {
+        if hop.member.stands_in_for().is_some() {
+            alternates.push(hop);
+        } else {
+            routing.push(hop);
+        }
+    }
+    (routing, alternates)
+}
+
+/// Places each alternate immediately after the member it stands in for.
+fn splice_protocol_alternates(hops: Vec<Hop>, alternates: &[Hop]) -> Vec<Hop> {
+    if alternates.is_empty() {
+        return hops;
+    }
+    let mut out = Vec::with_capacity(hops.len() + alternates.len());
+    for hop in hops {
+        let id = hop.member.id().to_string();
+        out.push(hop);
+        for alternate in alternates {
+            if alternate.member.stands_in_for() == Some(id.as_str()) {
+                out.push(alternate.clone());
+            }
+        }
+    }
+    out
+}
+
 /// Quota or credit, and not a refusal, a passing retry, or an overflow.
 fn allowance_failure(error: &PluginError) -> bool {
     if decision::outgrown(error)
@@ -1964,7 +2021,10 @@ impl DispatchState {
         for hop in self.resolved.hops.iter().skip(index + 1) {
             let upstream_model = hop.wire_model.as_deref().unwrap_or(&self.resolved.bare);
             let plugin_id = hop.member.plugin_id();
-            if self.refused_providers.contains(hop.member.route_id()) {
+            if self.refused_providers.contains(hop.member.route_id())
+                || self.api_refused_for(hop)
+                || self.protocol_alternate_idle(hop)
+            {
                 continue;
             }
             if !plugin_id.is_empty() && self.skipped_plugins.contains(plugin_id) {
@@ -1991,6 +2051,27 @@ impl DispatchState {
         false
     }
 
+    fn api_refused_for(&self, hop: &Hop) -> bool {
+        self.api_fitness
+            .is_refused(hop.member.route_id(), hop.member.protocol())
+    }
+
+    /// Whether `hop` is another API of a member that has not refused its own.
+    fn protocol_alternate_idle(&self, hop: &Hop) -> bool {
+        let Some(primary) = hop.member.stands_in_for() else {
+            return false;
+        };
+        let Some(protocol) = self.resolved.hops.iter().find_map(|candidate| {
+            (candidate.member.id().to_string() == primary)
+                .then(|| candidate.member.protocol().to_owned())
+        }) else {
+            return true;
+        };
+        !self
+            .api_fitness
+            .is_refused(hop.member.route_id(), &protocol)
+    }
+
     fn region_closed_for(&self, hop: &Hop) -> bool {
         let model = hop.wire_model.as_deref().unwrap_or(&self.resolved.bare);
         let key = region_key(hop.member.scope_provider(), model);
@@ -2010,7 +2091,13 @@ impl DispatchState {
     }
 
     fn group_budget_exhausted(&self) -> Option<PluginError> {
-        if self.resolved.hops.len() <= 1 {
+        let routing_hops = self
+            .resolved
+            .hops
+            .iter()
+            .filter(|hop| hop.member.stands_in_for().is_none())
+            .count();
+        if routing_hops <= 1 {
             return None;
         }
         let elapsed = self.now().duration_since(self.walk_started);
@@ -2192,6 +2279,9 @@ impl DispatchState {
     ) -> Result<Option<Answered>, RouterError> {
         for &index in asking {
             let hop = self.resolved.hops[index].clone();
+            if self.protocol_alternate_idle(&hop) {
+                continue;
+            }
             let mut attempt = self.request.clone();
             apply_wire(&mut attempt, &hop, &self.resolved.bare, &self.served);
             self.tier_sent = hofund_codec::service_tier::extension_tier(&attempt.extensions);
@@ -2201,6 +2291,7 @@ impl DispatchState {
             let upstream_model = attempt.model.clone();
             let plugin_id = hop.member.plugin_id();
             if self.refused_providers.contains(hop.member.route_id())
+                || self.api_refused_for(&hop)
                 || (!plugin_id.is_empty() && self.skipped_plugins.contains(plugin_id))
                 || self.region_closed_for(&hop)
                 || self.outgrown.iter().any(|(route, model)| {
@@ -2213,6 +2304,14 @@ impl DispatchState {
             {
                 if self.refused_providers.contains(hop.member.route_id()) {
                     self.note_skip(index as u32, SkipReason::ProviderRefused);
+                } else if self.api_refused_for(&hop) {
+                    self.note_skip(
+                        index as u32,
+                        SkipReason::Failure {
+                            status: Some(403),
+                            message: "the provider refuses this API for every model".to_owned(),
+                        },
+                    );
                 } else if !plugin_id.is_empty() && self.skipped_plugins.contains(plugin_id) {
                     self.note_skip(
                         index as u32,
@@ -2392,6 +2491,12 @@ impl DispatchState {
                         &upstream_id,
                     );
                     let error = inferred.unwrap_or(error);
+                    if error
+                        .status()
+                        .is_some_and(|status| hofund_ir::api_refused(status, error.message()))
+                    {
+                        self.api_fitness.refuse(&upstream_id, hop.member.protocol());
+                    }
                     if decision::region_refused(&error) {
                         hop.member.close_idle_connections();
                         let key = region_key(hop.member.scope_provider(), &upstream_model);
@@ -2600,6 +2705,8 @@ impl DispatchState {
         };
         let region_model = wire.as_deref().unwrap_or(&self.resolved.bare);
         self.refused_providers.contains(&route)
+            || self.api_refused_for(&self.resolved.hops[index])
+            || self.protocol_alternate_idle(&self.resolved.hops[index])
             || (!plugin.is_empty() && self.skipped_plugins.contains(&plugin))
             || self
                 .region_closed
@@ -2687,6 +2794,8 @@ impl DispatchState {
         let upstream_model = hop.wire_model.as_deref().unwrap_or(&self.resolved.bare);
         let plugin_id = hop.member.plugin_id();
         self.refused_providers.contains(hop.member.route_id())
+            || self.api_refused_for(hop)
+            || self.protocol_alternate_idle(hop)
             || (!plugin_id.is_empty() && self.skipped_plugins.contains(plugin_id))
             || self.region_closed_for(hop)
             || self

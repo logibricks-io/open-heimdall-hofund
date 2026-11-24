@@ -58,6 +58,12 @@ pub trait Member: Send + Sync {
     /// Codec id this member speaks. Compared with the inbound protocol.
     fn protocol(&self) -> &str;
 
+    /// Member id of the protocol this hop replaces after that protocol refuses
+    /// the API for every model. Absent for an ordinary route member.
+    fn stands_in_for(&self) -> Option<&str> {
+        None
+    }
+
     /// Short name from a list of the API `model` is asked on best.
     fn learned_preferred(&self, _model: &str) -> Option<String> {
         None
