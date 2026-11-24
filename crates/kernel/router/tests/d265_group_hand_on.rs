@@ -314,7 +314,7 @@ async fn d265_patience_replans_busy_probe_after_hand_on() {
         let routed = router
             .dispatch_with_wait(&Request::new("demo"), "test", None, Some(wait))
             .await
-            .expect("busy members are replanned together");
+            .expect("busy members share the replan round");
         assert_eq!(routed.upstream_id, upstream);
         assert_eq!(fixture.seen(), expected);
         assert_eq!(
