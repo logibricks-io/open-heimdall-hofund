@@ -174,7 +174,12 @@ pub(crate) fn timed_out(message: impl Into<String>) -> PluginError {
     PluginError::timeout(message)
 }
 
-fn redact_all(text: &str, secrets: &[&str]) -> String {
+/// Replaces each known secret in `text` with the redaction marker.
+///
+/// The same helper a process-end error uses, so a later quote does not
+/// keep its own copy of the scrub.
+#[must_use]
+pub(crate) fn redact_all(text: &str, secrets: &[&str]) -> String {
     let mut clean = text.to_owned();
     for secret in secrets {
         clean = redact_token(&clean, secret);
