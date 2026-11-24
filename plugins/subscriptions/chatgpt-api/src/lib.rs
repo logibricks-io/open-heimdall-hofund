@@ -1,8 +1,10 @@
 //! ChatGPT API subscription (Sign in with ChatGPT).
 //!
-//! Signs in through OpenAI's dynamic client flow, keeps the per-account client
-//! id and tokens, refreshes before expiry, and serves `api.openai.com` as an
-//! OpenAI Responses upstream with the agent's own instructions.
+//! Signs in through OpenAI's dynamic client flow for a new account, and through
+//! the client OpenAI already issued when that saved account signs in again.
+//! Keeps the per-account client id and tokens, refreshes before expiry, and
+//! serves `api.openai.com` as an OpenAI Responses upstream with the agent's
+//! own instructions.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -125,6 +127,10 @@ struct Pending {
     redirect_uri: String,
     nonce: String,
     host_id: String,
+    /// Issued client of the account being signed in again.
+    saved_client_id: Option<String>,
+    /// Subject of that account. Empty when this sign-in is a new account.
+    saved_subject: Option<String>,
 }
 
 struct ChatgptApi {
@@ -158,6 +164,7 @@ impl Subscription for ChatgptApi {
         ctx: &SignInCtx,
         host: &HostContext,
     ) -> Result<SignInChallenge, PluginError> {
+        let saved = sign_in::saved_sign_in(host, ctx.option("user")).await?;
         let pkce = Pkce::generate()?;
         let state = new_state()?;
         let nonce = sign_in::new_nonce()?;
@@ -178,6 +185,12 @@ impl Subscription for ChatgptApi {
             &state,
             &nonce,
             &host_id,
+            saved.as_ref().map(|row| sign_in::AuthorizeSaved {
+                client_id: &row.client_id,
+                id_token: &row.id_token,
+                email: &row.email,
+                now: host.clock().now(),
+            }),
         );
         let url = match url {
             Ok(url) => url,
@@ -197,6 +210,11 @@ impl Subscription for ChatgptApi {
                     redirect_uri,
                     nonce,
                     host_id,
+                    saved_client_id: saved.as_ref().map(|row| row.client_id.clone()),
+                    saved_subject: saved.and_then(|row| {
+                        let subject = row.subject.trim().to_owned();
+                        (!subject.is_empty()).then_some(subject)
+                    }),
                 },
             );
         SignInChallenge::open_url(url)
@@ -229,7 +247,7 @@ impl Subscription for ChatgptApi {
                 "the sign-in callback does not belong to this sign-in",
             ));
         }
-        let client_id = issued_client_id.unwrap_or_default();
+        let client_id = client_for_callback(&pending, issued_client_id)?;
         let signed_in = sign_in::exchange(
             host,
             &sign_in::Exchange {
@@ -240,6 +258,7 @@ impl Subscription for ChatgptApi {
                 redirect_uri: &pending.redirect_uri,
                 nonce: &pending.nonce,
                 host_id: &pending.host_id,
+                expected_subject: pending.saved_subject.as_deref(),
             },
         )
         .await?;
@@ -339,6 +358,32 @@ impl Subscription for ChatgptApi {
         };
         revoke::revoke(host, &self.endpoints, &blob).await
     }
+}
+
+/// Client id the authorization code is traded under.
+///
+/// A sign-in again keeps the saved client. A callback that names a different
+/// client is refused before the code is traded, so the stored account stays.
+/// A new account uses the client id the callback returned.
+fn client_for_callback(
+    pending: &Pending,
+    issued_client_id: Option<String>,
+) -> Result<String, PluginError> {
+    let issued = issued_client_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    if let Some(saved) = pending.saved_client_id.as_deref() {
+        if let Some(issued) = issued
+            && issued != saved
+        {
+            return Err(PluginError::auth(
+                "ChatGPT sign-in: OpenAI answered for another client than this account's; start it again",
+            ));
+        }
+        return Ok(saved.to_owned());
+    }
+    Ok(issued.unwrap_or("").to_owned())
 }
 
 fn needs_sign_in(reason: &str) -> AccountStatus {

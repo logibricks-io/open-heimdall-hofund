@@ -12,12 +12,13 @@ use crate::serve;
 pub enum SubscriptionCommand {
     /// `subscription list [--json]`
     List { json: bool },
-    /// `subscription sign-in <id> [--host H] [--label L]`
+    /// `subscription sign-in <id> [--host H] [--label L] [--user U]`
     SignIn {
         id: String,
         host: Option<String>,
         label: Option<String>,
         site: Option<String>,
+        user: Option<String>,
     },
     /// `subscription sign-out <id> <account>`
     SignOut { id: String, account: String },
@@ -34,6 +35,7 @@ pub struct SubscriptionFlags {
     pub host: Option<String>,
     pub label: Option<String>,
     pub site: Option<String>,
+    pub user: Option<String>,
 }
 
 /// Parses the words after `subscription`. `None` means the words name no
@@ -50,6 +52,7 @@ pub fn parse(
             host: flags.host.clone(),
             label: flags.label.clone(),
             site: flags.site.clone(),
+            user: flags.user.clone(),
         },
         ["sign-out", id, account] => SubscriptionCommand::SignOut {
             id: owned(id),
@@ -83,9 +86,15 @@ pub fn parse(
             "--json is only valid with subscription list and subscription quota".to_owned(),
         ));
     }
-    if (flags.host.is_some() || flags.label.is_some() || flags.site.is_some()) && !signs_in {
+    if (flags.host.is_some()
+        || flags.label.is_some()
+        || flags.site.is_some()
+        || flags.user.is_some())
+        && !signs_in
+    {
         return Some(Err(
-            "--host, --label, and --site are only valid with subscription sign-in".to_owned(),
+            "--host, --label, --site, and --user are only valid with subscription sign-in"
+                .to_owned(),
         ));
     }
     Some(Ok(command))
@@ -109,6 +118,7 @@ pub fn daemon_args(config: &Path, command: &SubscriptionCommand) -> Vec<OsString
             host,
             label,
             site,
+            user,
         } => {
             words.extend(["sign-in", id.as_str()]);
             if let Some(host) = host {
@@ -119,6 +129,9 @@ pub fn daemon_args(config: &Path, command: &SubscriptionCommand) -> Vec<OsString
             }
             if let Some(site) = site {
                 flags.extend(["--site", site.as_str()]);
+            }
+            if let Some(user) = user {
+                flags.extend(["--user", user.as_str()]);
             }
         }
         SubscriptionCommand::SignOut { id, account } => {
@@ -158,7 +171,7 @@ pub fn run(config: &Path, command: &SubscriptionCommand) -> Result<i32, String> 
 
 pub const SUBSCRIPTION_HELP: &str = "\
 usage: hofund subscription list [--json] [--config PATH]
-       hofund subscription sign-in <id> [--host HOST] [--label LABEL] [--config PATH]
+       hofund subscription sign-in <id> [--host HOST] [--label LABEL] [--user USER] [--config PATH]
        hofund subscription sign-out <id> <account> [--config PATH]
        hofund subscription refresh <id> [<account>] [--config PATH]
        hofund subscription quota [<id>] [--json] [--config PATH]
@@ -182,13 +195,14 @@ their status. --json prints the same as JSON. No token is printed.
 ";
 
 pub const SIGN_IN_HELP: &str = "\
-usage: hofund subscription sign-in <id> [--host HOST] [--label LABEL] [--config PATH]
+usage: hofund subscription sign-in <id> [--host HOST] [--label LABEL] [--user USER] [--config PATH]
 
 Sign in to subscription <id>. The command prints an address to open, or a
 device code to enter, and waits up to 10 minutes. When the browser cannot
 reach this machine, paste the address it ended on and press Enter.
 --host names a vendor host, such as an enterprise domain. --label names the
-account. Ctrl-C stops the sign-in and exits 130.
+account. --user names a saved account to sign in again, by its email, label,
+or account id. Ctrl-C stops the sign-in and exits 130.
 ";
 
 pub const SIGN_OUT_HELP: &str = "\
@@ -250,6 +264,7 @@ mod tests {
                     host: None,
                     label: None,
                     site: None,
+                    user: None,
                 },
                 expect(&["--", "sign-in", "s"]),
             ),
@@ -259,8 +274,19 @@ mod tests {
                     host: Some("h".to_owned()),
                     label: Some("l".to_owned()),
                     site: None,
+                    user: Some("me@example.com".to_owned()),
                 },
-                expect(&["--host", "h", "--label", "l", "--", "sign-in", "s"]),
+                expect(&[
+                    "--host",
+                    "h",
+                    "--label",
+                    "l",
+                    "--user",
+                    "me@example.com",
+                    "--",
+                    "sign-in",
+                    "s",
+                ]),
             ),
             (
                 SubscriptionCommand::SignOut {

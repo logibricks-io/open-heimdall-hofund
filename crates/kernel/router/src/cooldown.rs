@@ -31,9 +31,12 @@
 //!
 //! Routing keeps ready members first in configured order, then keeps only the
 //! cooling member/model pair whose rest ends soonest as a probe. Configured
-//! order breaks a tie, other cooling pairs are skipped for that request, and a
-//! route with one member always tries that member. If every member is cooling
-//! for the requested model, only the soonest probe is tried.
+//! order breaks a tie and other cooling pairs are skipped for that request. A
+//! route with one member tries that member, including a guessed quota rest.
+//! A vendor-timed quota rest is not asked: when every member still to be asked
+//! rests that way, the stored refusal is returned with the soonest reset and
+//! nobody is called. If every member is cooling for the requested model, only
+//! the soonest probe is tried, unless that probe is a vendor-timed quota rest.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -251,6 +254,12 @@ impl Cooling {
     #[must_use]
     pub const fn background_probe(&self) -> bool {
         self.background_probe
+    }
+
+    /// Whether the refusal itself named this rest's deadline.
+    #[must_use]
+    pub const fn vendor_timed(&self) -> bool {
+        self.vendor_timed
     }
 }
 

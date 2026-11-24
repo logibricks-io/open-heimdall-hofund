@@ -544,6 +544,12 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
                     .ok_or_else(|| "--site needs a value".to_owned())?;
                 flags.site = Some(site.clone());
             }
+            "--user" => {
+                let user = iter
+                    .next()
+                    .ok_or_else(|| "--user needs a value".to_owned())?;
+                flags.user = Some(user.clone());
+            }
             "-h" | "--help" => help = true,
             "--version" | "-V" => words.push(argument.as_str()),
             other if pick_change(&words, other) => words.push(other),
@@ -569,7 +575,10 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
             Err(message) => Err(message),
         };
     }
-    let subscription_flags = flags.host.is_some() || flags.label.is_some() || flags.site.is_some();
+    let subscription_flags = flags.host.is_some()
+        || flags.label.is_some()
+        || flags.site.is_some()
+        || flags.user.is_some();
     let json = flags.json;
     session_flags.json = json;
     let command = match words.as_slice() {
@@ -869,7 +878,7 @@ fn parse(arguments: &[String]) -> Result<(PathBuf, Command), String> {
         );
     if (subscription_flags || json_elsewhere) && !matches!(command, Command::Subscription(_)) {
         return Err(
-            "--json, --host, --label, and --site are only valid with subscription commands"
+            "--json, --host, --label, --site, and --user are only valid with subscription commands"
                 .to_owned(),
         );
     }
@@ -1054,7 +1063,7 @@ commands:
   agent status [<name>]
   agent set <name> model=<id|default>
   subscription list [--json]      list subscriptions and their accounts
-  subscription sign-in <id> [--host HOST] [--label LABEL]
+  subscription sign-in <id> [--host HOST] [--label LABEL] [--user USER]
   subscription sign-out <id> <account>
   subscription refresh <id> [<account>]
   subscription quota [<id>] [--json]
@@ -1452,6 +1461,7 @@ mod tests {
                 host: Some("corp.example.test".to_owned()),
                 label: Some("work".to_owned()),
                 site: None,
+                user: None,
             }))
         );
         assert_eq!(
