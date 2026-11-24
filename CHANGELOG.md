@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- D-257: signing in to a saved ChatGPT API account again sends the client id that account was issued, `id_token_hint` when that ID token's expiry is more than a minute ahead, and `login_hint` from the saved email, and does not send `agent_name_hint`. A callback that names no client id is traded under the saved client. A callback that names another client, or an ID token for another subject, leaves the saved account in place. A new account still registers through `dynamic_agent_client`. `hofund subscription sign-in --user` names the saved account. Verified with a fixed clock and recorded token replies only.
+- D-263: Chat usage counts a top-level `reasoning_tokens` as reasoning when `completion_tokens_details` has no positive count, on a whole reply and on a stream. A positive count in `completion_tokens_details` is kept, and the two numbers are not added.
 
 ### Security
 
