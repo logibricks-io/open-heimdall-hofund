@@ -17,7 +17,7 @@ use hofund_daemon::{
 /// Usage of the subscription entry point.
 pub(crate) const USAGE: &str = "\
 Usage: hofundd subscription [--config <path>] list [--json]
-       hofundd subscription [--config <path>] sign-in <id> [--host <host>] [--label <label>]
+       hofundd subscription [--config <path>] sign-in <id> [--host <host>] [--label <label>] [--user <user>]
        hofundd subscription [--config <path>] sign-out <id> <account>
        hofundd subscription [--config <path>] refresh <id> [<account>]
        hofundd subscription [--config <path>] quota [<id>] [--json]
@@ -30,12 +30,13 @@ The hofund CLI runs these for `hofund subscription`; see `hofund subscription --
 pub(crate) enum SubscriptionCommand {
     /// `list [--json]`
     List { json: bool },
-    /// `sign-in <id> [--host H] [--label L]`
+    /// `sign-in <id> [--host H] [--label L] [--user U]`
     SignIn {
         id: String,
         host: Option<String>,
         label: Option<String>,
         site: Option<String>,
+        user: Option<String>,
     },
     /// `sign-out <id> <account>`
     SignOut { id: String, account: String },
@@ -65,6 +66,7 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Parsed, String> {
     let mut host = None;
     let mut label = None;
     let mut site = None;
+    let mut user = None;
     let mut words: Vec<String> = Vec::new();
     let mut operands_only = false;
     let mut args = args.iter();
@@ -97,6 +99,7 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Parsed, String> {
             "--host" => host = Some(value("--host")?),
             "--label" => label = Some(value("--label")?),
             "--site" => site = Some(value("--site")?),
+            "--user" => user = Some(value("--user")?),
             flag if flag.starts_with('-') => return Err(format!("unknown flag `{flag}`")),
             word => words.push(word.to_owned()),
         }
@@ -110,6 +113,7 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Parsed, String> {
             host: host.take(),
             label: label.take(),
             site: site.take(),
+            user: user.take(),
         },
         ["sign-out", id, account] => SubscriptionCommand::SignOut {
             id: owned(id),
@@ -137,8 +141,8 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Parsed, String> {
     if json && !takes_json {
         return Err("--json is only valid with list and quota".to_owned());
     }
-    if host.is_some() || label.is_some() || site.is_some() {
-        return Err("--host, --label, and --site are only valid with sign-in".to_owned());
+    if host.is_some() || label.is_some() || site.is_some() || user.is_some() {
+        return Err("--host, --label, --site, and --user are only valid with sign-in".to_owned());
     }
     Ok(Parsed::Run(config, command))
 }
@@ -159,8 +163,14 @@ pub(crate) fn run(config: &Path, command: SubscriptionCommand) -> ExitCode {
             host,
             label,
             site,
+            user,
         } => {
-            let options = SignInOptions { host, label, site };
+            let options = SignInOptions {
+                host,
+                label,
+                site,
+                user,
+            };
             return match subscription_sign_in(config, &id, &options) {
                 Ok(account) => {
                     println!("{id}: signed in as {account}");
@@ -422,6 +432,7 @@ mod tests {
                     host: Some("h".to_owned()),
                     label: Some("l".to_owned()),
                     site: None,
+                    user: None,
                 }
             ))
         );
@@ -485,6 +496,7 @@ mod tests {
                     host: None,
                     label: Some("l".to_owned()),
                     site: None,
+                    user: None,
                 }
             ))
         );
@@ -508,11 +520,11 @@ mod tests {
         );
         assert_eq!(
             parsed(&["list", "--host", "h"]),
-            Err("--host, --label, and --site are only valid with sign-in".to_owned())
+            Err("--host, --label, --site, and --user are only valid with sign-in".to_owned())
         );
         assert_eq!(
             parsed(&["quota", "--label", "l"]),
-            Err("--host, --label, and --site are only valid with sign-in".to_owned())
+            Err("--host, --label, --site, and --user are only valid with sign-in".to_owned())
         );
         assert_eq!(
             parsed(&["list", "--config", "a", "--config", "b"]),
