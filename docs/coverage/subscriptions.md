@@ -143,9 +143,11 @@ A failed `/usage` counts as spent when the output is that limit line, or when
 a session log has a `rate_limit` refusal since this account was the one in
 use. A 401 does not. `/usage` waits 45 seconds. A bridge rejection records
 the reset the vendor named, and a limit of one model family holds the account
-out only while the agent is on that family. The record is
-`allowance-limits.json` in plugin state. Tests use a scripted process and
-fixtures only.
+out only while the agent is on that family. The account in use and the
+session scan share one agent home: `CLAUDE_CONFIG_DIR` when set, otherwise
+`~/.claude`. The record is `allowance-limits.json` in plugin state. Tests use
+a scripted process and fixtures only, and inject that default home as a
+temporary directory.
 
 ## Priority suggestion
 

@@ -543,23 +543,7 @@ fn kept_until(host: &HostContext, account: &AccountId, now: SystemTime) -> Optio
 }
 
 fn agent_home() -> Option<PathBuf> {
-    if let Some(dir) = crate::cli::configured_dir() {
-        return Some(dir);
-    }
-    default_agent_home()
-}
-
-#[cfg(test)]
-fn default_agent_home() -> Option<PathBuf> {
-    None
-}
-
-#[cfg(not(test))]
-fn default_agent_home() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")
-        .filter(|value| !value.is_empty())
-        .or_else(|| std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()))?;
-    Some(PathBuf::from(home).join(".claude"))
+    crate::cli::agent_home()
 }
 
 /// Windows that replace a failed read when the account counts as spent.
@@ -1016,6 +1000,7 @@ mod tests {
     impl Drop for HomeGuard {
         fn drop(&mut self) {
             crate::cli::test_configured_dir(None);
+            crate::cli::test_default_home(None);
         }
     }
 
@@ -1030,6 +1015,7 @@ mod tests {
         let watch = test_lock();
         reset_for_test();
         crate::cli::test_configured_dir(None);
+        crate::cli::test_default_home(None);
         Guards {
             _cadence: cadence,
             _watch: watch,
@@ -1307,6 +1293,48 @@ mod tests {
             .open(&session)
             .expect("append");
         writeln!(file, "{settled}").expect("append");
+        observe_agent(ctx, &id, now);
+        assert_eq!(
+            kept_until(ctx, &id, now),
+            Some(UNIX_EPOCH + Duration::from_secs(1_900_000_000))
+        );
+        let killed = PluginError::transport("Claude Code: signal: killed");
+        let spent = spent_on_failure(ctx, &id, &killed, now).expect("spent");
+        assert!(spent.iter().any(|window| window.held()));
+    }
+
+    #[test]
+    fn d254_default_home_keeps_a_settled_refusal_and_spends_a_failed_read() {
+        let _guards = guards();
+        assert!(
+            crate::cli::configured_dir().is_none(),
+            "the configured-dir override stays unset"
+        );
+        let dir = tempfile::tempdir().expect("dir");
+        let host = hofund_kit_subscription::TestHost::open_for(
+            hofund_plugin_api::PluginKind::Subscription,
+            hofund_plugin_api::PluginId::from_static("claude"),
+            dir.path(),
+        );
+        let ctx = host.context();
+        let (home, id) = active_home(dir.path());
+        crate::cli::test_default_home(Some(home.clone()));
+        assert!(crate::usage_cadence::is_active_account(&id));
+        let session = home.join("projects").join("work").join("session.jsonl");
+        let now = at(1_800_000_000);
+        fs::write(&session, "{}\n").expect("seed");
+        observe_agent(ctx, &id, now);
+        let settled = refusal_line(
+            now + Duration::from_secs(120),
+            1_900_000_000,
+            "You've hit your weekly limit",
+        );
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&session)
+            .expect("append");
+        writeln!(file, "{settled}").expect("append");
+        drop(file);
         observe_agent(ctx, &id, now);
         assert_eq!(
             kept_until(ctx, &id, now),

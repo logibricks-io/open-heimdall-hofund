@@ -208,15 +208,15 @@ pub(crate) fn events_from_stdout(stdout: &str) -> Result<Vec<StreamEvent>, Plugi
             Some(Step::ResultError(error)) => {
                 return Err(limited(&error, rejected.as_ref()));
             }
-            Some(Step::RateLimit(info)) => {
-                if info.status.as_deref() == Some("rejected") {
-                    rejected = Some(info);
-                }
-            }
+            Some(Step::RateLimit(info)) => remember_rate_limit(&mut rejected, info),
             Some(Step::Session(_) | Step::Completed) | None => {}
         }
     }
     Ok(events)
+}
+
+fn remember_rate_limit(saved: &mut Option<RateLimitInfo>, info: RateLimitInfo) {
+    *saved = (info.status.as_deref() == Some("rejected")).then_some(info);
 }
 
 fn limited(error: &ResultError, rejected: Option<&RateLimitInfo>) -> PluginError {
@@ -247,11 +247,7 @@ pub(crate) fn events_allowing_tools(
             Some(Step::ResultError(error)) => {
                 return Err(limited(&error, rejected.as_ref()));
             }
-            Some(Step::RateLimit(info)) => {
-                if info.status.as_deref() == Some("rejected") {
-                    rejected = Some(info);
-                }
-            }
+            Some(Step::RateLimit(info)) => remember_rate_limit(&mut rejected, info),
             Some(Step::Session(_) | Step::Completed) | None => {}
         }
     }
@@ -378,8 +374,8 @@ pub(crate) fn env_deny() -> Vec<OsString> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ALWAYS_ENV, ENV_DENY, StartSpec, events_from_stdout, has_image, has_tools, reject_non_text,
-        start_plan, stdin_from_request,
+        ALWAYS_ENV, ENV_DENY, StartSpec, events_allowing_tools, events_from_stdout, has_image,
+        has_tools, reject_non_text, start_plan, stdin_from_request,
     };
     use crate::bridge::runner::FakeRunner;
     use hofund_plugin_api::{ContentPart, Message, PluginErrorKind, Request, Role, StreamEvent};
@@ -840,5 +836,26 @@ mod tests {
         assert!(after > std::time::Duration::from_secs(60 * 60));
         assert!(after < std::time::Duration::from_secs(3 * 60 * 60));
         assert!(!error.scopes_model());
+    }
+
+    #[test]
+    fn d254_a_later_unrejected_rate_limit_drops_the_saved_reset() {
+        let resets_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_secs()
+            + 2 * 60 * 60;
+        let stdout = format!(
+            r#"{{"type":"rate_limit_event","status":"rejected","rate_limit_info":{{"status":"rejected","rateLimitType":"seven_day","resetsAt":{resets_at},"utilization":1}}}}
+{{"type":"rate_limit_event","status":"allowed","rate_limit_info":{{"status":"allowed","rateLimitType":"five_hour","resetsAt":{resets_at},"utilization":0.1}}}}
+{{"type":"result","subtype":"error","is_error":true,"result":"You've hit your weekly limit","api_error_status":429,"error":"rate_limit"}}
+"#
+        );
+        let from_stdout = events_from_stdout(&stdout).expect_err("quota");
+        let from_tools = events_allowing_tools(&stdout).expect_err("tools");
+        for error in [from_stdout, from_tools] {
+            assert_eq!(error.kind(), PluginErrorKind::Quota);
+            assert!(error.reset_after().is_none());
+        }
     }
 }
