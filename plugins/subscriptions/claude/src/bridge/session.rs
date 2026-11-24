@@ -268,6 +268,8 @@ pub(crate) struct Sessions {
     stopping: AtomicBool,
     ended: Mutex<Vec<EndedRun>>,
     cut_gate: Mutex<Option<Arc<CutGate>>>,
+    #[cfg(test)]
+    watch_gate: Mutex<Option<Arc<CutGate>>>,
 }
 
 impl Sessions {
@@ -302,16 +304,11 @@ impl Sessions {
     }
 
     fn wake_cancels(&self) {
-        self.cancel_cv.notify_all();
-        self.wake.notify();
-    }
-
-    fn try_register(&self, key: &str, gone: &Arc<AtomicBool>) -> Option<CancelTicket> {
-        let mut slots = self.lock_cancels();
-        if Bridge::cancel_pending(&slots, key) {
-            return None;
+        {
+            let _slots = self.lock_cancels();
+            self.cancel_cv.notify_all();
         }
-        Some(self.insert_cancel(key, gone, &mut slots))
+        self.wake.notify();
     }
 
     fn insert_cancel(
@@ -424,7 +421,9 @@ impl Bridge {
     pub(crate) fn set_session(&self, run_id: u64, session: impl Into<String>, paths: Vec<PathBuf>) {
         if let Some(meta) = self.sessions.lock_meta().get_mut(&run_id) {
             meta.session_id = Some(session.into());
-            meta.session_paths = paths;
+            if !paths.is_empty() || meta.session_paths.is_empty() {
+                meta.session_paths = paths;
+            }
         }
     }
 
@@ -529,6 +528,10 @@ impl Bridge {
         let key = turn_key(owner.as_str(), request, &msgs);
         let keys = conversation_keys(owner.as_str(), &msgs);
         let conv = keys.last().cloned().unwrap_or_default();
+        if self.is_handed(run_id) {
+            self.abort_session(run_id);
+            return;
+        }
         self.keep_idle(run_id, owner, key, conv);
     }
 
@@ -608,9 +611,19 @@ impl Bridge {
                 drop_ids.push(id);
             }
         }
-        self.sessions.lock_shelf().retain(|_, saved| {
-            !(saved.owner == owner.as_str() && keys.iter().any(|k| k == &saved.conv))
-        });
+        let dropped: Vec<SavedSession> = self
+            .sessions
+            .lock_shelf()
+            .extract_if(|_, saved| {
+                saved.owner == owner.as_str() && keys.iter().any(|key| key == &saved.conv)
+            })
+            .map(|(_, saved)| saved)
+            .collect();
+        for saved in dropped {
+            if saved.copy {
+                super::cut::delete_copy(&saved.sessions, &saved.session);
+            }
+        }
         for id in drop_ids {
             self.abort_session(id);
         }
@@ -711,19 +724,7 @@ impl Bridge {
         let Some(saved) = self.saved_from_run(run_id) else {
             return;
         };
-        let mut shelf = self.sessions.lock_shelf();
-        shelf.insert(saved.key.clone(), saved);
-        while shelf.len() > SHELF_MOST {
-            if let Some(old_key) = shelf
-                .iter()
-                .min_by_key(|(_, s)| s.at)
-                .map(|(k, _)| k.clone())
-            {
-                shelf.remove(&old_key);
-            } else {
-                break;
-            }
-        }
+        self.insert_shelf(saved);
     }
 
     fn saved_from_run(&self, run_id: u64) -> Option<SavedSession> {
@@ -827,22 +828,35 @@ impl Bridge {
         }
     }
 
-    /// The account on this run was handed elsewhere.
-    ///
-    /// The daemon does not call this yet. A cancel still sees the flag when a
-    /// later caller sets it before the cut is published.
-    #[allow(dead_code)]
-    pub(crate) fn mark_handed(&self, run_id: u64) {
-        if let Some(run) = self.sessions.lock_meta().get_mut(&run_id) {
-            run.handed = true;
+    /// Marks every run on an account moved into the agent's own sign-in.
+    pub(crate) fn account_handed_over(&self, owner: &AccountId) {
+        let mut idle = Vec::new();
+        {
+            let mut meta = self.sessions.lock_meta();
+            for (id, run) in meta.iter_mut() {
+                if run.owner != owner.as_str() {
+                    continue;
+                }
+                run.handed = true;
+                if let Some(key) = run.idle_key.take() {
+                    idle.push((key, *id));
+                }
+            }
+        }
+        for (key, run_id) in idle {
+            self.sessions.lock_idle().remove(&key);
+            self.abort_session(run_id);
         }
     }
 
+    fn is_handed(&self, run_id: u64) -> bool {
+        self.sessions
+            .lock_meta()
+            .get(&run_id)
+            .is_some_and(|run| run.handed)
+    }
+
     /// The gateway is stopping. A cancel still cutting keeps no session.
-    ///
-    /// The daemon does not call this yet. The flag is checked before a cut is
-    /// published.
-    #[allow(dead_code)]
     pub(crate) fn mark_stopping(&self) {
         self.sessions.stopping.store(true, Ordering::Release);
     }
@@ -880,10 +894,26 @@ impl Bridge {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(gate);
     }
 
+    /// Holds an async watch between its pending check and its first poll.
+    #[cfg(test)]
+    pub(crate) fn install_watch_gate(&self, gate: Arc<CutGate>) {
+        *self
+            .sessions
+            .watch_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(gate);
+    }
+
     /// Wakes tasks and threads waiting on a cancellation.
     #[cfg(test)]
     pub(crate) fn wake_cancels(&self) {
         self.sessions.wake_cancels();
+    }
+
+    /// The generation advanced by each cancel wake.
+    #[cfg(test)]
+    pub(crate) fn cancel_generation(&self) -> u64 {
+        self.sessions.wake.generation.load(Ordering::Acquire)
     }
 
     /// How many same-key watchers are blocked on a cancel.
@@ -930,10 +960,17 @@ impl Bridge {
             if gone.load(Ordering::Acquire) {
                 return Err(super::cut::client_closed());
             }
-            if let Some(ticket) = self.sessions.try_register(key, &gone) {
-                return Ok(Some(ticket));
-            }
-            self.sessions.wake.wait().await;
+            let wait = {
+                let mut slots = self.sessions.lock_cancels();
+                if Self::cancel_pending(&slots, key) {
+                    self.sessions.wake.wait()
+                } else {
+                    return Ok(Some(self.sessions.insert_cancel(key, &gone, &mut slots)));
+                }
+            };
+            #[cfg(test)]
+            self.pause_watch();
+            wait.await;
         }
     }
 
@@ -1128,7 +1165,6 @@ impl Bridge {
                 from_key: run.from_key.clone(),
                 back_key: run.back_key.clone(),
                 back_msg: run.back_msg.clone(),
-                handed: run.handed,
             }
         };
         let Some(session) = snapshot.session else {
@@ -1137,7 +1173,6 @@ impl Bridge {
         if snapshot.paths.is_empty() {
             return;
         }
-        self.pause_cut();
         let bytes = super::cut::read_session(&snapshot.paths, &session);
         let Some(bytes) = bytes else {
             return;
@@ -1166,8 +1201,9 @@ impl Bridge {
         let Some(cut) = super::cut::write_cut(&snapshot.paths, &session, end, &bytes) else {
             return;
         };
+        self.pause_cut();
         if cancelled_key.is_some()
-            && (snapshot.handed || self.sessions.stopping.load(Ordering::Acquire))
+            && (self.is_handed(run_id) || self.sessions.stopping.load(Ordering::Acquire))
         {
             super::cut::delete_copy(&snapshot.paths, &cut);
             return;
@@ -1197,6 +1233,19 @@ impl Bridge {
         let gate = self
             .sessions
             .cut_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(gate) = gate {
+            gate.pause();
+        }
+    }
+
+    #[cfg(test)]
+    fn pause_watch(&self) {
+        let gate = self
+            .sessions
+            .watch_gate
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
@@ -1267,13 +1316,12 @@ struct TurnCut {
     from_key: Option<String>,
     back_key: Option<String>,
     back_msg: Option<String>,
-    handed: bool,
 }
 
 /// Drops the in-flight turn when the client goes away before the reply is finished.
 pub(crate) struct CancelGuard {
     bridge: Bridge,
-    request: Request,
+    request: Mutex<Request>,
     owner: AccountId,
     run_id: Mutex<Option<u64>>,
     ticket: Mutex<Option<CancelTicket>>,
@@ -1293,13 +1341,47 @@ impl CancelGuard {
     ) -> Self {
         Self {
             bridge,
-            request,
+            request: Mutex::new(request),
             owner,
             run_id: Mutex::new(None),
             ticket: Mutex::new(ticket),
             gone,
             defused: AtomicBool::new(false),
         }
+    }
+
+    /// Uses the request the run actually took and registers its current key.
+    pub(crate) async fn rewatch(
+        &self,
+        request: Request,
+    ) -> Result<(), hofund_plugin_api::PluginError> {
+        if let Some(ticket) = self
+            .ticket
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            self.bridge.finish_cancel(ticket);
+        }
+        *self
+            .request
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = request.clone();
+        if super::cut::client_cache_marks(&request) {
+            return Ok(());
+        }
+        let key = next_turn(self.owner.as_str(), &request)
+            .map(|(key, _)| key)
+            .unwrap_or_default();
+        let ticket = self
+            .bridge
+            .watch_cancel(&key, Arc::clone(&self.gone))
+            .await?;
+        *self
+            .ticket
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = ticket;
+        Ok(())
     }
 
     /// The run this request is now using.
@@ -1336,8 +1418,12 @@ impl Drop for CancelGuard {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
         {
-            self.bridge
-                .client_cancelled(run_id, &self.request, &self.owner);
+            let request = self
+                .request
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            self.bridge.client_cancelled(run_id, &request, &self.owner);
         }
         if let Some(ticket) = self
             .ticket

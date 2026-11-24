@@ -425,7 +425,7 @@ fn d253_cache_marks_handed_stopping_and_wsl_keep_nothing() {
                 bridge.client_cancelled(run, &follow, &owner());
             }
             "handed" => {
-                bridge.mark_handed(run);
+                bridge.account_handed_over(&owner());
                 bridge.client_cancelled(run, &follow, &owner());
             }
             "stopping" => {
@@ -586,6 +586,146 @@ fn d253_async_same_key_watch_returns_499_when_its_client_goes() {
     gate.release();
     cutter.join().expect("cutter");
     bridge.finish_cancel(ticket);
+}
+
+#[test]
+fn d253_cancel_finish_between_pending_check_and_wait_is_not_lost() {
+    let bridge = Bridge::new();
+    let key = "same-turn";
+    let gone_a = Arc::new(AtomicBool::new(false));
+    let ticket = bridge
+        .watch_cancel_blocking(key, Arc::clone(&gone_a))
+        .expect("register")
+        .expect("ticket");
+    gone_a.store(true, Ordering::Release);
+    let gate = Arc::new(CutGate::new());
+    bridge.install_watch_gate(Arc::clone(&gate));
+    let watching = {
+        let bridge = bridge.clone();
+        let key = key.to_owned();
+        thread::spawn(move || {
+            let waker = std::task::Waker::noop();
+            let mut cx = std::task::Context::from_waker(waker);
+            let gone = Arc::new(AtomicBool::new(false));
+            let mut waiting = std::pin::pin!(bridge.watch_cancel(&key, gone));
+            waiting.as_mut().poll(&mut cx)
+        })
+    };
+    gate.wait_entered();
+    bridge.finish_cancel(ticket);
+    gate.release();
+    let result = watching.join().expect("watch poll");
+    let ticket = match result {
+        std::task::Poll::Ready(result) => result
+            .expect("registration")
+            .expect("a new ticket after the completed cut"),
+        std::task::Poll::Pending => panic!("the wait missed the completed cancel"),
+    };
+    bridge.finish_cancel(ticket);
+}
+
+#[test]
+fn d253_retire_deletes_a_shelved_cut_file() {
+    let bridge = Bridge::new();
+    let dir = tempfile::tempdir().expect("dir");
+    let run = idle_with_reply(&bridge, dir.path());
+    let cancelled = base_request(vec![
+        text("user", "original ask"),
+        text("assistant", "ok"),
+        text("user", "CANCEL ME"),
+    ]);
+    bridge.resume(&cancelled, &owner()).expect("resume");
+    bridge.client_cancelled(run, &cancelled, &owner());
+    let key = super::next_turn(OWNER, &cancelled).expect("key").0;
+    let saved = bridge.shelved(&key).expect("cut");
+    let path = dir.path().join(format!("{}.jsonl", saved.session));
+    assert!(path.is_file());
+    let next = base_request(vec![
+        text("user", "original ask"),
+        text("assistant", "ok"),
+        text("user", "replacement"),
+    ]);
+    bridge.retire(&owner(), &next);
+    assert!(bridge.shelved(&key).is_none());
+    assert!(!path.exists(), "retire left the cut transcript behind");
+}
+
+#[test]
+fn d253_shelve_run_trim_deletes_the_oldest_cut_file() {
+    let bridge = Bridge::new();
+    let dir = tempfile::tempdir().expect("dir");
+    let now = std::time::Instant::now();
+    for index in 0..super::SHELF_MOST {
+        let session = format!("copy_{index}");
+        write_session(dir.path(), &session, "cut\n");
+        bridge.insert_shelf(super::SavedSession {
+            session,
+            sessions: vec![dir.path().to_path_buf()],
+            owner: OWNER.into(),
+            conv: format!("conv_{index}"),
+            key: format!("key_{index}"),
+            at: now + std::time::Duration::from_secs(index as u64),
+            copy: true,
+        });
+    }
+    idle_with_reply(&bridge, dir.path());
+    assert!(bridge.evict_idle_for_room());
+    assert!(
+        !dir.path().join("copy_0.jsonl").exists(),
+        "shelf trim left the oldest cut transcript behind"
+    );
+    assert!(dir.path().join("copy_1.jsonl").is_file());
+}
+
+#[test]
+fn d253_cancel_rechecks_handed_and_stopping_after_the_copy() {
+    for case in ["clear", "handed", "stopping"] {
+        let bridge = Bridge::new();
+        let dir = tempfile::tempdir().expect("dir");
+        let run = idle_with_reply(&bridge, dir.path());
+        let cancelled = base_request(vec![
+            text("user", "original ask"),
+            text("assistant", "ok"),
+            text("user", "CANCEL ME"),
+        ]);
+        bridge.resume(&cancelled, &owner()).expect("resume");
+        let gate = Arc::new(CutGate::new());
+        bridge.install_cut_gate(Arc::clone(&gate));
+        let cutting = {
+            let bridge = bridge.clone();
+            let cancelled = cancelled.clone();
+            thread::spawn(move || bridge.client_cancelled(run, &cancelled, &owner()))
+        };
+        gate.wait_entered();
+        match case {
+            "handed" => bridge.account_handed_over(&owner()),
+            "stopping" => bridge.mark_stopping(),
+            _ => {}
+        }
+        gate.release();
+        cutting.join().expect("cut");
+        let next = base_request(vec![
+            text("user", "original ask"),
+            text("assistant", "ok"),
+            text("user", "replacement"),
+        ]);
+        let kept = bridge.unshelve(&next, &owner());
+        if case == "clear" {
+            assert!(kept.is_some(), "a still-current run kept no cut");
+        } else {
+            assert!(kept.is_none(), "{case} published a cut after the flag");
+        }
+    }
+}
+
+#[test]
+fn d253_session_discovery_miss_keeps_known_paths() {
+    let bridge = Bridge::new();
+    let dir = tempfile::tempdir().expect("dir");
+    let run = idle_with_reply(&bridge, dir.path());
+    bridge.set_session(run, "sess_1", Vec::new());
+    let saved = bridge.saved_from_run(run).expect("idle session");
+    assert_eq!(saved.sessions, vec![dir.path().to_path_buf()]);
 }
 
 #[test]
