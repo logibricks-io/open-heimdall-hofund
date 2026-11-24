@@ -431,6 +431,10 @@ impl Cooldowns {
         true
     }
 
+    /// Whether `id` was asked while resting inside the last 30 seconds.
+    ///
+    /// The book's injected clock is the only time base. Callers must not
+    /// compare the stored ask with a different `Instant`.
     pub(crate) fn hand_on_asked_recently(&self, id: &MemberId) -> bool {
         let now = (self.clock)();
         let mut book = self.lock();

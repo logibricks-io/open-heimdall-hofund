@@ -29,6 +29,10 @@ enum Reply {
     Credit,
     Timeout,
     Connect,
+    /// First call is the status. The next call is a quota refusal.
+    StatusThenQuota(u16, &'static str),
+    /// First call is the status. The next call is a credit refusal.
+    StatusThenCredit(u16, &'static str),
 }
 
 struct Fake {
@@ -80,6 +84,16 @@ impl Member for Fake {
                 Err(PluginError::status_error(status, message))
             }
             Reply::StatusTwiceThenUnary(_, _) => Ok(Completion::Unary(Box::new(answer()))),
+            Reply::StatusThenQuota(status, message) if hit == 0 => {
+                Err(PluginError::status_error(status, message))
+            }
+            Reply::StatusThenQuota(_, _) => Err(PluginError::quota_status(429, "quota exhausted")),
+            Reply::StatusThenCredit(status, message) if hit == 0 => {
+                Err(PluginError::status_error(status, message))
+            }
+            Reply::StatusThenCredit(_, _) => {
+                Err(PluginError::credit_status(402, "credit exhausted"))
+            }
             Reply::StreamStatus(status) => Ok(Completion::Stream(Box::pin(stream::iter([Err(
                 PluginError::status_error(status, "before content"),
             )])))),
@@ -248,6 +262,10 @@ impl Fixture {
         self.seen.lock().expect("seen").clear();
     }
 
+    fn clear_another(&self) {
+        self.another.lock().expect("another").clear();
+    }
+
     fn seen(&self) -> Vec<&'static str> {
         self.seen.lock().expect("seen").clone()
     }
@@ -396,6 +414,109 @@ async fn d265_fit_applies_windows_to_left_out_members() {
     ]);
     assert!(router.dispatch(&long_request(), "test").await.is_err());
     assert_eq!(fixture.seen(), ["mid"]);
+}
+
+#[tokio::test]
+async fn d265_fit_does_not_call_a_large_window_guessed_quota_member() {
+    let fixture = Fixture::new();
+    fixture.rest("probe", Rest::Rate);
+    fixture.rest("quota", Rest::Quota);
+    let router = fixture.fit_router(&[
+        ("probe", Reply::Status(503, "unavailable"), Some(4_000)),
+        ("quota", Reply::Unary, Some(1_000_000)),
+    ]);
+    assert!(router.dispatch(&long_request(), "test").await.is_err());
+    assert_eq!(fixture.seen(), ["probe"]);
+}
+
+#[tokio::test]
+async fn d265_replan_quota_asks_the_too_small_member() {
+    for (label, hand_rest, second) in [
+        (
+            "guarded-rate",
+            Rest::Rate,
+            Reply::StatusThenQuota(503, "unavailable"),
+        ),
+        (
+            "guarded-outage",
+            Rest::Outage,
+            Reply::StatusThenQuota(503, "unavailable"),
+        ),
+        (
+            "guarded-slow",
+            Rest::Slow,
+            Reply::StatusThenQuota(503, "unavailable"),
+        ),
+        (
+            "guarded-rate-credit",
+            Rest::Rate,
+            Reply::StatusThenCredit(503, "unavailable"),
+        ),
+    ] {
+        let fixture = Fixture::new();
+        fixture.rest("hand", hand_rest);
+        fixture.rest("hold", Rest::Quota);
+        let primer = fixture.router(&[
+            ("hand", Reply::Status(401, "bad key")),
+            ("hold", Reply::Unary),
+        ]);
+        assert!(dispatch(&primer).await.is_err(), "{label}");
+        assert_eq!(fixture.seen(), ["hand"], "{label}");
+
+        fixture.rest("probe", Rest::Overload);
+        let router = fixture.fit_router(&[
+            ("tiny", Reply::Unary, Some(4_000)),
+            ("probe", second, Some(100_000)),
+            ("hand", Reply::Unary, Some(100_000)),
+        ]);
+        let wait = Arc::new(ImmediateWait {
+            now: Arc::clone(&fixture.now),
+            waits: Arc::new(Mutex::new(Vec::new())),
+        });
+        fixture.clear_seen();
+        let routed = router
+            .dispatch_with_wait(&long_request(), "test", None, Some(wait))
+            .await
+            .unwrap_or_else(|error| panic!("{label}: {error}"));
+        assert_eq!(routed.upstream_id, "tiny", "{label}");
+        assert_eq!(fixture.seen(), ["probe", "probe", "tiny"], "{label}");
+    }
+}
+
+#[tokio::test]
+async fn d265_another_candidate_skips_unaccepted_hand_on() {
+    let fixture = Fixture::new();
+    fixture.rest("probe", Rest::Rate);
+    fixture.rest("hand", Rest::Outage);
+    let router = fixture.router(&[
+        ("probe", Reply::Status(401, "bad key")),
+        ("hand", Reply::Unary),
+    ]);
+    assert!(dispatch(&router).await.is_err());
+    assert_eq!(fixture.seen(), ["probe"]);
+    assert_eq!(fixture.another(), [false]);
+
+    let fixture = Fixture::new();
+    fixture.rest("hand", Rest::Rate);
+    fixture.rest("hold", Rest::Quota);
+    let primer = fixture.router(&[
+        ("hand", Reply::Status(503, "unavailable")),
+        ("hold", Reply::Unary),
+    ]);
+    assert!(dispatch(&primer).await.is_err());
+    assert_eq!(fixture.seen(), ["hand"]);
+
+    fixture.rest("probe", Rest::Overload);
+    let router = fixture.router(&[
+        ("probe", Reply::Status(503, "unavailable")),
+        ("hand", Reply::Unary),
+        ("hold", Reply::Unary),
+    ]);
+    fixture.clear_seen();
+    fixture.clear_another();
+    assert!(dispatch(&router).await.is_err());
+    assert_eq!(fixture.seen(), ["probe"]);
+    assert_eq!(fixture.another(), [false]);
 }
 
 #[tokio::test]

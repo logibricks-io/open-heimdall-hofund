@@ -946,9 +946,25 @@ impl Router {
         // `fit` leaves out a member whose known window cannot hold the
         // estimate. Other strategies keep their order: a known-too-small
         // member is still asked, and later ones are skipped only after an
-        // overflow (`needs_room`).
-        let (fitting, hand_on, over_window) = if resolved.routing == "fit" {
-            split_over_window(resolved.hops, hand_on, input_tokens)
+        // overflow (`needs_room`). An ineligible rest is not a fitting hop.
+        // When no eligible hop fits, the unsplit order stays, so the soonest
+        // probe is still the one asked.
+        let apply_window = resolved.routing == "fit";
+        let (fitting, hand_on, over_window) = if apply_window {
+            let cooldowns = self.cooldowns.clone();
+            let bare = resolved.bare.clone();
+            split_over_window(resolved.hops, hand_on, input_tokens, |hop| {
+                cooldowns.as_ref().is_some_and(|cooldowns| {
+                    hand_on_candidate(
+                        cooldowns,
+                        hop,
+                        &bare,
+                        HandOnFailure::Momentary,
+                        input_tokens,
+                        true,
+                    )
+                })
+            })
         } else {
             (resolved.hops, hand_on, Vec::new())
         };
@@ -986,16 +1002,21 @@ impl Router {
             hook,
             rest_left,
             hand_on: if resolved.pool_asked {
+                let cooldowns = self.cooldowns.clone();
+                let bare = resolved.bare.clone();
                 hand_on
                     .into_iter()
                     .filter(|hop| {
-                        let model = hop.wire_model.as_deref().unwrap_or(&resolved.bare);
-                        self.cooldowns
-                            .as_ref()
-                            .and_then(|cooldowns| {
-                                cooldowns.cooling_for_model(hop.member.id(), model)
-                            })
-                            .is_some_and(|cooling| cooling.hand_on().is_some())
+                        cooldowns.as_ref().is_some_and(|cooldowns| {
+                            hand_on_candidate(
+                                cooldowns,
+                                hop,
+                                &bare,
+                                HandOnFailure::Momentary,
+                                input_tokens,
+                                apply_window,
+                            )
+                        })
                     })
                     .collect()
             } else {
@@ -1974,14 +1995,118 @@ struct Answered {
     clear_placeholder_served: bool,
 }
 
+/// Which guessed rest a left-out member is on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HandOnSeat {
+    /// Guessed rate rest. Accepts any own failure, including 401-404 and quota 429.
+    Rate,
+    /// Outage, slow-start, or overload. Momentary failures only.
+    Momentary,
+    /// The rest has ended. A momentary failure may still ask when the guard is clear.
+    Expired,
+    /// Quota, credit, key, or a vendor-timed retry. Never handed on.
+    Ineligible,
+}
+
+/// The failure a hand-on decision is being made for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HandOnFailure {
+    /// Connect, timeout, transport, interrupted, or a busy status.
+    Momentary,
+    /// Any other own failure failover may hand on, including 401-404 and quota 429.
+    Own,
+}
+
+/// Whether one left-out member would be asked for `failure`.
+///
+/// The hand-on list, the fit split, the another-candidate flag, the
+/// fitting-follower check, and [`DispatchState::take_hand_on`] all use this
+/// predicate. A live 30-second ask guard or a known-too-small window blocks
+/// every seat. The check does not record an ask.
+fn hand_on_eligible(
+    seat: HandOnSeat,
+    failure: HandOnFailure,
+    window_blocks: bool,
+    guarded: bool,
+) -> bool {
+    if guarded || window_blocks {
+        return false;
+    }
+    match seat {
+        HandOnSeat::Ineligible => false,
+        HandOnSeat::Rate => true,
+        HandOnSeat::Momentary | HandOnSeat::Expired => failure == HandOnFailure::Momentary,
+    }
+}
+
+fn hand_on_seat(cooldowns: &Cooldowns, hop: &Hop, bare: &str) -> HandOnSeat {
+    let model = hop.wire_model.as_deref().unwrap_or(bare);
+    match cooldowns.cooling_for_model(hop.member.id(), model) {
+        Some(cooling) => match cooling.hand_on() {
+            Some(HandOnRest::Rate) => HandOnSeat::Rate,
+            Some(HandOnRest::Momentary) => HandOnSeat::Momentary,
+            None => HandOnSeat::Ineligible,
+        },
+        None => HandOnSeat::Expired,
+    }
+}
+
+/// Resolves `hop` at the cooldown book's clock and applies [`hand_on_eligible`].
+fn hand_on_candidate(
+    cooldowns: &Cooldowns,
+    hop: &Hop,
+    bare: &str,
+    failure: HandOnFailure,
+    tokens: u64,
+    apply_window: bool,
+) -> bool {
+    let window_blocks = apply_window
+        && hop
+            .context_window
+            .is_some_and(|window| window > 0 && tokens >= window);
+    hand_on_eligible(
+        hand_on_seat(cooldowns, hop, bare),
+        failure,
+        window_blocks,
+        cooldowns.hand_on_asked_recently(hop.member.id()),
+    )
+}
+
+fn hand_on_failure(error: &PluginError, allows: bool, now: Instant) -> Option<HandOnFailure> {
+    if error.status() == Some(400)
+        || decision::outgrown(error)
+        || decision::context_overflow_memory(error)
+        || decision::content_refused(error)
+        || !allows
+    {
+        return None;
+    }
+    let momentary = matches!(
+        error.kind(),
+        PluginErrorKind::Connect
+            | PluginErrorKind::Timeout
+            | PluginErrorKind::Transport
+            | PluginErrorKind::Interrupted
+    ) || patience::busy(error, 0, PoolMemberPatience::Off, now).is_some();
+    Some(if momentary {
+        HandOnFailure::Momentary
+    } else {
+        HandOnFailure::Own
+    })
+}
+
 /// Splits ordinary and left-out hops into members that may hold `tokens` and
 /// members whose known window is no larger than that estimate. An unknown
-/// window stays with the members that may hold the request. When every member
-/// is too small, or none is, both orders are returned unchanged.
+/// window stays with the members that may hold the request. A left-out hop
+/// counts as fitting only when `eligible` says this failure could ask it, so
+/// a guessed quota, credit, key, or vendor-timed rest is not promoted into
+/// the ask list. When no eligible hop fits, or none is too small, both orders
+/// are returned unchanged.
 fn split_over_window(
     hops: Vec<Hop>,
     left: Vec<Hop>,
     tokens: u64,
+    eligible: impl Fn(&Hop) -> bool,
 ) -> (Vec<Hop>, Vec<Hop>, Vec<Hop>) {
     let total = hops.len() + left.len();
     if total < 2 {
@@ -1991,29 +2116,29 @@ fn split_over_window(
         hop.context_window
             .is_some_and(|window| window > 0 && tokens >= window)
     };
-    let fitting_count = hops
-        .iter()
-        .chain(left.iter())
-        .filter(|hop| !too_small(hop))
-        .count();
-    if fitting_count == 0 || fitting_count == total {
+    let fitting_count = hops.iter().filter(|hop| !too_small(hop)).count()
+        + left.iter().filter(|hop| eligible(hop)).count();
+    let any_too_small = hops.iter().chain(left.iter()).any(too_small);
+    if fitting_count == 0 || !any_too_small {
         return (hops, left, Vec::new());
     }
-    let partition = |hops: Vec<Hop>| {
-        let mut fitting = Vec::with_capacity(hops.len());
-        let mut small = Vec::new();
-        for hop in hops {
-            if too_small(&hop) {
-                small.push(hop);
-            } else {
-                fitting.push(hop);
-            }
+    let mut fitting = Vec::new();
+    let mut over_window = Vec::new();
+    for hop in hops {
+        if too_small(&hop) {
+            over_window.push(hop);
+        } else {
+            fitting.push(hop);
         }
-        (fitting, small)
-    };
-    let (mut fitting, mut over_window) = partition(hops);
-    let (mut left_fitting, left_small) = partition(left);
-    over_window.extend(left_small);
+    }
+    let mut left_fitting = Vec::new();
+    for hop in left {
+        if too_small(&hop) {
+            over_window.push(hop);
+        } else if eligible(&hop) {
+            left_fitting.push(hop);
+        }
+    }
     if fitting.is_empty() && !left_fitting.is_empty() {
         fitting.push(left_fitting.remove(0));
     }
@@ -2047,16 +2172,14 @@ enum QuotaHold {
 
 impl DispatchState {
     /// Whether failover may ask a later member on this request.
+    ///
+    /// A left-out member counts only when [`hand_on_eligible`] would accept an
+    /// own failure that is not momentary. The probe's failure is not known
+    /// yet, and this check does not record the 30-second guard. A momentary
+    /// rest, or a rate rest still inside that guard, must not make the probe
+    /// skip its queue wait.
     fn another_candidate_follows(&self, index: usize) -> bool {
-        let hand_on_follows = self.hand_on.iter().any(|hop| {
-            let model = hop.wire_model.as_deref().unwrap_or(&self.resolved.bare);
-            self.cooldowns
-                .as_ref()
-                .and_then(|cooldowns| cooldowns.cooling_for_model(hop.member.id(), model))
-                .and_then(|cooling| cooling.hand_on())
-                .is_some()
-        });
-        if hand_on_follows {
+        if self.hand_on_follows(HandOnFailure::Own) {
             return true;
         }
         for hop in self.resolved.hops.iter().skip(index + 1) {
@@ -2129,35 +2252,15 @@ impl DispatchState {
 
     fn take_hand_on(&mut self) -> Option<usize> {
         let error = &self.last.as_ref()?.1;
-        if error.status() == Some(400)
-            || decision::outgrown(error)
-            || decision::context_overflow_memory(error)
-            || decision::content_refused(error)
-            || !(self.policy.allows(error) || decision::asks_next(error))
-        {
-            return None;
-        }
-        let momentary = matches!(
-            error.kind(),
-            PluginErrorKind::Connect
-                | PluginErrorKind::Timeout
-                | PluginErrorKind::Transport
-                | PluginErrorKind::Interrupted
-        ) || patience::busy(error, 0, PoolMemberPatience::Off, self.now())
-            .is_some();
+        let allows = self.policy.allows(error) || decision::asks_next(error);
+        let failure = hand_on_failure(error, allows, self.now())?;
         let cooldowns = self.cooldowns.clone()?;
         let bare = self.resolved.bare.clone();
+        let tokens = self.input_tokens;
+        let apply_window = self.resolved.routing == "fit";
         let position = self.hand_on.iter().position(|hop| {
-            let model = hop.wire_model.as_deref().unwrap_or(&bare);
-            let Some(cooling) = cooldowns.cooling_for_model(hop.member.id(), model) else {
-                return momentary && !cooldowns.hand_on_asked_recently(hop.member.id());
-            };
-            let accepts = match cooling.hand_on() {
-                Some(HandOnRest::Rate) => true,
-                Some(HandOnRest::Momentary) => momentary,
-                None => false,
-            };
-            accepts && cooldowns.claim_hand_on(hop.member.id())
+            hand_on_candidate(&cooldowns, hop, &bare, failure, tokens, apply_window)
+                && cooldowns.claim_hand_on(hop.member.id())
         })?;
         let hop = self.hand_on.remove(position);
         let index = self.resolved.hops.len();
@@ -2579,9 +2682,9 @@ impl DispatchState {
                             );
                         }
                         self.outgrown.push((upstream_id.clone(), upstream_model));
-                        self.last = Some((upstream_id, error));
                         *ending = Ending::Other;
-                        self.note_other_if_another_follows(asking, index);
+                        self.note_other_if_another_follows(asking, index, &error);
+                        self.last = Some((upstream_id, error));
                         continue;
                     }
                     if error.skips_failover_same_plugin() {
@@ -2647,7 +2750,7 @@ impl DispatchState {
                         // A passing failure of the member that is currently
                         // last is replanned. It is not an earlier failure;
                         // the try after that replan is the one that counts.
-                        self.note_other_if_another_follows(asking, index);
+                        self.note_other_if_another_follows(asking, index, &error);
                     }
                     if let Some(failure) =
                         patience::busy(&error, index, member_patience, self.now())
@@ -2816,22 +2919,66 @@ impl DispatchState {
 
     /// A non-allowance failure counts as earlier only when another fitting
     /// member is still to be asked.
-    fn note_other_if_another_follows(&mut self, asking: &[usize], index: usize) {
-        if self.another_fitting_follows(asking, index) {
+    fn note_other_if_another_follows(
+        &mut self,
+        asking: &[usize],
+        index: usize,
+        error: &PluginError,
+    ) {
+        if self.another_fitting_follows(asking, index, error) {
             self.saw_other = true;
         }
     }
 
-    fn another_fitting_follows(&self, asking: &[usize], index: usize) -> bool {
+    fn another_fitting_follows(&self, asking: &[usize], index: usize, error: &PluginError) -> bool {
         let Some(pos) = asking.iter().position(|item| *item == index) else {
             return false;
         };
-        asking[pos + 1..].iter().any(|later| {
+        if asking[pos + 1..].iter().any(|later| {
             self.resolved
                 .hops
                 .get(*later)
                 .is_some_and(|hop| !self.member_skipped(hop))
-        }) || self.hand_on.iter().any(|hop| !self.member_skipped(hop))
+        }) {
+            return true;
+        }
+        let allows = self.policy.allows(error) || decision::asks_next(error);
+        let Some(failure) = hand_on_failure(error, allows, self.now()) else {
+            return false;
+        };
+        let Some(cooldowns) = &self.cooldowns else {
+            return false;
+        };
+        self.hand_on.iter().any(|hop| {
+            !self.member_skipped(hop)
+                && hand_on_candidate(
+                    cooldowns,
+                    hop,
+                    &self.resolved.bare,
+                    failure,
+                    self.input_tokens,
+                    self.resolved.routing == "fit",
+                )
+        })
+    }
+
+    /// Whether a retained hand-on hop would be asked for `failure` now.
+    ///
+    /// Does not record the guard.
+    fn hand_on_follows(&self, failure: HandOnFailure) -> bool {
+        let Some(cooldowns) = &self.cooldowns else {
+            return false;
+        };
+        self.hand_on.iter().any(|hop| {
+            hand_on_candidate(
+                cooldowns,
+                hop,
+                &self.resolved.bare,
+                failure,
+                self.input_tokens,
+                self.resolved.routing == "fit",
+            )
+        })
     }
 
     fn member_skipped(&self, hop: &Hop) -> bool {
@@ -3289,6 +3436,97 @@ fn result_status(error: Option<&PluginError>) -> String {
 
 fn u128_as_u64(value: u128) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod hand_on_eligible_tests {
+    use super::{HandOnFailure, HandOnSeat, hand_on_eligible};
+
+    #[test]
+    fn d265_hand_on_eligible_table() {
+        let cases = [
+            (
+                HandOnSeat::Rate,
+                HandOnFailure::Momentary,
+                false,
+                false,
+                true,
+            ),
+            (HandOnSeat::Rate, HandOnFailure::Own, false, false, true),
+            (HandOnSeat::Rate, HandOnFailure::Own, false, true, false),
+            (
+                HandOnSeat::Rate,
+                HandOnFailure::Momentary,
+                true,
+                false,
+                false,
+            ),
+            (
+                HandOnSeat::Momentary,
+                HandOnFailure::Momentary,
+                false,
+                false,
+                true,
+            ),
+            (
+                HandOnSeat::Momentary,
+                HandOnFailure::Own,
+                false,
+                false,
+                false,
+            ),
+            (
+                HandOnSeat::Momentary,
+                HandOnFailure::Momentary,
+                false,
+                true,
+                false,
+            ),
+            (
+                HandOnSeat::Expired,
+                HandOnFailure::Momentary,
+                false,
+                false,
+                true,
+            ),
+            (HandOnSeat::Expired, HandOnFailure::Own, false, false, false),
+            (
+                HandOnSeat::Expired,
+                HandOnFailure::Momentary,
+                false,
+                true,
+                false,
+            ),
+            (
+                HandOnSeat::Ineligible,
+                HandOnFailure::Momentary,
+                false,
+                false,
+                false,
+            ),
+            (
+                HandOnSeat::Ineligible,
+                HandOnFailure::Own,
+                false,
+                false,
+                false,
+            ),
+            (
+                HandOnSeat::Ineligible,
+                HandOnFailure::Own,
+                true,
+                true,
+                false,
+            ),
+        ];
+        for (seat, failure, window_blocks, guarded, expected) in cases {
+            assert_eq!(
+                hand_on_eligible(seat, failure, window_blocks, guarded),
+                expected,
+                "{seat:?} {failure:?} window={window_blocks} guard={guarded}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
