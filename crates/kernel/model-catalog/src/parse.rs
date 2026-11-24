@@ -230,6 +230,38 @@ impl CatalogIndex {
         }
         self.by_bare_id.get(&bare_id(model))
     }
+
+    /// Resolves a model in the first catalog that lists it.
+    #[must_use]
+    pub fn resolve_in(&self, catalogs: &[String], model: &str) -> Option<&ResolvedEntry> {
+        catalogs
+            .iter()
+            .find_map(|catalog| self.in_catalog(catalog, model))
+    }
+
+    /// Returns the first usable price in catalog order, skipping membership catalogs.
+    #[must_use]
+    pub fn price_in(
+        &self,
+        catalogs: &[String],
+        membership_catalogs: &[String],
+        model: &str,
+    ) -> Option<&Price> {
+        catalogs
+            .iter()
+            .filter(|catalog| !membership_catalogs.contains(catalog))
+            .filter_map(|catalog| self.in_catalog(catalog, model))
+            .find_map(|entry| entry.price.as_ref())
+    }
+
+    fn in_catalog(&self, catalog: &str, model: &str) -> Option<&ResolvedEntry> {
+        self.by_provider_model
+            .get(&format!("{catalog}/{model}"))
+            .or_else(|| {
+                self.by_provider_model
+                    .get(&format!("{catalog}/{}", bare_id(model)))
+            })
+    }
 }
 
 fn display_name(model: &DevModel, id: &str) -> String {

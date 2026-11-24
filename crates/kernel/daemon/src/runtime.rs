@@ -470,6 +470,16 @@ impl Runtime {
         self.config.get().expect("initial snapshot").subscribe()
     }
 
+    /// Returns a provider from the currently published configuration.
+    pub(crate) fn published_provider(&self, id: &str) -> Option<hofund_config::Provider> {
+        let config = self.config.get()?.borrow();
+        config
+            .providers
+            .iter()
+            .find(|provider| provider.id == id)
+            .cloned()
+    }
+
     /// Builds the providers for `config` without publishing anything.
     ///
     /// A provider whose instance identity is unchanged reuses the running
