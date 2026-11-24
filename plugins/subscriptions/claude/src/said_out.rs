@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -735,11 +735,14 @@ fn scan_projects(watch: &mut Watch, projects: &Path, now: SystemTime) {
         let Ok(files) = fs::read_dir(&root) else {
             continue;
         };
-        for file in files.flatten() {
-            let path = file.path();
+        for entry in files.flatten() {
+            let path = entry.path();
             if path.extension().is_none_or(|ext| ext != "jsonl") {
                 continue;
             }
+            let Ok(mut file) = fs::File::open(&path) else {
+                continue;
+            };
             let Ok(meta) = file.metadata() else {
                 continue;
             };
@@ -757,7 +760,7 @@ fn scan_projects(watch: &mut Watch, projects: &Path, now: SystemTime) {
                 Some(was) if was < size => was,
                 _ => 0,
             };
-            let end = scan_session(watch, &path, start, size, now);
+            let end = scan_session(watch, &mut file, start, size, now);
             off.insert(path, end);
         }
     }
@@ -765,12 +768,19 @@ fn scan_projects(watch: &mut Watch, projects: &Path, now: SystemTime) {
     watch.started = true;
 }
 
-fn scan_session(watch: &mut Watch, path: &Path, from: u64, size: u64, now: SystemTime) -> u64 {
+fn scan_session(
+    watch: &mut Watch,
+    file: &mut fs::File,
+    from: u64,
+    size: u64,
+    now: SystemTime,
+) -> u64 {
     let from = if size < from { 0 } else { from };
     let start = from.max(size.saturating_sub(SCAN_TAIL));
-    let Ok(bytes) = fs::read(path) else {
+    let mut bytes = Vec::new();
+    if file.read_to_end(&mut bytes).is_err() {
         return from;
-    };
+    }
     let end = usize::try_from(size)
         .unwrap_or(bytes.len())
         .min(bytes.len());
@@ -1301,6 +1311,40 @@ mod tests {
         let killed = PluginError::transport("Claude Code: signal: killed");
         let spent = spent_on_failure(ctx, &id, &killed, now).expect("spent");
         assert!(spent.iter().any(|window| window.held()));
+    }
+
+    #[test]
+    fn d254_an_open_append_handle_does_not_hide_a_settled_refusal() {
+        let _guards = guards();
+        let dir = tempfile::tempdir().expect("dir");
+        let host = hofund_kit_subscription::TestHost::open_for(
+            hofund_plugin_api::PluginKind::Subscription,
+            hofund_plugin_api::PluginId::from_static("claude"),
+            dir.path(),
+        );
+        let ctx = host.context();
+        let (home, id) = active_home(dir.path());
+        crate::cli::test_configured_dir(Some(home.clone()));
+        let session = home.join("projects").join("work").join("session.jsonl");
+        let now = at(1_800_000_000);
+        fs::write(&session, "{}\n").expect("seed");
+        observe_agent(ctx, &id, now);
+        let settled = refusal_line(
+            now + Duration::from_secs(120),
+            1_900_000_000,
+            "You've hit your weekly limit",
+        );
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&session)
+            .expect("append");
+        writeln!(file, "{settled}").expect("append");
+        observe_agent(ctx, &id, now);
+        assert_eq!(
+            kept_until(ctx, &id, now),
+            Some(UNIX_EPOCH + Duration::from_secs(1_900_000_000))
+        );
+        drop(file);
     }
 
     #[test]
