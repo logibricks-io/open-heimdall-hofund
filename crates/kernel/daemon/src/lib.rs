@@ -610,7 +610,7 @@ async fn start_inner(
         config.usage.clone(),
         Arc::clone(&model_catalog),
         Arc::clone(&models_host),
-        &config,
+        Arc::clone(&runtime),
     ));
     gateway = gateway.with_effective_pricer(Arc::clone(&session_pricing));
     if let Some(bus) = &control_bus {

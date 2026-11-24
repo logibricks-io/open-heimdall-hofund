@@ -76,6 +76,7 @@ id = "first"
 name = "First"
 chat = "https://first.example.test/v1"
 responses = "https://first.example.test/v1"
+catalog = "acme"
 
 [[preset.region]]
 id = "second"
@@ -83,6 +84,7 @@ name = "Second"
 chat = "https://second.example.test/v1"
 models = ["fixture-region"]
 lists = true
+catalog = "fixture-plan-coding-plan, acme"
 
 [[preset]]
 id = "fixture-no-url"

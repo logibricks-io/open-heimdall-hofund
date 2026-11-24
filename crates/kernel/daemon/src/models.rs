@@ -2860,6 +2860,34 @@ mod tests {
     }
 
     #[test]
+    fn d264_region_option_selects_the_regions_ordered_catalogs() {
+        let host = super::ModelsHost::new(
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+        );
+        for (region, expected) in [
+            ("first", vec!["acme".to_owned()]),
+            (
+                "second",
+                vec!["fixture-plan-coding-plan".to_owned(), "acme".to_owned()],
+            ),
+        ] {
+            let config = hofund_config::load(&format!(
+                "[[providers]]\nid = \"fixture\"\npreset = \"fixture-multi\"\nprotocol = \"openai-chat\"\n[providers.options]\nregion = \"{region}\"\n"
+            ))
+            .expect("fixture config");
+            let plan = host
+                .model_plan_with(
+                    &config.providers[0],
+                    hofund_plugin_registry::find_fixture_preset,
+                )
+                .expect("model plan")
+                .expect("compiled plan");
+            assert_eq!(plan.catalogs, expected, "region {region}");
+        }
+    }
+
+    #[test]
     fn compiled_models_credential_uses_the_region_resolved_host() {
         let host = super::ModelsHost::new(
             std::time::Duration::from_secs(1),
