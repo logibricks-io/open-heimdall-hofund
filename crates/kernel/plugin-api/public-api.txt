@@ -1378,6 +1378,7 @@ UpstreamProvider::fn learned_catalog_entry (& self , _model : & str) -> Option <
 UpstreamProvider::fn learned_preferred (& self , _model : & str) -> Option < String >
 UpstreamProvider::fn remember_listed (& self , models : & [ModelSpec])
 UpstreamProvider::fn rest_probe (& self) -> bool
+UpstreamProvider::fn stopping (& self)
 UpstreamSpec
 UpstreamSpec #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 UpstreamSpec::const fn credential (& self) -> CredentialStyle

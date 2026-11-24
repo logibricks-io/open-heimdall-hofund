@@ -2265,6 +2265,35 @@ fn claude_for(host: &TestHost) -> crate::Claude {
 }
 
 #[test]
+fn d253_agent_sign_in_switch_hands_over_the_bridge_account() {
+    let dir = tempfile::tempdir().expect("dir");
+    let agent_home = dir.path().join("claude");
+    let host = host(&dir);
+    let claude = claude_for(&host);
+    let id = account_id_from(&["claude", UUID]);
+    store(&host, &id, &signed_in_blob());
+    let run = claude.bridge.park_run(id.clone(), Vec::new());
+    claude.bridge.ensure_session_run(run, &id, Vec::new());
+    let request: hofund_plugin_api::Request = serde_json::from_value(serde_json::json!({
+        "model": "claude-sonnet-4-5",
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+        "tools": [{"name": "read", "input_schema": {"type": "object"}}]
+    }))
+    .expect("request");
+    claude.bridge.ended(
+        run,
+        &id,
+        &request,
+        "hello",
+        crate::bridge::session::TurnStop::Stop,
+        true,
+    );
+    assert_eq!(claude.bridge.idle_len(), 1);
+    block_on(claude.write_agent_sign_in(&id, &agent_home, host.context())).expect("switch");
+    assert_eq!(claude.bridge.idle_len(), 0);
+}
+
+#[test]
 fn d237_header_during_usage_does_not_refresh_the_previous_reading() {
     use std::time::Duration;
 
