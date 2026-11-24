@@ -25,6 +25,8 @@ pub const CACHE_HOUR: Duration = Duration::from_secs(60 * 60);
 pub const STICK_KEEP: Duration = Duration::from_secs(24 * 60 * 60);
 /// Maximum conversations written to disk.
 pub const STICKS_KEPT: usize = 512;
+/// Maximum answered-history mappings kept in memory. Not written to disk.
+const FORKS_KEPT: usize = 4096;
 
 /// How long a conversation stays with its last answerer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -78,8 +80,13 @@ pub struct Conversation {
     pub turn: u64,
     /// Whether tool results or agent-only notes continue the last turn.
     pub within: bool,
-    /// Original request body, used by sealed-reasoning recovery.
+    /// Original request body, used by sealed-reasoning recovery and history hashes.
     pub body: Vec<u8>,
+    /// Whether the client named this conversation with a session header.
+    ///
+    /// A body-hash id is already that history's identity, so it is not
+    /// mapped again as a fork of another session.
+    pub session_named: bool,
 }
 
 impl Conversation {
@@ -91,6 +98,7 @@ impl Conversation {
             turn,
             within,
             body: Vec::new(),
+            session_named: false,
         }
     }
 
@@ -98,6 +106,13 @@ impl Conversation {
     #[must_use]
     pub fn with_body(mut self, body: impl Into<Vec<u8>>) -> Self {
         self.body = body.into();
+        self
+    }
+
+    /// Records that a session header named this conversation.
+    #[must_use]
+    pub fn with_named_session(mut self, named: bool) -> Self {
+        self.session_named = named;
         self
     }
 }
@@ -266,6 +281,9 @@ pub struct Decision {
     pub reason: Reason,
     /// Whether failures after a successful reply must preserve the stick.
     pub strict: bool,
+    /// Whether the request carried another session's answered history and
+    /// took that session's account.
+    pub forked: bool,
 }
 
 /// One remembered answerer and its latest cache facts.
@@ -297,6 +315,8 @@ pub struct Stick {
 struct State {
     sticks: BTreeMap<String, Stick>,
     opening: BTreeMap<String, Stick>,
+    /// `scope|history` to the conversation key that history was last sent under.
+    forks: BTreeMap<String, String>,
     dirty: bool,
     scheduled: bool,
 }
@@ -395,12 +415,18 @@ impl AffinityState {
         candidates: &[Candidate],
     ) -> Decision {
         let now = (self.clock)();
-        let stick = self
-            .lock()
-            .sticks
-            .get(&conversation.key)
-            .filter(|stick| fresh(stick.at, now))
-            .cloned();
+        let (stick, forked) = if mode == Stays::Strict {
+            self.strict_stick(conversation, now)
+        } else {
+            (
+                self.lock()
+                    .sticks
+                    .get(&conversation.key)
+                    .filter(|stick| fresh(stick.at, now))
+                    .cloned(),
+                false,
+            )
+        };
         let at = stick.as_ref().and_then(|stick| {
             candidates
                 .iter()
@@ -493,7 +519,13 @@ impl AffinityState {
             Reason::First if routing == "rotate" => {
                 self.least_held(conversation, candidates, order, false, now)
             }
-            Reason::First if spread && conversation.key.contains("|agent:") => {
+            Reason::First
+                if (spread || mode == Stays::Strict) && conversation.key.contains("|agent:") =>
+            {
+                // An unanswered subagent stays with its lead. Strict does
+                // this whichever routing is in use, except a routing that
+                // takes turns, which still advances. Other modes do it only
+                // when new sessions are spread.
                 self.with_lead(conversation, candidates, order, now)
             }
             Reason::First if spread => self.least_held(conversation, candidates, order, true, now),
@@ -504,6 +536,62 @@ impl AffinityState {
             kept,
             reason,
             strict,
+            forked,
+        }
+    }
+
+    /// The account a strict conversation is kept on, including one reached
+    /// by an answered history, when that account is still remembered.
+    fn strict_stick(&self, conversation: &Conversation, now: SystemTime) -> (Option<Stick>, bool) {
+        let mut state = self.lock();
+        let own = state
+            .sticks
+            .get(&conversation.key)
+            .filter(|stick| fresh(stick.at, now))
+            .cloned();
+        if !conversation.session_named || conversation.key.contains("|agent:") {
+            return (own, false);
+        }
+        let Some(history) = hofund_codec::history_id(&conversation.body) else {
+            return (own, false);
+        };
+        let scope = conversation
+            .key
+            .split_once('|')
+            .map_or(conversation.key.as_str(), |(scope, _)| scope);
+        let at = format!("{scope}|{history}");
+        if own.is_some() {
+            let replace = match state.forks.get(&at) {
+                None => true,
+                Some(from) if from == &conversation.key => true,
+                Some(from) => !state
+                    .sticks
+                    .get(from)
+                    .is_some_and(|stick| fresh(stick.at, now)),
+            };
+            if replace {
+                state.forks.insert(at, conversation.key.clone());
+            }
+            if state.forks.len() > FORKS_KEPT {
+                let State { sticks, forks, .. } = &mut *state;
+                forks.retain(|_, key| sticks.get(key).is_some_and(|stick| fresh(stick.at, now)));
+            }
+            return (own, false);
+        }
+        let Some(from) = state.forks.get(&at).cloned() else {
+            return (None, false);
+        };
+        if from == conversation.key {
+            return (None, false);
+        }
+        match state
+            .sticks
+            .get(&from)
+            .filter(|stick| fresh(stick.at, now))
+            .cloned()
+        {
+            Some(stick) => (Some(stick), true),
+            None => (None, false),
         }
     }
 
@@ -1682,5 +1770,90 @@ mod tests {
         let stick = legacy.stick("legacy|session").expect("legacy");
         assert!(!stick.stood_in);
         assert_eq!(stick.effort, "");
+    }
+
+    fn named(key: &str, body: &str) -> Conversation {
+        Conversation::new(key, 2, false)
+            .with_body(body.as_bytes().to_vec())
+            .with_named_session(true)
+    }
+
+    const PARENT_HISTORY: &str = r#"{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"from parent"},{"role":"user","content":"more"}]}"#;
+    const FORK_HISTORY: &str = r#"{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]},{"role":"assistant","content":[{"type":"text","text":"from parent","cache_control":{"type":"ephemeral"}}]},{"role":"user","content":"in the branch"}]}"#;
+    const OTHER_HISTORY: &str = r#"{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"from other"},{"role":"user","content":"more"}]}"#;
+
+    #[test]
+    fn d244_strict_fork_uses_the_parent_account() {
+        let root = tempfile::tempdir().expect("root");
+        let path = root.path().join("affinity.json");
+        let state = AffinityState::with_clock(&path, Arc::new(SystemTime::now), Duration::ZERO);
+        state.answered("demo|parent", "second", "model", 1, usage(0, 3000));
+        let parent = named("demo|parent", PARENT_HISTORY);
+        let recorded = state.order(&parent, Stays::Strict, "order", &candidates());
+        assert_eq!(recorded.reason, Reason::Strict);
+        assert!(!recorded.forked);
+        assert_eq!(recorded.order, [1]);
+
+        let fork = named("demo|fork", FORK_HISTORY);
+        let decision = state.order(&fork, Stays::Strict, "order", &candidates());
+        assert!(decision.forked);
+        assert_eq!(decision.reason, Reason::Strict);
+        assert_eq!(decision.order, [1]);
+
+        let other = named("demo|other", OTHER_HISTORY);
+        let spread = state.order(&other, Stays::Strict, "order", &candidates());
+        assert_eq!(spread.reason, Reason::First);
+        assert!(!spread.forked);
+        assert_eq!(spread.order, [0, 1]);
+
+        let unnamed =
+            Conversation::new("demo|fork", 2, false).with_body(FORK_HISTORY.as_bytes().to_vec());
+        assert_eq!(
+            state
+                .order(&unnamed, Stays::Strict, "order", &candidates())
+                .reason,
+            Reason::First
+        );
+        assert_eq!(
+            state
+                .order(&fork, Stays::Session, "order", &candidates())
+                .reason,
+            Reason::First
+        );
+
+        state.flush();
+        let reloaded = AffinityState::with_clock(&path, Arc::new(SystemTime::now), Duration::ZERO);
+        assert!(reloaded.stick("demo|parent").is_some());
+        assert_eq!(
+            reloaded
+                .order(&fork, Stays::Strict, "order", &candidates())
+                .reason,
+            Reason::First
+        );
+    }
+
+    #[test]
+    fn d244_strict_subagent_follows_its_lead_when_routing_does_not_spread() {
+        let state = AffinityState::in_memory();
+        state.answered("demo|session", "second", "model", 1, usage(0, 3000));
+        let subagent = Conversation::new("demo|session|agent:one", 1, false);
+        let candidates = candidates();
+        for routing in ["order", "weight", "free", "fast", "cheap"] {
+            let decision = state.order(&subagent, Stays::Strict, routing, &candidates);
+            assert_eq!(decision.order, [1, 0], "{routing}");
+            assert_eq!(decision.reason, Reason::First, "{routing}");
+        }
+        assert_eq!(
+            state
+                .order(&subagent, Stays::Session, "order", &candidates)
+                .order,
+            [0, 1]
+        );
+        assert_eq!(
+            state
+                .order(&subagent, Stays::Strict, "rotate", &candidates)
+                .order[0],
+            0
+        );
     }
 }

@@ -241,6 +241,11 @@ impl UpstreamProvider for ClaudeUpstream {
         inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
         reject_non_text(&request)?;
+        if let Some(error) =
+            crate::said_out::block_request(&self.host, &self.account, &request.model)
+        {
+            return Err(error);
+        }
         self.bridge.use_ask(self.host.ask().clone());
         let advisor_model = crate::bridge::advisor::prepare(&mut request, self.host.ask());
         let guard = CancelGuard::arm(
@@ -550,6 +555,13 @@ impl ClaudeUpstream {
         let (events, calls, session) = match result {
             Ok(decoded) => decoded,
             Err(error) => {
+                crate::said_out::note_bridge(
+                    &self.host,
+                    &self.account,
+                    &request.model,
+                    &error,
+                    self.host.clock().now(),
+                );
                 if let Some(run_id) = run_id {
                     if error.kind() == hofund_plugin_api::PluginErrorKind::Quota {
                         self.bridge.keep_for_reset(run_id, request, &self.account);

@@ -49,6 +49,12 @@ pub(crate) fn line_denies_account(message: &str) -> bool {
     usage_sign_in_denied().is_match(message) || usage_limit_denied().is_match(message)
 }
 
+/// Whether `message` says the account itself is signed out or unauthorized.
+#[must_use]
+pub(crate) fn sign_in_refused(message: &str) -> bool {
+    usage_sign_in_denied().is_match(message)
+}
+
 fn usage_sign_in_denied() -> &'static RegexSet {
     static RE: OnceLock<RegexSet> = OnceLock::new();
     RE.get_or_init(|| {

@@ -981,6 +981,7 @@ QuotaResetOutcome::fn new (code : impl Into < String >) -> Self
 QuotaWindow
 QuotaWindow #[non_exhaustive] derives(Clone, Debug, PartialEq)
 QuotaWindow::const fn blocking (& self) -> bool
+QuotaWindow::const fn held (& self) -> bool
 QuotaWindow::const fn limit (& self) -> Option < u64 >
 QuotaWindow::const fn provider_amount (& self) -> Option < f64 >
 QuotaWindow::const fn provider_limit (& self) -> Option < f64 >
@@ -990,6 +991,7 @@ QuotaWindow::const fn runs_out_at (& self) -> Option < SystemTime >
 QuotaWindow::const fn used (& self) -> u64
 QuotaWindow::const fn window_span (& self) -> Option < Duration >
 QuotaWindow::const fn with_blocking (mut self , blocking : bool) -> Self
+QuotaWindow::const fn with_held (mut self , held : bool) -> Self
 QuotaWindow::const fn with_runs_out (mut self , at : Option < SystemTime > , remaining : Option < f64 >) -> Self
 QuotaWindow::const fn with_window_span (mut self , span : Duration) -> Self
 QuotaWindow::fn display (& self) -> & str

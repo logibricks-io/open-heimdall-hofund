@@ -1452,6 +1452,36 @@ fn r5_18_complete_sign_in_rejects_idle_pending() {
 }
 
 #[test]
+fn d254_a_limit_line_counts_as_spent_and_a_401_does_not() {
+    let dir = tempfile::tempdir().expect("dir");
+    let limit_host = host(&dir);
+    let sub = subscription(&limit_host);
+    let id = account_id_from(&["claude", UUID]);
+    store(&limit_host, &id, &signed_in_blob());
+    limit_host
+        .process()
+        .script_piped(PipedScript::new().exits(|_| {
+            vec!["You've hit your weekly limit · resets Nov 24, 2027 at 5am (UTC)\n".to_owned()]
+        }));
+    let windows = block_on(sub.quota(&id, limit_host.context())).expect("limit counts as spent");
+    assert!(
+        windows
+            .iter()
+            .any(|window| window.held() && window.used() == 100)
+    );
+
+    let denied = tempfile::tempdir().expect("dir");
+    let denied_host = host(&denied);
+    let sub = subscription(&denied_host);
+    store(&denied_host, &id, &signed_in_blob());
+    denied_host
+        .process()
+        .script_piped(PipedScript::new().exits(|_| vec!["HTTP 401 Unauthorized\n".to_owned()]));
+    let error = block_on(sub.quota(&id, denied_host.context())).expect_err("401 stays an error");
+    assert_eq!(error.kind(), PluginErrorKind::Auth);
+}
+
+#[test]
 fn r5_19_quota_removes_credentials_file() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
