@@ -31,13 +31,17 @@
 //!
 //! Routing keeps ready members first in configured order, then keeps the
 //! cooling member/model pair whose rest ends soonest as a probe. Configured
-//! order breaks a tie, and a route with one member always tries that member.
-//! Other cooling pairs start left out. In a group, when the last asked member
-//! fails before content, a left-out guessed rate, outage, slow-start, or
-//! overload rest may be asked next, soonest first. Rate rests accept any own
-//! failure allowed for failover; the others accept only momentary failures.
-//! Quota, credit, key, and vendor-timed rests stay out. A member asked while
-//! resting receives no other hand-on for 30 seconds unless it answers.
+//! order breaks a tie, and a route with one member tries that member, including
+//! a guessed quota rest. Other cooling pairs start left out. In a group, when
+//! the last asked member fails before content, a left-out guessed rate, outage,
+//! slow-start, or overload rest may be asked next, soonest first. Rate rests
+//! accept any own failure allowed for failover; the others accept only momentary
+//! failures. Quota, credit, key, and vendor-timed rests stay out. A member asked
+//! while resting receives no other hand-on for 30 seconds unless it answers.
+//! A vendor-timed quota rest is not asked: when every member still to be asked
+//! rests that way, the stored refusal is returned with the soonest reset and
+//! nobody is called. If every member is cooling for the requested model, only
+//! the soonest probe is tried, unless that probe is a vendor-timed quota rest.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -267,6 +271,12 @@ impl Cooling {
 
     pub(crate) const fn hand_on(&self) -> Option<HandOnRest> {
         self.hand_on
+    }
+
+    /// Whether the refusal itself named this rest's deadline.
+    #[must_use]
+    pub const fn vendor_timed(&self) -> bool {
+        self.vendor_timed
     }
 }
 

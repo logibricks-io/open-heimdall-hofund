@@ -497,7 +497,11 @@ the client, but nobody rests. The router puts ready members first and retains
 the soonest cooling member as a probe. In a group, a last candidate's passing
 failure can also hand the request to one left-out member whose rate, outage,
 slow-start, or overload rest was guessed, soonest first. The shared cooldown
-book prevents another hand-on to that resting member for 30 seconds.
+book prevents another hand-on to that resting member for 30 seconds. A
+vendor-timed quota rest is the exception: when every member still to be asked
+rests that way, the stored refusal is returned with `Retry-After` at the
+soonest reset and nobody is asked. A token count skips that rest and uses the
+next member, or the local estimate when none remains.
 
 ## Failover decisions
 
