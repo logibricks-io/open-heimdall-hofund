@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- D-261: Over a Copilot model's image cap, earlier byte-identical image copies are now omitted first, using SHA-256 of each image content part and a placeholder that says the same image appears again later. The last copy is kept, including a copy in the latest user message, whose history copies are omitted. If the request is still over the cap, the oldest remaining image groups by last position are omitted with all their copies. Requests within the original image cap remain unchanged.
+- D-263: Chat usage counts a top-level `reasoning_tokens` as reasoning when `completion_tokens_details` has no positive count, on a whole reply and on a stream. A positive count in `completion_tokens_details` is kept, and the two numbers are not added.
 
 ### Security
 
