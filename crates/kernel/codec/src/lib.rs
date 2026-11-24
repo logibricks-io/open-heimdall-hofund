@@ -43,6 +43,7 @@ pub use openai_responses::{
     OpenAiResponses, PLUGIN_HOST_PREFIX, STREAM_CLIENT_PREFIXES, STREAM_TURN_METADATA_HEADER,
     STREAM_WINDOW_HEADER, UNMAPPED_TOOLS, compacts_in_stream_client, instructions_after_input,
 };
+pub use opening::history_id;
 pub use passthrough::{EndWatch, RawTap, StreamEnd};
 pub use refusal::refusal_error;
 pub use responses_empty::EMPTY_REPLY_MESSAGE;

@@ -793,6 +793,7 @@ id = "api"
 name = "Pay as you go"
 chat = "https://api.z.ai/api/paas/v4"
 anthropic = "https://api.z.ai/api/anthropic"
+catalog = "zhipuai"
 
 [[preset.region]]
 id = "coding"
@@ -800,6 +801,7 @@ name = "Coding Plan"
 chat = "https://api.z.ai/api/coding/paas/v4"
 responses = "https://api.z.ai/api/v1"
 anthropic = "https://api.z.ai/api/anthropic"
+catalog = "zai-coding-plan, zhipuai"
 
 [[preset]]
 id = "zhipu"
@@ -817,6 +819,7 @@ id = "api"
 name = "Pay as you go"
 chat = "https://open.bigmodel.cn/api/paas/v4"
 anthropic = "https://open.bigmodel.cn/api/anthropic"
+catalog = "zhipuai"
 
 [[preset.region]]
 id = "coding"
@@ -824,3 +827,4 @@ name = "Coding Plan"
 chat = "https://open.bigmodel.cn/api/coding/paas/v4"
 responses = "https://open.bigmodel.cn/api/v1"
 anthropic = "https://open.bigmodel.cn/api/anthropic"
+catalog = "zhipuai-coding-plan, zhipuai"
