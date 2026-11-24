@@ -2054,8 +2054,8 @@ impl DispatchState {
         let mut round = 0_u32;
         let mut wait_from = None;
         let mut asking: Vec<usize> = (start..self.resolved.hops.len()).collect();
+        let mut busy = Vec::new();
         loop {
-            let mut busy = Vec::new();
             let mut ending = Ending::Answered;
             match self.round(&asking, &mut busy, &mut ending).await {
                 Ok(Some(answered)) => {
@@ -2154,6 +2154,7 @@ impl DispatchState {
                     hook.wait(wait).await;
                     round = round.saturating_add(1);
                     asking = next;
+                    busy.clear();
                     continue;
                 }
             }
@@ -2163,10 +2164,12 @@ impl DispatchState {
                     hook.wait(patience::REGION_RETRY_PAUSE).await;
                 }
                 asking = std::mem::take(&mut self.region_reask);
+                busy.clear();
                 continue;
             }
             if let Some(next) = self.take_over_window() {
                 asking = next;
+                busy.clear();
                 continue;
             }
             break;

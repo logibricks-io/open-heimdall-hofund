@@ -1,6 +1,9 @@
 //! Group hand-on to members left out for guessed rests (D-265).
 
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -10,13 +13,14 @@ use hofund_ir::{ContentPart, Message, Request, Response, Role, StreamEvent, Text
 use hofund_plugin_api::{MemberId, MemberKey, PluginError, PresetId};
 use hofund_router::affinity::{AffinityState, CacheUsage, Conversation, Stays};
 use hofund_router::{
-    Completion, CooldownPolicy, Cooldowns, FailoverPolicy, Hop, Member, Route, Router,
+    Completion, CooldownPolicy, Cooldowns, FailoverPolicy, Hop, Member, Route, Router, WaitHook,
 };
 
 #[derive(Clone, Copy)]
 enum Reply {
     Unary,
     Status(u16, &'static str),
+    StatusThenUnary(u16, &'static str),
     StreamStatus(u16),
     StreamOk,
     Quota,
@@ -31,6 +35,7 @@ struct Fake {
     seen: Arc<Mutex<Vec<&'static str>>>,
     another: Arc<Mutex<Vec<bool>>>,
     reply: Reply,
+    hits: AtomicUsize,
 }
 
 #[async_trait]
@@ -56,9 +61,14 @@ impl Member for Fake {
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false),
         );
+        let hit = self.hits.fetch_add(1, Ordering::SeqCst);
         match self.reply {
             Reply::Unary => Ok(Completion::Unary(Box::new(answer()))),
             Reply::Status(status, message) => Err(PluginError::status_error(status, message)),
+            Reply::StatusThenUnary(status, message) if hit == 0 => {
+                Err(PluginError::status_error(status, message))
+            }
+            Reply::StatusThenUnary(_, _) => Ok(Completion::Unary(Box::new(answer()))),
             Reply::StreamStatus(status) => Ok(Completion::Stream(Box::pin(stream::iter([Err(
                 PluginError::status_error(status, "before content"),
             )])))),
@@ -155,6 +165,19 @@ impl Fixture {
     }
 
     fn router_with_stays(&self, replies: &[(&'static str, Reply)], stays: Stays) -> Router {
+        self.router_config(replies, stays, false)
+    }
+
+    fn patient_router(&self, replies: &[(&'static str, Reply)]) -> Router {
+        self.router_config(replies, Stays::Auto, true)
+    }
+
+    fn router_config(
+        &self,
+        replies: &[(&'static str, Reply)],
+        stays: Stays,
+        default_patience: bool,
+    ) -> Router {
         let hops = replies
             .iter()
             .map(|(id, reply)| {
@@ -164,17 +187,18 @@ impl Fixture {
                     seen: Arc::clone(&self.seen),
                     another: Arc::clone(&self.another),
                     reply: *reply,
+                    hits: AtomicUsize::new(0),
                 }) as Arc<dyn Member>)
             })
             .collect();
+        let route = Route::new(hops).with_routing("order").with_stays(stays);
+        let route = if default_patience {
+            route
+        } else {
+            route.with_patience(None)
+        };
         Router::from_routes(
-            BTreeMap::from([(
-                "demo".to_owned(),
-                Route::new(hops)
-                    .with_routing("order")
-                    .with_stays(stays)
-                    .with_patience(None),
-            )]),
+            BTreeMap::from([("demo".to_owned(), route)]),
             FailoverPolicy::default(),
         )
         .with_cooldowns(Arc::clone(&self.book))
@@ -195,6 +219,51 @@ impl Fixture {
 
 async fn dispatch(router: &Router) -> Result<hofund_router::Routed, hofund_router::RouterError> {
     router.dispatch(&Request::new("demo"), "test").await
+}
+
+struct ImmediateWait {
+    now: Arc<Mutex<Instant>>,
+    waits: Arc<Mutex<Vec<Duration>>>,
+}
+
+impl WaitHook for ImmediateWait {
+    fn wait(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        self.waits.lock().expect("waits").push(duration);
+        *self.now.lock().expect("clock") += duration;
+        Box::pin(async {})
+    }
+
+    fn now(&self) -> Instant {
+        *self.now.lock().expect("clock")
+    }
+}
+
+#[tokio::test]
+async fn d265_patience_replans_busy_probe_after_hand_on() {
+    for handed in [Reply::Status(503, "unavailable"), Reply::Quota] {
+        let fixture = Fixture::new();
+        fixture.rest("first", Rest::Rate);
+        fixture.rest("second", Rest::Rate);
+        let router = fixture.patient_router(&[
+            ("first", Reply::StatusThenUnary(503, "unavailable")),
+            ("second", handed),
+        ]);
+        let waits = Arc::new(Mutex::new(Vec::new()));
+        let wait = Arc::new(ImmediateWait {
+            now: Arc::clone(&fixture.now),
+            waits: Arc::clone(&waits),
+        });
+        let routed = router
+            .dispatch_with_wait(&Request::new("demo"), "test", None, Some(wait))
+            .await
+            .expect("busy probe is replanned");
+        assert_eq!(routed.upstream_id, "first");
+        assert_eq!(fixture.seen(), ["first", "second", "first"]);
+        assert_eq!(
+            waits.lock().expect("waits").as_slice(),
+            [Duration::from_secs(2)]
+        );
+    }
 }
 
 #[tokio::test]
