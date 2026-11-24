@@ -9,7 +9,7 @@
 //! | HTTP 429 | Uses the larger of the rate ladder and the retry hint, with the hint capped at 1 hour. The rate ladder starts at 1 minute, doubles for a new 429 within 30 minutes after the previous rate rest ended, and is capped at 30 minutes. A 429 during an active rest does not advance the ladder. A refusal saying the requested model's credentials are cooling uses a model-local ladder. |
 //! | Exhausted quota | Uses a body-written reset capped at 8 days, otherwise the header retry hint capped at 1 hour, or 15 minutes without a positive hint. Model-cooling wording, or a model-scope flag set by the plugin, scopes the rest to that model. |
 //! | API-key credit refusal | Climbs 30 minutes, 2 hours, 8 hours, 24 hours, 3 days, then 7 days after each ended credit rest, repeating 7 days. An active rest keeps its rung. A named reset wins and is capped at 35 days. A retry hint or soon/smaller-request wording stays flat at 30 minutes and off the ladder. Model-cooling wording keys the ladder by model. Success and manual removal restart the ladder. |
-//! | Windowed-account credit refusal | Uses a named body or header reset, the latest full-window reset, a retry hint longer than 5 hours, then 5 hours, capped at 35 days. A renewed window lifts a rest whose deadline was not vendor-named; a vendor-timed rest lifts only when a matching window's reset elapsed or moved to a later cycle. Failed and empty readings lift nothing. Other subscription accounts stay flat at 30 minutes. |
+//! | Windowed-account credit refusal | Uses a named body or header reset, the latest full-window reset, a retry hint longer than 5 hours, then 5 hours, capped at 35 days. A renewed window lifts a rest whose deadline was not vendor-named. For a vendor-timed quota or credit rest, the first renewed reading opens one upstream probe without lifting the rest; a refusal then closes that probe for the rest of the named deadline. A vendor-timed rest lifts only when a matching window's reset elapsed or moved to a later cycle. Failed and empty readings lift nothing. Other subscription accounts stay flat at 30 minutes. |
 //! | Passive observation | Zero remaining uses the window reset capped at 8 days, the retry hint capped at 1 hour, or 15 minutes without either. Positive remaining at least 98% used with a known positive limit rests only for a positive window reset capped at 8 days. Accounts spending credits and all other observations record nothing. Observations do not advance either failure ladder. |
 //! | Account verification | Rests the whole account for 30 minutes when the error asks for verification. It does not climb the generic ladder. The message is kept, including any link, and is not rewritten. |
 //! | Contained panic | Uses the generic failure ladder with [`CooldownCause::Panic`]. |
@@ -31,9 +31,11 @@
 //!
 //! Routing keeps ready members first in configured order, then keeps only the
 //! cooling member/model pair whose rest ends soonest as a probe. Configured
-//! order breaks a tie, other cooling pairs are skipped for that request, and a
-//! route with one member always tries that member. If every member is cooling
-//! for the requested model, only the soonest probe is tried.
+//! order breaks a tie and other cooling pairs are skipped for that request. A
+//! route with one member tries that member, including a guessed quota rest.
+//! A vendor-timed quota or credit rest is held without a call unless a renewed
+//! window opened its one-shot probe. When every remaining member is held, the
+//! stored refusal and soonest reset are returned.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -214,6 +216,8 @@ pub struct Cooling {
     guessed: bool,
     /// Whether the refusal itself named this rest's deadline.
     vendor_timed: bool,
+    /// Whether a renewed window has opened the one probe for this deadline.
+    renewal_probe: bool,
 }
 
 impl Cooling {
@@ -252,10 +256,26 @@ impl Cooling {
     pub const fn background_probe(&self) -> bool {
         self.background_probe
     }
+
+    /// Whether the refusal itself named this rest's deadline.
+    #[must_use]
+    pub const fn vendor_timed(&self) -> bool {
+        self.vendor_timed
+    }
+
+    /// Whether a renewed window lets one request probe this vendor-timed rest.
+    /// The rest remains active and still orders the member behind ready members.
+    #[must_use]
+    pub const fn renewal_probe(&self) -> bool {
+        self.renewal_probe
+    }
 }
 
 struct State {
     cooling: Option<Cooling>,
+    /// Deadline whose renewed-window probe was opened, including after a
+    /// refusal closed it. A different vendor-named deadline may probe once more.
+    renewal_asked: Option<Instant>,
     failures: u32,
     rate_failures: u32,
     rate_until: Option<Instant>,
@@ -273,6 +293,7 @@ impl State {
     fn new(now: Instant, revision: u64) -> Self {
         Self {
             cooling: None,
+            renewal_asked: None,
             failures: 0,
             rate_failures: 0,
             rate_until: None,
@@ -380,9 +401,11 @@ impl Cooldowns {
     }
 
     /// Records a successful account-wide window reading. A renewed full
-    /// window lifts a rest whose deadline was not named by the vendor. A
-    /// vendor-timed rest lifts only when a matching window's reset elapsed
-    /// or moved to a later cycle. A rate or generic rest stays.
+    /// window lifts a rest whose deadline was not named by the vendor. For a
+    /// vendor-timed quota or credit rest, it instead opens one upstream probe
+    /// without lifting the rest. A vendor-timed rest lifts only when a matching
+    /// window's reset elapsed or moved to a later cycle. A rate or generic rest
+    /// stays.
     pub fn observe_credit_window(&self, id: &MemberId, windows: &[QuotaWindow]) {
         let now = (self.clock)();
         let wall = SystemTime::now();
@@ -431,32 +454,57 @@ impl Cooldowns {
                 });
         book.credit_windows.insert(id.clone(), current);
         let key = CooldownKey::new(id, None);
-        let lifting = book
-            .states
-            .get(&key)
-            .and_then(|state| state.cooling.as_ref())
-            .filter(|cooling| {
-                (cooling.vendor_timed && started_again || !cooling.vendor_timed && renewed)
-                    && matches!(
-                        cooling.cause,
-                        CooldownCause::Credit | CooldownCause::Quota | CooldownCause::Observed
-                    )
-                    && now < cooling.until
-            })
-            .map(|cooling| cooling.cause);
-        if let Some(cause) = lifting {
-            let revision = next_revision(&mut book);
-            book.spent.remove(&key);
-            let state = book.states.get_mut(&key).expect("existing credit state");
-            state.cooling = None;
-            state.credit_rung = 0;
-            state.credit_until = None;
-            state.credit_ladder = false;
-            state.last_cause = None;
-            state.idle_since = Some(now);
-            state.touched = now;
-            state.revision = revision;
-            recover(&mut book, key, cause);
+        enum WindowAction {
+            Lift(CooldownCause),
+            Probe(Instant),
+        }
+        let action = book.states.get(&key).and_then(|state| {
+            let cooling = state.cooling.as_ref()?;
+            if !matches!(
+                cooling.cause,
+                CooldownCause::Credit | CooldownCause::Quota | CooldownCause::Observed
+            ) || now >= cooling.until
+            {
+                return None;
+            }
+            if (cooling.vendor_timed && started_again) || (!cooling.vendor_timed && renewed) {
+                Some(WindowAction::Lift(cooling.cause))
+            } else if cooling.vendor_timed && renewed && state.renewal_asked != Some(cooling.until)
+            {
+                Some(WindowAction::Probe(cooling.until))
+            } else {
+                None
+            }
+        });
+        match action {
+            Some(WindowAction::Lift(cause)) => {
+                let revision = next_revision(&mut book);
+                book.spent.remove(&key);
+                let state = book.states.get_mut(&key).expect("existing credit state");
+                state.cooling = None;
+                state.renewal_asked = None;
+                state.credit_rung = 0;
+                state.credit_until = None;
+                state.credit_ladder = false;
+                state.last_cause = None;
+                state.idle_since = Some(now);
+                state.touched = now;
+                state.revision = revision;
+                recover(&mut book, key, cause);
+            }
+            Some(WindowAction::Probe(until)) => {
+                let revision = next_revision(&mut book);
+                let state = book.states.get_mut(&key).expect("existing credit state");
+                state.renewal_asked = Some(until);
+                state
+                    .cooling
+                    .as_mut()
+                    .expect("probed credit rest")
+                    .renewal_probe = true;
+                state.touched = now;
+                state.revision = revision;
+            }
+            None => {}
         }
     }
 
@@ -1260,6 +1308,11 @@ impl Cooldowns {
         candidate.error = error.message().trim().chars().take(300).collect();
         candidate.background_probe = background_probe;
         let candidate_until = candidate.until;
+        if matches!(failure, Failure::Quota | Failure::Credit)
+            && let Some(current) = state.cooling.as_mut()
+        {
+            current.renewal_probe = false;
+        }
         let applied = apply(state, candidate, named);
         // The credit ladder moves only with the rest it wrote: a kept rest
         // keeps its rung and run (reference: internal/gateway/routing.go:
@@ -1808,6 +1861,7 @@ fn cooling(now: Instant, duration: Duration, cause: CooldownCause, failures: u32
         background_probe: false,
         guessed: false,
         vendor_timed: false,
+        renewal_probe: false,
     }
 }
 

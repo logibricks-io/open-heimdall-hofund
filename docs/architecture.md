@@ -460,7 +460,11 @@ is active. An API-key credit refusal climbs 30 minutes, 2 hours, 8 hours,
 manual removal restart it. Retry hints and soon/smaller-request wording stay
 flat at 30 minutes, while a named reset wins. Windowed subscription accounts
 use body reset, header reset, full-window reset, a retry hint longer than five
-hours, then five hours; a later renewed-window observation lifts the rest.
+hours, then five hours. A renewed window lifts a rest whose deadline was not
+vendor-named. A vendor-timed quota or credit rest instead opens one upstream
+probe while keeping the rest; a refusal at that named time closes the probe
+despite later renewed readings. When every remaining candidate is held, routing
+returns the first stored refusal and soonest reset without calling upstream.
 Other subscription accounts stay at 30 minutes. Named credit resets cap at 35
 days, generic/rate/quota header hints cap at one hour, and passive window resets
 cap at eight days. New events never shorten a longer active rest. A vendor-restricted account,

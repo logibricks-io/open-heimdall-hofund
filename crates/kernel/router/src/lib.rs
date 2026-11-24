@@ -1926,6 +1926,16 @@ fn region_key(provider: &str, model: &str) -> String {
     format!("{provider}\0{model}")
 }
 
+/// What to do with a vendor-timed quota rest before calling the member.
+enum QuotaHold {
+    /// This hop is not that kind of rest, or a renewed window opened its probe.
+    Proceed,
+    /// This hop rests that way, and a later hop can still be asked.
+    Skip,
+    /// Every hop still to be asked rests that way. Do not call.
+    Answer(PluginError),
+}
+
 impl DispatchState {
     /// Whether failover may ask a later member on this request.
     fn another_candidate_follows(&self, index: usize) -> bool {
@@ -2218,6 +2228,28 @@ impl DispatchState {
                 }
                 continue;
             }
+            match self.quota_hold(asking, index) {
+                QuotaHold::Proceed => {}
+                QuotaHold::Skip => {
+                    self.note_skip(index as u32, SkipReason::Quota);
+                    continue;
+                }
+                QuotaHold::Answer(error) => {
+                    let upstream_id = hop.member.route_id().to_owned();
+                    self.note_try(
+                        index,
+                        &hop,
+                        &upstream_model,
+                        true,
+                        try_status(&error),
+                        fail_text(&error),
+                    );
+                    self.last = Some((upstream_id, error));
+                    self.last_model = Some(upstream_model);
+                    *ending = Ending::Other;
+                    return Ok(None);
+                }
+            }
             if self.another_candidate_follows(index) {
                 attempt.extensions.insert(
                     hofund_plugin_api::ANOTHER_ROUTING_CANDIDATE,
@@ -2463,6 +2495,111 @@ impl DispatchState {
             }
         }
         Ok(None)
+    }
+
+    /// A vendor-timed quota or credit rest is not probed unless a renewed
+    /// window opened its one-shot probe. A later member that can still be asked
+    /// is tried instead. When every remaining member is held, the first stored
+    /// words and the soonest reset are the answer.
+    fn quota_hold(&self, asking: &[usize], index: usize) -> QuotaHold {
+        let Some(cooldowns) = self.cooldowns.as_ref() else {
+            return QuotaHold::Proceed;
+        };
+        let now = self.now();
+        let mut first_message = None;
+        let mut first_cause = None;
+        let mut soonest: Option<(Duration, u16)> = None;
+        let mut current_held = false;
+        let mut other = false;
+        let mut any = false;
+        for candidate in asking
+            .iter()
+            .copied()
+            .filter(|candidate| *candidate >= index)
+        {
+            let model = {
+                let hop = &self.resolved.hops[candidate];
+                hop.wire_model
+                    .clone()
+                    .unwrap_or_else(|| self.resolved.bare.clone())
+            };
+            if self.index_left_out(candidate, &model) {
+                continue;
+            }
+            any = true;
+            let held =
+                vendor_timed_allowance_rest(cooldowns, &self.resolved.hops[candidate], &model);
+            let Some(cooling) = held else {
+                other = true;
+                continue;
+            };
+            if candidate == index {
+                current_held = true;
+            }
+            if first_message.is_none() {
+                first_cause = Some(cooling.cause());
+                let text = cooling.error();
+                first_message = Some(if text.is_empty() {
+                    match cooling.cause() {
+                        CooldownCause::Credit => "out of credit".to_owned(),
+                        _ => "out of quota".to_owned(),
+                    }
+                } else {
+                    text.to_owned()
+                });
+            }
+            let left = cooling.until().saturating_duration_since(now);
+            let status = cooling.status().unwrap_or(429);
+            if soonest.as_ref().is_none_or(|(best, _)| left < *best) {
+                soonest = Some((left, status));
+            }
+        }
+        if !any || (!current_held && other) {
+            return QuotaHold::Proceed;
+        }
+        if other {
+            return QuotaHold::Skip;
+        }
+        let Some((left, status)) = soonest else {
+            return QuotaHold::Proceed;
+        };
+        let message = first_message.unwrap_or_else(|| "out of quota".to_owned());
+        let mut error = match first_cause {
+            Some(CooldownCause::Credit) => PluginError::credit_status(status, message),
+            _ => PluginError::quota_status(status, message),
+        }
+        .with_model_scope();
+        if !left.is_zero() {
+            error = error.with_reset_after(left).with_retry_after(left);
+        }
+        QuotaHold::Answer(error)
+    }
+
+    /// Whether this hop would be passed over before it is called.
+    fn index_left_out(&self, index: usize, model: &str) -> bool {
+        let (route, plugin, window, scope, wire) = {
+            let hop = &self.resolved.hops[index];
+            (
+                hop.member.route_id().to_owned(),
+                hop.member.plugin_id().to_owned(),
+                hop.context_window,
+                hop.member.scope_provider().to_owned(),
+                hop.wire_model.clone(),
+            )
+        };
+        let region_model = wire.as_deref().unwrap_or(&self.resolved.bare);
+        self.refused_providers.contains(&route)
+            || (!plugin.is_empty() && self.skipped_plugins.contains(&plugin))
+            || self
+                .region_closed
+                .contains_key(&region_key(&scope, region_model))
+            || self
+                .outgrown
+                .iter()
+                .any(|(known_route, known_model)| known_route == &route && known_model == model)
+            || self
+                .needs_room
+                .is_some_and(|tokens| window.is_some_and(|window| window > 0 && tokens >= window))
     }
 
     fn note_try(
@@ -2726,6 +2863,20 @@ fn cooling_labels(cooldowns: Option<&Arc<Cooldowns>>, resolved: &Resolved) -> Ve
             })
         })
         .collect()
+}
+
+/// The active rest when a quota or credit refusal named its deadline and no
+/// renewed window has opened its one-shot probe.
+fn vendor_timed_allowance_rest(cooldowns: &Cooldowns, hop: &Hop, model: &str) -> Option<Cooling> {
+    cooldowns
+        .cooling_for_model(hop.member.id(), model)
+        .filter(|cooling| {
+            matches!(
+                cooling.cause(),
+                CooldownCause::Quota | CooldownCause::Credit
+            ) && cooling.vendor_timed()
+                && !cooling.renewal_probe()
+        })
 }
 
 fn order_hops(hops: Vec<Hop>, cooldowns: &Cooldowns, bare: &str) -> Vec<Hop> {
