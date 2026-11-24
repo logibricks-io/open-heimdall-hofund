@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - D-244: Under strict stays, a token count for a conversation that already has an answerer asks only that account. The local estimate is used when that account is not a candidate or cannot count, and no other account is asked. A new named session whose request already contains a reply stays on the account that history belongs to. The history map is kept in memory only. An unanswered subagent stays with its lead even when the routing does not spread new sessions.
 
+### Security
+
+- Lockfile: `url` 2.5.8 -> 2.5.9 (RUSTSEC-2026-0592, stack overflow in `Url::origin()` on nested `blob:` URLs) and `cookie` 0.18.2 -> 0.18.3 (RUSTSEC-2026-0594, private cookie nonces can repeat after `fork`); `form_urlencoded` 1.2.2 -> 1.2.3 comes with `url` 2.5.9. `cargo-deny` fails on both advisories without this update.
+
 ## [0.2.0-rc.3] - 2026-11-20
 
 This is a third preview (prerelease) of v0.2.0. It carries the subscription,
