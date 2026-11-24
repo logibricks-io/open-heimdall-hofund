@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use futures_util::stream;
 use hofund_ir::{ContentPart, Message, Request, Response, Role, StreamEvent, TextDelta};
 use hofund_plugin_api::{MemberId, MemberKey, PluginError, PresetId};
+use hofund_router::affinity::{AffinityState, CacheUsage, Conversation, Stays};
 use hofund_router::{
     Completion, CooldownPolicy, Cooldowns, FailoverPolicy, Hop, Member, Route, Router,
 };
@@ -140,6 +141,10 @@ impl Fixture {
     }
 
     fn router(&self, replies: &[(&'static str, Reply)]) -> Router {
+        self.router_with_stays(replies, Stays::Auto)
+    }
+
+    fn router_with_stays(&self, replies: &[(&'static str, Reply)], stays: Stays) -> Router {
         let hops = replies
             .iter()
             .map(|(id, reply)| {
@@ -154,7 +159,10 @@ impl Fixture {
         Router::from_routes(
             BTreeMap::from([(
                 "demo".to_owned(),
-                Route::new(hops).with_routing("order").with_patience(None),
+                Route::new(hops)
+                    .with_routing("order")
+                    .with_stays(stays)
+                    .with_patience(None),
             )]),
             FailoverPolicy::default(),
         )
@@ -401,6 +409,41 @@ async fn d265_success_releases_the_hand_on_guard() {
     fixture.clear_seen();
     dispatch(&router).await.expect("second answer");
     assert_eq!(fixture.seen(), ["first", "second"]);
+}
+
+#[tokio::test]
+async fn d265_strict_stay_never_hands_on_to_another_member() {
+    for rest in [Rest::Rate, Rest::Outage] {
+        let fixture = Fixture::new();
+        fixture.rest("first", Rest::Rate);
+        fixture.rest("second", rest);
+        let state = AffinityState::in_memory();
+        state.answered(
+            "demo|session",
+            "preset:first:row",
+            "demo",
+            1,
+            CacheUsage::default(),
+        );
+        let router = fixture
+            .router_with_stays(
+                &[
+                    ("first", Reply::Status(503, "unavailable")),
+                    ("second", Reply::Unary),
+                ],
+                Stays::Strict,
+            )
+            .with_affinity(state);
+        let conversation = Conversation::new("demo|session", 2, false);
+        let result = router
+            .dispatch_with_context(&Request::new("demo"), "test", Some(&conversation), None)
+            .await;
+        assert!(
+            result.is_err(),
+            "strict stay handed on to the second member"
+        );
+        assert_eq!(fixture.seen(), ["first"]);
+    }
 }
 
 #[tokio::test]

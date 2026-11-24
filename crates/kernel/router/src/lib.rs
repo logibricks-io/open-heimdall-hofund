@@ -1237,7 +1237,7 @@ impl Router {
     ) -> Ordered {
         let mut moves = PoolMoves::default();
         let ordered = self.order_level(resolved, 0, resolved.hops.clone(), &mut moves);
-        let (ordered, hand_on) = if let Some(cooldowns) = &self.cooldowns {
+        let (ordered, left) = if let Some(cooldowns) = &self.cooldowns {
             order_hops(ordered, cooldowns, &resolved.bare)
         } else {
             (ordered, Vec::new())
@@ -1376,10 +1376,12 @@ impl Router {
                 }
             }
         }
-        let (mut hops, _) = if strict {
+        let (mut hops, hand_on) = if strict {
             (ordered, Vec::new())
         } else if let Some(cooldowns) = &self.cooldowns {
-            order_hops(ordered, cooldowns, &resolved.bare)
+            let mut candidates = ordered;
+            candidates.extend(left);
+            order_hops(candidates, cooldowns, &resolved.bare)
         } else {
             (ordered, Vec::new())
         };
