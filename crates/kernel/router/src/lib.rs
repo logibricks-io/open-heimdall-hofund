@@ -935,6 +935,8 @@ impl Router {
         self.refresh_free(&mut resolved).await;
         let input_tokens = estimate_input_tokens(request);
         let ordered = self.order_for(&resolved, conversation);
+        let rest_left = resolved.pool_asked && !ordered.hand_on.is_empty();
+        let hand_on = ordered.hand_on;
         resolved.hops = ordered.hops;
         if let Some(conversation) = conversation {
             resolved.hops =
@@ -945,13 +947,12 @@ impl Router {
         // estimate. Other strategies keep their order: a known-too-small
         // member is still asked, and later ones are skipped only after an
         // overflow (`needs_room`).
-        let over_window = if resolved.routing == "fit" {
-            let (fitting, over_window) = split_over_window(resolved.hops, input_tokens);
-            resolved.hops = fitting;
-            over_window
+        let (fitting, hand_on, over_window) = if resolved.routing == "fit" {
+            split_over_window(resolved.hops, hand_on, input_tokens)
         } else {
-            Vec::new()
+            (resolved.hops, hand_on, Vec::new())
         };
+        resolved.hops = fitting;
         resolved.spent = self.spent(&resolved);
         if let Some(trace) = trace.as_mut() {
             trace.set_routing(&resolved.routing);
@@ -983,9 +984,9 @@ impl Router {
             request: request.clone(),
             inbound_protocol: inbound_protocol.to_owned(),
             hook,
+            rest_left,
             hand_on: if resolved.pool_asked {
-                ordered
-                    .hand_on
+                hand_on
                     .into_iter()
                     .filter(|hop| {
                         let model = hop.wire_model.as_deref().unwrap_or(&resolved.bare);
@@ -1880,6 +1881,7 @@ struct DispatchState {
     request: Request,
     inbound_protocol: String,
     hook: Option<Arc<dyn AttemptHook>>,
+    rest_left: bool,
     hand_on: Vec<Hop>,
     resolved: Resolved,
     policy: FailoverPolicy,
@@ -1929,31 +1931,50 @@ struct Answered {
     clear_placeholder_served: bool,
 }
 
-/// Splits `hops` into members that may hold `tokens` and members whose known
-/// window is no larger than that estimate. An unknown window stays with the
-/// members that may hold the request. When every member is too small, or none
-/// is, the strategy order is returned unchanged and the second list is empty.
-fn split_over_window(hops: Vec<Hop>, tokens: u64) -> (Vec<Hop>, Vec<Hop>) {
-    if hops.len() < 2 {
-        return (hops, Vec::new());
+/// Splits ordinary and left-out hops into members that may hold `tokens` and
+/// members whose known window is no larger than that estimate. An unknown
+/// window stays with the members that may hold the request. When every member
+/// is too small, or none is, both orders are returned unchanged.
+fn split_over_window(
+    hops: Vec<Hop>,
+    left: Vec<Hop>,
+    tokens: u64,
+) -> (Vec<Hop>, Vec<Hop>, Vec<Hop>) {
+    let total = hops.len() + left.len();
+    if total < 2 {
+        return (hops, left, Vec::new());
     }
-    let mut fitting = Vec::with_capacity(hops.len());
-    let mut small = Vec::new();
-    for hop in hops {
-        if hop
-            .context_window
+    let too_small = |hop: &Hop| {
+        hop.context_window
             .is_some_and(|window| window > 0 && tokens >= window)
-        {
-            small.push(hop);
-        } else {
-            fitting.push(hop);
+    };
+    let fitting_count = hops
+        .iter()
+        .chain(left.iter())
+        .filter(|hop| !too_small(hop))
+        .count();
+    if fitting_count == 0 || fitting_count == total {
+        return (hops, left, Vec::new());
+    }
+    let partition = |hops: Vec<Hop>| {
+        let mut fitting = Vec::with_capacity(hops.len());
+        let mut small = Vec::new();
+        for hop in hops {
+            if too_small(&hop) {
+                small.push(hop);
+            } else {
+                fitting.push(hop);
+            }
         }
+        (fitting, small)
+    };
+    let (mut fitting, mut over_window) = partition(hops);
+    let (mut left_fitting, left_small) = partition(left);
+    over_window.extend(left_small);
+    if fitting.is_empty() && !left_fitting.is_empty() {
+        fitting.push(left_fitting.remove(0));
     }
-    if fitting.is_empty() || small.is_empty() {
-        fitting.extend(small);
-        return (fitting, Vec::new());
-    }
-    (fitting, small)
+    (fitting, left_fitting, over_window)
 }
 
 /// Quota or credit, and not a refusal, a passing retry, or an overflow.
@@ -2332,7 +2353,7 @@ impl DispatchState {
                 }
                 continue;
             }
-            if !self.hand_on.is_empty()
+            if self.rest_left
                 && let Some(cooldowns) = &self.cooldowns
             {
                 cooldowns.note_asked_while_cooling(hop.member.id(), &upstream_model);
@@ -2767,7 +2788,7 @@ impl DispatchState {
                 .hops
                 .get(*later)
                 .is_some_and(|hop| !self.member_skipped(hop))
-        })
+        }) || self.hand_on.iter().any(|hop| !self.member_skipped(hop))
     }
 
     fn member_skipped(&self, hop: &Hop) -> bool {

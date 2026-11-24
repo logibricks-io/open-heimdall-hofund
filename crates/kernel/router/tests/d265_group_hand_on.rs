@@ -211,6 +211,30 @@ impl Fixture {
         .with_cooldowns(Arc::clone(&self.book))
     }
 
+    fn fit_router(&self, replies: &[(&'static str, Reply, Option<u64>)]) -> Router {
+        let hops = replies
+            .iter()
+            .map(|(id, reply, window)| {
+                let mut hop = Hop::new(Arc::new(Fake {
+                    id,
+                    member_id: member_id(id),
+                    seen: Arc::clone(&self.seen),
+                    another: Arc::clone(&self.another),
+                    now: Arc::clone(&self.now),
+                    reply: *reply,
+                    hits: AtomicUsize::new(0),
+                }) as Arc<dyn Member>);
+                hop.context_window = *window;
+                hop
+            })
+            .collect();
+        Router::from_routes(
+            BTreeMap::from([("demo".to_owned(), Route::new(hops).with_routing("fit"))]),
+            FailoverPolicy::default(),
+        )
+        .with_cooldowns(Arc::clone(&self.book))
+    }
+
     fn clear_seen(&self) {
         self.seen.lock().expect("seen").clear();
     }
@@ -226,6 +250,14 @@ impl Fixture {
 
 async fn dispatch(router: &Router) -> Result<hofund_router::Routed, hofund_router::RouterError> {
     router.dispatch(&Request::new("demo"), "test").await
+}
+
+fn long_request() -> Request {
+    let mut request = Request::new("demo");
+    let mut message = Message::new(Role::User);
+    message.content.push(ContentPart::text("x".repeat(20_000)));
+    request.messages.push(message);
+    request
 }
 
 struct ImmediateWait {
@@ -271,6 +303,54 @@ async fn d265_patience_replans_busy_probe_after_hand_on() {
             [Duration::from_secs(2)]
         );
     }
+}
+
+#[tokio::test]
+async fn d265_probe_with_only_ineligible_companion_starts_guard() {
+    let fixture = Fixture::new();
+    fixture.rest("first", Rest::Rate);
+    fixture.rest("second", Rest::Quota);
+    let first_router = fixture.router(&[
+        ("first", Reply::Status(401, "bad key")),
+        ("second", Reply::Unary),
+    ]);
+    assert!(dispatch(&first_router).await.is_err());
+    assert_eq!(fixture.seen(), ["first"]);
+
+    fixture.rest("third", Rest::Overload);
+    let next_router = fixture.router(&[
+        ("first", Reply::Unary),
+        ("second", Reply::Unary),
+        ("third", Reply::Status(503, "unavailable")),
+    ]);
+    fixture.clear_seen();
+    assert!(dispatch(&next_router).await.is_err());
+    assert_eq!(fixture.seen(), ["third"]);
+}
+
+#[tokio::test]
+async fn d265_fit_applies_windows_to_left_out_members() {
+    let fixture = Fixture::new();
+    fixture.rest("mid", Rest::Rate);
+    fixture.rest("wide", Rest::Rate);
+    fixture.rest("small", Rest::Rate);
+    let router = fixture.fit_router(&[
+        ("small", Reply::Unary, Some(4_000)),
+        ("mid", Reply::Status(401, "bad key"), Some(100_000)),
+        ("wide", Reply::Quota, Some(1_000_000)),
+    ]);
+    assert!(router.dispatch(&long_request(), "test").await.is_err());
+    assert_eq!(fixture.seen(), ["mid", "wide"]);
+
+    let fixture = Fixture::new();
+    fixture.rest("mid", Rest::Rate);
+    fixture.rest("small", Rest::Rate);
+    let router = fixture.fit_router(&[
+        ("small", Reply::Unary, Some(4_000)),
+        ("mid", Reply::Status(500, "failed"), Some(100_000)),
+    ]);
+    assert!(router.dispatch(&long_request(), "test").await.is_err());
+    assert_eq!(fixture.seen(), ["mid"]);
 }
 
 #[tokio::test]
