@@ -2142,7 +2142,8 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
         turn.number,
         turn.within,
     )
-    .with_body(bytes.to_vec());
+    .with_body(bytes.to_vec())
+    .with_named_session(!routing_session.is_empty());
     let router = app.snapshot.load();
     let inner_hook = ask.as_ref().map(|ask| ask.attempt());
     let attempt: Option<Arc<dyn AttemptHook>> =
@@ -2507,9 +2508,28 @@ async fn count_tokens(
         Ok(model_request) => model_request,
         Err(error) => return coded(codec.as_ref(), StatusCode::BAD_REQUEST, &error.to_string()),
     };
+    let mut identity_headers = Vec::new();
+    for name in SESSION_HEADERS.iter().copied().chain([SUBAGENT_HEADER]) {
+        if let Some(value) = headers.get(name).and_then(|value| value.to_str().ok()) {
+            identity_headers.push((name, value));
+        }
+    }
+    let turn = turn_in(&model_request);
+    let conversation = hofund_router::affinity::Conversation::new(
+        conversation_key(&model_request.model, &identity_headers, &bytes),
+        turn.number,
+        turn.within,
+    )
+    .with_body(bytes.to_vec())
+    .with_named_session(!native_session_of(&identity_headers).is_empty());
     let router = app.snapshot.load();
     match router
-        .count_scoped(&model_request, codec.id(), Some(&route_scope(&identity)))
+        .count_scoped_conversation(
+            &model_request,
+            codec.id(),
+            Some(&route_scope(&identity)),
+            Some(&conversation),
+        )
         .await
     {
         Ok(count) => json_response(

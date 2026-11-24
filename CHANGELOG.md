@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- D-244: Under strict stays, a token count for a conversation that already has an answerer asks only that account. The local estimate is used when that account is not a candidate or cannot count, and no other account is asked. A new named session whose request already contains a reply stays on the account that history belongs to. The history map is kept in memory only. An unanswered subagent stays with its lead even when the routing does not spread new sessions.
+
 ## [0.2.0-rc.3] - 2026-11-20
 
 This is a third preview (prerelease) of v0.2.0. It carries the subscription,
