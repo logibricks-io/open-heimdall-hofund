@@ -984,7 +984,19 @@ impl Router {
             inbound_protocol: inbound_protocol.to_owned(),
             hook,
             hand_on: if resolved.pool_asked {
-                ordered.hand_on
+                ordered
+                    .hand_on
+                    .into_iter()
+                    .filter(|hop| {
+                        let model = hop.wire_model.as_deref().unwrap_or(&resolved.bare);
+                        self.cooldowns
+                            .as_ref()
+                            .and_then(|cooldowns| {
+                                cooldowns.cooling_for_model(hop.member.id(), model)
+                            })
+                            .is_some_and(|cooling| cooling.hand_on().is_some())
+                    })
+                    .collect()
             } else {
                 Vec::new()
             },
@@ -2042,7 +2054,7 @@ impl DispatchState {
         let position = self.hand_on.iter().position(|hop| {
             let model = hop.wire_model.as_deref().unwrap_or(&bare);
             let Some(cooling) = cooldowns.cooling_for_model(hop.member.id(), model) else {
-                return false;
+                return momentary;
             };
             let accepts = match cooling.hand_on() {
                 Some(HandOnRest::Rate) => true,

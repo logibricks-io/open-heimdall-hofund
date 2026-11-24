@@ -20,6 +20,7 @@ use hofund_router::{
 enum Reply {
     Unary,
     Status(u16, &'static str),
+    StatusAdvance(u16, &'static str, u64),
     StatusThenUnary(u16, &'static str),
     StreamStatus(u16),
     StreamOk,
@@ -34,6 +35,7 @@ struct Fake {
     member_id: MemberId,
     seen: Arc<Mutex<Vec<&'static str>>>,
     another: Arc<Mutex<Vec<bool>>>,
+    now: Arc<Mutex<Instant>>,
     reply: Reply,
     hits: AtomicUsize,
 }
@@ -65,6 +67,10 @@ impl Member for Fake {
         match self.reply {
             Reply::Unary => Ok(Completion::Unary(Box::new(answer()))),
             Reply::Status(status, message) => Err(PluginError::status_error(status, message)),
+            Reply::StatusAdvance(status, message, seconds) => {
+                *self.now.lock().expect("clock") += Duration::from_secs(seconds);
+                Err(PluginError::status_error(status, message))
+            }
             Reply::StatusThenUnary(status, message) if hit == 0 => {
                 Err(PluginError::status_error(status, message))
             }
@@ -186,6 +192,7 @@ impl Fixture {
                     member_id: member_id(id),
                     seen: Arc::clone(&self.seen),
                     another: Arc::clone(&self.another),
+                    now: Arc::clone(&self.now),
                     reply: *reply,
                     hits: AtomicUsize::new(0),
                 }) as Arc<dyn Member>)
@@ -446,6 +453,20 @@ async fn d265_stream_failure_before_content_hands_on() {
         ("second", Reply::StreamOk),
     ]);
     let routed = dispatch(&router).await.expect("stream hand-on");
+    assert_eq!(routed.upstream_id, "second");
+    assert_eq!(fixture.seen(), ["first", "second"]);
+}
+
+#[tokio::test]
+async fn d265_momentary_failure_asks_member_whose_rest_expired() {
+    let fixture = Fixture::new();
+    fixture.rest("first", Rest::Rate);
+    fixture.rest("second", Rest::Rate);
+    let router = fixture.router(&[
+        ("first", Reply::StatusAdvance(503, "unavailable", 55)),
+        ("second", Reply::Unary),
+    ]);
+    let routed = dispatch(&router).await.expect("ready member answers");
     assert_eq!(routed.upstream_id, "second");
     assert_eq!(fixture.seen(), ["first", "second"]);
 }
