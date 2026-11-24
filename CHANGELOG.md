@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- D-263: Chat usage counts a top-level `reasoning_tokens` as reasoning when `completion_tokens_details` has no positive count, on a whole reply and on a stream. A positive count in `completion_tokens_details` is kept, and the two numbers are not added.
+
 ## [0.2.0-rc.3] - 2026-11-20
 
 This is a third preview (prerelease) of v0.2.0. It carries the subscription,

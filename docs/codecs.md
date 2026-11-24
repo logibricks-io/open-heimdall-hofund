@@ -572,6 +572,12 @@ optional.
 | `cache_write_tokens` | `cache_creation_input_tokens` | omitted | omitted | omitted |
 | `reasoning_tokens` | omitted | `completion_tokens_details.reasoning_tokens` | `output_tokens_details.reasoning_tokens` | `thoughtsTokenCount` |
 
+Chat Completions also reads a top-level `usage.reasoning_tokens` when
+`completion_tokens_details` is absent or its `reasoning_tokens` is zero. A
+positive `completion_tokens_details.reasoning_tokens` is the count, and the
+two numbers are not added. Encode still writes the count under
+`completion_tokens_details.reasoning_tokens`.
+
 Responses keeps protocol totals beside the cache counters. It does not subtract
 cached tokens from `input_tokens`. A null `error` is dropped. A non-null
 `error` stays in the response bag. The `object` field is discarded.
