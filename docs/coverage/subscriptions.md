@@ -138,6 +138,15 @@ error; the CLI prints the full reason string.
 Overage handling and Sonnet-only week scopes depend on Claude quota reading,
 which is not implemented yet (`quota()` returns unsupported).
 
+D-254 keeps a limit the agent has already hit until the reset that line names.
+A failed `/usage` counts as spent when the output is that limit line, or when
+a session log has a `rate_limit` refusal since this account was the one in
+use. A 401 does not. `/usage` waits 45 seconds. A bridge rejection records
+the reset the vendor named, and a limit of one model family holds the account
+out only while the agent is on that family. The record is
+`allowance-limits.json` in plugin state. Tests use a scripted process and
+fixtures only.
+
 ## Priority suggestion
 
 - P1: codex (ChatGPT via Codex backend), claude bridge, copilot (+GHE), gemini Code Assist. These four built-ins are still in magpie core, and the P1 agents use them.

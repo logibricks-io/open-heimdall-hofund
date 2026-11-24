@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use hofund_plugin_api::{ContentPart, PluginError, Request, StreamEvent};
 
-use super::decode::{Decoder, Step};
+use super::decode::{Decoder, RateLimitInfo, ResultError, Step};
 use super::wsl::wrap_argv;
 
 /// Environment names stripped from the inherited host environment before
@@ -194,6 +194,7 @@ pub(crate) fn workdir(spec: &StartSpec) -> &std::path::Path {
 pub(crate) fn events_from_stdout(stdout: &str) -> Result<Vec<StreamEvent>, PluginError> {
     let mut decoder = Decoder::new();
     let mut events = Vec::new();
+    let mut rejected = None;
     for line in stdout.lines() {
         match decoder.push_line(line) {
             Some(Step::Events(batch)) => {
@@ -205,12 +206,21 @@ pub(crate) fn events_from_stdout(stdout: &str) -> Result<Vec<StreamEvent>, Plugi
                 events.extend(batch);
             }
             Some(Step::ResultError(error)) => {
-                return Err(super::failure::classify(&error));
+                return Err(limited(&error, rejected.as_ref()));
             }
-            Some(Step::Session(_) | Step::RateLimit(_) | Step::Completed) | None => {}
+            Some(Step::RateLimit(info)) => {
+                if info.status.as_deref() == Some("rejected") {
+                    rejected = Some(info);
+                }
+            }
+            Some(Step::Session(_) | Step::Completed) | None => {}
         }
     }
     Ok(events)
+}
+
+fn limited(error: &ResultError, rejected: Option<&RateLimitInfo>) -> PluginError {
+    super::failure::classify_limited(error, rejected, std::time::SystemTime::now())
 }
 
 /// Tool-call id and name pairs decoded from a stream-json turn.
@@ -223,6 +233,7 @@ pub(crate) fn events_allowing_tools(
     let mut decoder = Decoder::new();
     let mut events = Vec::new();
     let mut calls = Vec::new();
+    let mut rejected = None;
     for line in stdout.lines() {
         match decoder.push_line(line) {
             Some(Step::Events(batch)) => {
@@ -234,9 +245,14 @@ pub(crate) fn events_allowing_tools(
                 events.extend(batch);
             }
             Some(Step::ResultError(error)) => {
-                return Err(super::failure::classify(&error));
+                return Err(limited(&error, rejected.as_ref()));
             }
-            Some(Step::Session(_) | Step::RateLimit(_) | Step::Completed) | None => {}
+            Some(Step::RateLimit(info)) => {
+                if info.status.as_deref() == Some("rejected") {
+                    rejected = Some(info);
+                }
+            }
+            Some(Step::Session(_) | Step::Completed) | None => {}
         }
     }
     Ok((events, calls))
@@ -804,5 +820,25 @@ mod tests {
             kept_wslenv.contains("CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT"),
             "{kept_wslenv}"
         );
+    }
+
+    #[test]
+    fn d254_a_rejected_reset_is_carried_on_the_result_error() {
+        let resets_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_secs()
+            + 2 * 60 * 60;
+        let stdout = format!(
+            r#"{{"type":"rate_limit_event","status":"rejected","rate_limit_info":{{"status":"rejected","rateLimitType":"seven_day","resetsAt":{resets_at},"utilization":1}}}}
+{{"type":"result","subtype":"error","is_error":true,"result":"You've hit your weekly limit","api_error_status":429,"error":"rate_limit"}}
+"#
+        );
+        let error = events_from_stdout(&stdout).expect_err("quota");
+        assert_eq!(error.kind(), PluginErrorKind::Quota);
+        let after = error.reset_after().expect("reset");
+        assert!(after > std::time::Duration::from_secs(60 * 60));
+        assert!(after < std::time::Duration::from_secs(3 * 60 * 60));
+        assert!(!error.scopes_model());
     }
 }

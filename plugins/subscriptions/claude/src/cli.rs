@@ -32,7 +32,10 @@ pub(crate) const USAGE_ARGS: [&str; 12] = [
 ];
 
 /// How long `/usage` gets to finish.
-pub(crate) const USAGE_WAIT: Duration = Duration::from_secs(30);
+///
+/// The read has this deadline of its own. A refresh or other caller with a
+/// shorter budget does not cut it; dropping that caller still drops the read.
+pub(crate) const USAGE_WAIT: Duration = Duration::from_secs(45);
 
 /// Setup-token runs pass the token in this variable (value is never logged).
 pub(crate) const OAUTH_TOKEN_VAR: &str = "CLAUDE_CODE_OAUTH_TOKEN";
@@ -237,6 +240,11 @@ mod tests {
                 "--no-session-persistence",
             ]
         );
+    }
+
+    #[test]
+    fn d254_usage_wait_is_forty_five_seconds() {
+        assert_eq!(super::USAGE_WAIT, std::time::Duration::from_secs(45));
     }
 
     #[test]
