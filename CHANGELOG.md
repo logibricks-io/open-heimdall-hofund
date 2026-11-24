@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- D-260: a Google sign-in reply that says "Third-party quota reached" and "Resets in" rests that model until the written reset. A sibling model on the same account and another account are still asked. When every member still to be asked rests that way, the client gets 429 and `Retry-After` at the soonest reset, and that member is not asked. Verified with fixtures only.
+- D-260: a Google sign-in reply that says "Third-party quota reached" and "Resets in" rests that model until the written reset. A sibling model on the same account and another account are still asked. When every member still to be asked rests that way, the client gets 429 and `Retry-After` at the soonest reset, and that member is not asked. A token count during that rest does not ask the member; the next member counts, or the local estimate is used when none can. Verified with fixtures only.
 
 ## [0.2.0-rc.3] - 2026-11-20
 

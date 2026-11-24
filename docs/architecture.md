@@ -497,7 +497,8 @@ the client, but nobody rests. The router only orders
 members, putting ready members first and retaining the soonest cooling member
 as a probe. A vendor-timed quota rest is the exception: when every member still
 to be asked rests that way, the stored refusal is returned with `Retry-After`
-at the soonest reset and nobody is asked.
+at the soonest reset and nobody is asked. A token count skips that rest and
+uses the next member, or the local estimate when none remains.
 
 ## Failover decisions
 
