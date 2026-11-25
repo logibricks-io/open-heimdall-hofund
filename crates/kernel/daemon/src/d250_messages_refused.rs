@@ -35,7 +35,7 @@ async fn d250_custom_messages_relay_uses_chat_once_and_remembers_for_all_models(
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
         .respond_with(ResponseTemplate::new(200).set_body_string(CHAT_OK))
-        .expect(3)
+        .expect(4)
         .mount(&server)
         .await;
     let config = hofund_config::load(&format!(
@@ -58,8 +58,13 @@ async fn d250_custom_messages_relay_uses_chat_once_and_remembers_for_all_models(
     .expect("providers");
     let (routes, policy) = super::route_plan(&config, None, Some(&built), &limits);
     let cooldowns = Arc::new(Cooldowns::new(CooldownPolicy::default()));
-    let snapshot =
-        super::membership::open(&built, routes, policy, Arc::clone(&cooldowns)).expect("router");
+    let (snapshot, table) = super::membership::open_with_table(
+        &built,
+        routes.clone(),
+        policy.clone(),
+        Arc::clone(&cooldowns),
+    )
+    .expect("router");
 
     for model in ["model-a", "model-b", "model-a"] {
         let routed = snapshot
@@ -71,6 +76,17 @@ async fn d250_custom_messages_relay_uses_chat_once_and_remembers_for_all_models(
         assert_eq!(routed.protocol, "openai-chat");
         assert_chat_ok(routed.completion);
     }
+
+    table
+        .replace(&built, routes, policy)
+        .expect("unchanged config republishes");
+    let routed = snapshot
+        .load()
+        .dispatch(&Request::new("model-b"), "anthropic-messages")
+        .await
+        .expect("republish keeps the unfit mark");
+    assert_eq!(routed.protocol, "openai-chat");
+    assert_chat_ok(routed.completion);
     assert!(
         cooldowns
             .cooling(&super::membership::member_id("relay"))

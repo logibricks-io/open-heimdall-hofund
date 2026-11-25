@@ -1304,7 +1304,26 @@ impl Router {
     }
 
     fn order_hops(&self, resolved: &Resolved) -> Vec<Hop> {
-        self.order_for(resolved, None).hops
+        let ordered = self.order_for(resolved, None);
+        let hops = splice_protocol_alternates(ordered.hops, &ordered.protocol_alternates);
+        hops.iter()
+            .filter(|hop| {
+                let provider = hop.member.route_id();
+                if self.api_fitness.is_refused(provider, hop.member.protocol()) {
+                    return false;
+                }
+                let Some(primary) = hop.member.stands_in_for() else {
+                    return true;
+                };
+                hops.iter()
+                    .find(|candidate| candidate.member.id().to_string() == primary)
+                    .is_some_and(|candidate| {
+                        self.api_fitness
+                            .is_refused(provider, candidate.member.protocol())
+                    })
+            })
+            .cloned()
+            .collect()
     }
 
     fn order_for(
@@ -2170,7 +2189,12 @@ impl DispatchState {
             match self.round(&asking, &mut busy, &mut ending).await {
                 Ok(Some(answered)) => {
                     let next = answered.index + 1;
-                    let has_continuation = next < self.resolved.hops.len();
+                    let has_continuation = self
+                        .resolved
+                        .hops
+                        .iter()
+                        .skip(next)
+                        .any(|hop| !self.protocol_alternate_idle(hop));
                     let affinity_reason = self
                         .affinity
                         .as_ref()
@@ -2352,7 +2376,9 @@ impl DispatchState {
                     self.note_skip(
                         index as u32,
                         SkipReason::Failure {
-                            status: Some(403),
+                            status: self
+                                .api_fitness
+                                .refusal_status(hop.member.route_id(), hop.member.protocol()),
                             message: "the provider refuses this API for every model".to_owned(),
                         },
                     );
@@ -2555,11 +2581,12 @@ impl DispatchState {
                         &upstream_id,
                     );
                     let error = inferred.unwrap_or(error);
-                    if error
+                    if let Some(status) = error
                         .status()
-                        .is_some_and(|status| hofund_ir::api_refused(status, error.message()))
+                        .filter(|status| hofund_ir::api_refused(*status, error.message()))
                     {
-                        self.api_fitness.refuse(&upstream_id, hop.member.protocol());
+                        self.api_fitness
+                            .refuse(&upstream_id, hop.member.protocol(), status);
                     }
                     if decision::region_refused(&error) {
                         hop.member.close_idle_connections();

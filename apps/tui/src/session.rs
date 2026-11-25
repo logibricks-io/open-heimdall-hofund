@@ -1265,8 +1265,25 @@ fn provider_test_flash(
             .map(|error| error.message.clone())
             .unwrap_or_else(|| "failed".to_owned());
         (format!("failed {id}: {}", redact(&detail, None)), false)
-    } else if response.results.iter().any(|result| result.unserved) {
-        (format!("Not served for this key: {id}"), true)
+    } else if let Some(result) = response.results.iter().find(|result| result.unserved) {
+        let message = result
+            .error
+            .as_ref()
+            .map(|error| error.message.clone())
+            .unwrap_or_else(|| "probe failed".to_owned());
+        let detail = match result.status {
+            Some(status) => format!("{status} {message}"),
+            None => message,
+        };
+        let detail = redact(&detail, None);
+        if response.results.iter().any(|result| result.ok) {
+            (
+                format!("ok {id}; not served {}: {detail}", result.model),
+                true,
+            )
+        } else {
+            (format!("Not served for this key: {id}: {detail}"), true)
+        }
     } else if response.results.is_empty() {
         (format!("tested {id}"), true)
     } else {
@@ -1517,10 +1534,50 @@ mod tests {
         let mut result = hofund_control_client::hofund_control_proto::ProviderTestResult::default();
         result.unserved = true;
         result.status = Some(403);
+        result.error = Some(
+            hofund_control_client::hofund_control_proto::ControlError::new(
+                hofund_control_client::hofund_control_proto::ControlErrorKind::Upstream,
+                "This group does not allow /v1/messages dispatch",
+                "request-1",
+            ),
+        );
         response.results.push(result);
         assert_eq!(
             super::provider_test_flash("relay", &response),
-            ("Not served for this key: relay".to_owned(), true)
+            (
+                "Not served for this key: relay: 403 This group does not allow /v1/messages dispatch".to_owned(),
+                true
+            )
+        );
+    }
+
+    #[test]
+    fn d250_mixed_provider_test_reports_success_and_the_unserved_model() {
+        let mut response =
+            hofund_control_client::hofund_control_proto::ProviderTestResponse::default();
+        let mut ok = hofund_control_client::hofund_control_proto::ProviderTestResult::default();
+        ok.model = "chat-model".to_owned();
+        ok.ok = true;
+        response.results.push(ok);
+        let mut unserved =
+            hofund_control_client::hofund_control_proto::ProviderTestResult::default();
+        unserved.model = "messages-model".to_owned();
+        unserved.unserved = true;
+        unserved.status = Some(422);
+        unserved.error = Some(
+            hofund_control_client::hofund_control_proto::ControlError::new(
+                hofund_control_client::hofund_control_proto::ControlErrorKind::Upstream,
+                "This group does not allow /v1/messages dispatch",
+                "request-1",
+            ),
+        );
+        response.results.push(unserved);
+        assert_eq!(
+            super::provider_test_flash("relay", &response),
+            (
+                "ok relay; not served messages-model: 422 This group does not allow /v1/messages dispatch".to_owned(),
+                true
+            )
         );
     }
 }

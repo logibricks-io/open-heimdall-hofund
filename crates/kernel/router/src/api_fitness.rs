@@ -1,6 +1,6 @@
 //! Process-local memory of APIs a provider refuses for every model.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 /// Provider/protocol pairs that must not be asked again in this process.
@@ -9,21 +9,26 @@ use std::sync::{Arc, Mutex};
 /// no persistent representation: a restart lets the provider serve the API again.
 #[derive(Clone, Default)]
 pub struct ApiFitness {
-    refused: Arc<Mutex<BTreeSet<(String, String)>>>,
+    refused: Arc<Mutex<BTreeMap<(String, String), u16>>>,
 }
 
 impl ApiFitness {
-    pub(crate) fn refuse(&self, provider: &str, protocol: &str) {
+    pub(crate) fn refuse(&self, provider: &str, protocol: &str, status: u16) {
         self.refused
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .insert((provider.to_owned(), protocol.to_owned()));
+            .insert((provider.to_owned(), protocol.to_owned()), status);
     }
 
     pub(crate) fn is_refused(&self, provider: &str, protocol: &str) -> bool {
+        self.refusal_status(provider, protocol).is_some()
+    }
+
+    pub(crate) fn refusal_status(&self, provider: &str, protocol: &str) -> Option<u16> {
         self.refused
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .contains(&(provider.to_owned(), protocol.to_owned()))
+            .get(&(provider.to_owned(), protocol.to_owned()))
+            .copied()
     }
 }
