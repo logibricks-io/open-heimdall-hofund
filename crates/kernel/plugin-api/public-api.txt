@@ -988,11 +988,13 @@ QuotaWindow::const fn provider_limit (& self) -> Option < f64 >
 QuotaWindow::const fn resets_at (& self) -> Option < SystemTime >
 QuotaWindow::const fn runs_out (& self) -> Option < f64 >
 QuotaWindow::const fn runs_out_at (& self) -> Option < SystemTime >
+QuotaWindow::const fn trial_credits (& self) -> bool
 QuotaWindow::const fn used (& self) -> u64
 QuotaWindow::const fn window_span (& self) -> Option < Duration >
 QuotaWindow::const fn with_blocking (mut self , blocking : bool) -> Self
 QuotaWindow::const fn with_held (mut self , held : bool) -> Self
 QuotaWindow::const fn with_runs_out (mut self , at : Option < SystemTime > , remaining : Option < f64 >) -> Self
+QuotaWindow::const fn with_trial_credits (mut self , trial_credits : bool) -> Self
 QuotaWindow::const fn with_window_span (mut self , span : Duration) -> Self
 QuotaWindow::fn display (& self) -> & str
 QuotaWindow::fn excluded_models (& self) -> & [String]
