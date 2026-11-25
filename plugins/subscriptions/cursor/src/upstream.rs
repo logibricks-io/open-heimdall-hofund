@@ -2516,20 +2516,8 @@ mod tests {
             .await;
             let account = store_account(&host).await;
             let mut upstream = upstream(&host, &h1, h2.base_url(), account);
-            restore_production_usage_limits(&mut upstream);
-            let attempt = async {
-                let completion = upstream
-                    .execute(tool_request(), ProtocolId::OPENAI_CHAT)
-                    .await?;
-                collect(completion).await
-            };
-            let mut attempt = std::pin::pin!(attempt);
-            drive_until_http2_opening(attempt.as_mut(), &h2, 1).await;
-            advance_time(Duration::from_secs(2)).await;
-            let events = match race(attempt.as_mut(), advance_until_usage_polls(&h1, 1)).await {
-                Race::Left(result) => result.expect("stream"),
-                Race::Right(()) => drive_to_completion(attempt).await.expect("stream"),
-            };
+            apply_r9k_cross_step_limits(&mut upstream);
+            let events = run_tool_step(&upstream, &h2, &h1, 1, 1, tool_request()).await;
             assert_eq!(
                 last_message_usage(&events).expect("usage"),
                 &usage::from_dashboard(
@@ -3006,7 +2994,8 @@ mod tests {
 
     fn apply_r9k_cross_step_limits(upstream: &mut CursorUpstream) {
         restore_production_usage_limits(upstream);
-        upstream.limits.usage_first_wait = Duration::from_millis(10);
+        upstream.limits.usage_first_wait = Duration::ZERO;
+        upstream.limits.usage_interval = Duration::ZERO;
         upstream.limits.usage_give_up = Duration::from_millis(200);
     }
 
@@ -3066,10 +3055,7 @@ mod tests {
             .await;
             let account = store_account(&host).await;
             let mut upstream = upstream(&host, &h1, h2.base_url(), account);
-            restore_production_usage_limits(&mut upstream);
-            upstream.limits.usage_first_wait = Duration::from_millis(10);
-            upstream.limits.usage_give_up = Duration::from_millis(200);
-            upstream.test_conversation_id = Some(TEST_CONVERSATION.to_owned());
+            apply_r9k_cross_step_limits(&mut upstream);
             let events = run_tool_step(&upstream, &h2, &h1, 1, 1, tool_request()).await;
             let usage = last_message_usage(&events).expect("usage");
             assert!(deferred_usage(usage).is_none());
