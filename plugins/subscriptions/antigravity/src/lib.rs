@@ -43,7 +43,8 @@ static SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
     PluginId::from_static("antigravity"),
     "Google Antigravity",
     SignInFlowKind::Pkce,
-);
+)
+.with_stale_replica_quota(true);
 
 /// Registers the Antigravity subscription.
 #[must_use]
@@ -556,3 +557,13 @@ mod r49d_tests;
 mod r49e_tests;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod d256_tests {
+    use super::SPEC;
+
+    #[test]
+    fn d256_stale_replica_quota_is_opted_in() {
+        assert!(SPEC.stale_replica_quota());
+    }
+}
