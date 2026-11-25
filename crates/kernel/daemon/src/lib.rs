@@ -1313,6 +1313,7 @@ fn expand_route(
                     rank: 0,
                     wire_model: upstream.model.clone(),
                     max_output_tokens: upstream.max_output_tokens,
+                    catalog_output_tokens: None,
                     context_window: None,
                     routing: root.routing.clone(),
                     sink: root.sink,
@@ -1467,6 +1468,7 @@ fn push_provider(
             rank,
             wire_model: model.clone(),
             max_output_tokens: max_output_tokens.or(provider_cap),
+            catalog_output_tokens: hop_output(listed.as_ref()),
             context_window: hop_window(listed.as_ref()),
             routing: root.routing.clone(),
             sink: root.sink,
@@ -1548,6 +1550,12 @@ fn hop_window(listed: Option<&hofund_plugin_api::ModelSpec>) -> Option<u64> {
     listed
         .map(hofund_plugin_api::ModelSpec::context)
         .filter(|window| *window > 0)
+}
+
+fn hop_output(listed: Option<&hofund_plugin_api::ModelSpec>) -> Option<u64> {
+    listed
+        .map(hofund_plugin_api::ModelSpec::max_output)
+        .filter(|output| *output > 0)
 }
 
 fn free_hop(manual: bool, listed: Option<&hofund_plugin_api::ModelSpec>) -> bool {

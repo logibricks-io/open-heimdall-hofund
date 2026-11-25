@@ -63,6 +63,7 @@ fn make_router(
         member,
         wire_model: None,
         max_output_tokens: None,
+        catalog_output_tokens: None,
         context_window: None,
         patience,
         weight: 1,
