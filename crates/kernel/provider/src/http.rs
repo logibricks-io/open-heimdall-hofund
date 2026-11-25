@@ -662,12 +662,13 @@ impl Sent<'_> {
         // Cross-protocol only. Extensions are stripped on the way back,
         // except a served `service_tier`.
         if self.streaming {
+            let codec = self.codec;
             let events = SseEvents::new(
                 self.response.bytes_stream(),
-                self.codec.stream_decoder(),
+                codec.stream_decoder(),
                 self.cross_protocol,
             );
-            Ok(Completion::Stream(Box::pin(events)))
+            Ok(tag_codec(codec, Completion::Stream(Box::pin(events))))
         } else {
             let bytes = self.response.bytes().await.map_err(map_body)?;
             if let Some(error) =
@@ -680,8 +681,15 @@ impl Sent<'_> {
                 .decode_response(&bytes)
                 .map_err(|error| ProviderError::decode(error.to_string()))?;
             hofund_codec::service_tier::retain_response_tier(&mut decoded);
-            Ok(Completion::Unary(Box::new(decoded)))
+            Ok(tag_codec(self.codec, Completion::Unary(Box::new(decoded))))
         }
+    }
+}
+
+fn tag_codec(codec: &dyn Codec, completion: Completion) -> Completion {
+    match hofund_plugin_api::ProtocolId::try_from(codec.id()) {
+        Ok(id) => completion.produced(id),
+        Err(_) => completion,
     }
 }
 
@@ -902,9 +910,12 @@ pub(crate) async fn raw_completion(
     {
         return Err(ProviderError::from_plugin(error));
     }
-    Ok(Completion::Raw(Box::pin(futures_util::stream::once(
-        async move { Ok(bytes) },
-    ))))
+    Ok(tag_codec(
+        codec,
+        Completion::Raw(Box::pin(futures_util::stream::once(
+            async move { Ok(bytes) },
+        ))),
+    ))
 }
 
 async fn raw_stream(
@@ -938,7 +949,10 @@ async fn raw_stream(
     }
     let head = futures_util::stream::iter(buffered.into_iter().map(Ok));
     let rest = incoming.map(map_chunk);
-    Ok(Completion::Raw(Box::pin(head.chain(rest))))
+    Ok(tag_codec(
+        codec,
+        Completion::Raw(Box::pin(head.chain(rest))),
+    ))
 }
 
 fn stream_commits(event: &hofund_ir::StreamEvent) -> bool {

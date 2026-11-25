@@ -1058,7 +1058,7 @@ fn gl_request(model: &str, stream: bool) -> hofund_plugin_api::Request {
 }
 
 fn raw_text(completion: Completion) -> String {
-    let Completion::Raw(mut body) = completion else {
+    let Completion::Raw(mut body) = completion.peel() else {
         panic!("a same-protocol reply is passed on raw");
     };
     block_on(async move {
@@ -1239,7 +1239,7 @@ fn a_unary_reply_is_unwrapped_before_decoding() {
     let mut request = gl_request("gemini-2.5-pro", false);
     request.stream = false;
     let completion = block_on(upstream.execute(request, ProtocolId::OPENAI_CHAT)).expect("execute");
-    let Completion::Unary(response) = completion else {
+    let Completion::Unary(response) = completion.peel() else {
         panic!("a unary reply decodes");
     };
     let usage = response.usage.expect("usage from the lifted reply");

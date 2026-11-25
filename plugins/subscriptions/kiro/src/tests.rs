@@ -1030,7 +1030,7 @@ fn r51_6_unary_event_stream_returns_tools_and_accepts_images() {
         .expect("upstream");
     let completion =
         block_on(upstream.execute(request, ProtocolId::ANTHROPIC_MESSAGES)).expect("unary execute");
-    let Completion::Unary(response) = completion else {
+    let Completion::Unary(response) = completion.peel() else {
         panic!("expected unary response");
     };
     assert_eq!(response.message.content.len(), 2);
@@ -1108,6 +1108,7 @@ fn r51_7_loopback_stream_decodes_chunked_text_and_tool_deltas() {
             .execute(request, ProtocolId::ANTHROPIC_MESSAGES)
             .await
             .expect("stream execute")
+            .peel()
         else {
             panic!("expected stream");
         };

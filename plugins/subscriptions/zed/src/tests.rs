@@ -1195,7 +1195,7 @@ fn a2c_34_tools_execute_round_trip_ids_name_and_arguments() {
         tool_decl.get("name").and_then(|v| v.as_str()),
         Some("get_weather")
     );
-    let Completion::Unary(response) = completion else {
+    let Completion::Unary(response) = completion.peel() else {
         panic!("expected unary completion");
     };
     let tool = response
@@ -1299,7 +1299,7 @@ fn a2c_36_unary_fold_preserves_text_and_usage() {
     let completion =
         block_on(upstream_for(&host, &id).execute(request, ProtocolId::OPENAI_RESPONSES))
             .expect("execute");
-    let Completion::Unary(response) = completion else {
+    let Completion::Unary(response) = completion.peel() else {
         panic!("expected unary folded completion");
     };
     let text: String = response
@@ -2032,7 +2032,7 @@ fn a2c_60_tail_failed_stream_terminates_within_chunk_bound() {
     .expect("request");
     let completion = block_on(upstream_for(&host, &id).execute(request, ProtocolId::OPENAI_CHAT))
         .expect("execute");
-    let Completion::Raw(body) = completion else {
+    let Completion::Raw(body) = completion.peel() else {
         panic!("expected raw stream");
     };
     let bytes = collect_stream_bounded(body, 24);
@@ -2074,7 +2074,7 @@ fn execute_stream_sse(
     protocol: ProtocolId,
 ) -> Vec<u8> {
     let completion = block_on(upstream_for(host, id).execute(request, protocol)).expect("execute");
-    let Completion::Raw(body) = completion else {
+    let Completion::Raw(body) = completion.peel() else {
         panic!("expected raw streaming completion");
     };
     collect_stream(body)

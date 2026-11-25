@@ -115,7 +115,7 @@ fn r12d_eu_import_persists_host_and_uses_it_on_rpc() {
     let completion =
         block_on(upstream(&host, &id).execute(chat_request(), ProtocolId::OPENAI_CHAT))
             .expect("execute");
-    assert!(matches!(completion, Completion::Stream(_)));
+    assert!(matches!(completion.peel(), Completion::Stream(_)));
     let calls = host.http().calls();
     assert!(calls[1].uri().starts_with("https://eu.codeium.com/"));
     assert!(calls[2].uri().starts_with("https://eu.codeium.com/"));

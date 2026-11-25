@@ -392,9 +392,10 @@ pub(crate) async fn adapt_completion(
     if names.is_empty() {
         return Ok(completion);
     }
-    match completion {
+    let (codec, completion) = completion.split_produced();
+    let adapted = match completion {
         Completion::Raw(body) if streaming => {
-            Ok(Completion::Raw(unwrap_stream(body, names.clone())))
+            Ok::<_, PluginError>(Completion::Raw(unwrap_stream(body, names.clone())))
         }
         Completion::Raw(body) => {
             let mut bytes = Vec::new();
@@ -410,7 +411,11 @@ pub(crate) async fn adapt_completion(
             )))
         }
         other => Ok(other),
-    }
+    }?;
+    Ok(match codec {
+        Some(codec) => adapted.produced(codec),
+        None => adapted,
+    })
 }
 
 struct StreamState {

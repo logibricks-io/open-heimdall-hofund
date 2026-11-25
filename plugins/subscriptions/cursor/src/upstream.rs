@@ -945,7 +945,7 @@ mod tests {
     }
 
     async fn collect(completion: Completion) -> Result<Vec<StreamEvent>, PluginError> {
-        let Completion::Stream(mut stream) = completion else {
+        let Completion::Stream(mut stream) = completion.peel() else {
             panic!("Cursor execute returns a stream");
         };
         let mut events = Vec::new();
@@ -977,6 +977,7 @@ mod tests {
                 .execute(tool_request(), ProtocolId::OPENAI_CHAT)
                 .await
                 .expect("tool execute")
+                .peel()
             else {
                 panic!("stream");
             };
@@ -1044,6 +1045,7 @@ mod tests {
                 .execute(tool_request(), ProtocolId::OPENAI_CHAT)
                 .await
                 .expect("tool execute")
+                .peel()
             else {
                 panic!("stream");
             };
@@ -1089,6 +1091,7 @@ mod tests {
                 .execute(tool_request(), ProtocolId::OPENAI_CHAT)
                 .await
                 .expect("tool execute")
+                .peel()
             else {
                 panic!("stream");
             };
@@ -1139,6 +1142,7 @@ mod tests {
                 .execute(tool_request(), ProtocolId::OPENAI_CHAT)
                 .await
                 .expect("text after refusal")
+                .peel()
             else {
                 panic!("stream");
             };
@@ -1180,6 +1184,7 @@ mod tests {
                 .execute(tool_request(), ProtocolId::OPENAI_CHAT)
                 .await
                 .expect("text after refusal")
+                .peel()
             else {
                 panic!("stream");
             };
@@ -1333,6 +1338,7 @@ mod tests {
                 .execute(text_request(), ProtocolId::OPENAI_CHAT)
                 .await
                 .expect("first thinking event is enough")
+                .peel()
             else {
                 panic!("stream");
             };
@@ -1378,6 +1384,7 @@ mod tests {
                 .execute(tool_request(), ProtocolId::OPENAI_CHAT)
                 .await
                 .expect("first tool event is enough")
+                .peel()
             else {
                 panic!("stream");
             };
@@ -1427,6 +1434,7 @@ mod tests {
                 .execute(text_request(), ProtocolId::OPENAI_CHAT)
                 .await
                 .expect("first delta is enough")
+                .peel()
             else {
                 panic!("stream");
             };
@@ -2047,6 +2055,7 @@ mod tests {
                 hofund_kit_subscription::drive_http2_to_completion(execute, &h2, 1)
                     .await
                     .expect("text stream")
+                    .peel()
             else {
                 panic!("stream")
             };
@@ -2708,6 +2717,7 @@ mod tests {
                 .execute(max_model_request(), ProtocolId::OPENAI_CHAT)
                 .await
                 .expect("retry succeeds; the router does not see the first failure")
+                .peel()
             else {
                 panic!("stream");
             };
@@ -2734,6 +2744,7 @@ mod tests {
                 .execute(max_model_request(), ProtocolId::OPENAI_CHAT)
                 .await
                 .expect("remembered id starts in Max Mode")
+                .peel()
             else {
                 panic!("stream");
             };
@@ -2878,6 +2889,7 @@ mod tests {
                 .execute(request, ProtocolId::OPENAI_CHAT)
                 .await
                 .expect("picker execute")
+                .peel()
             else {
                 panic!("stream");
             };

@@ -755,11 +755,10 @@ async fn closed_idle_connection_is_retried() {
     let port = listener.local_addr().expect("addr").port();
     let release = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let flag = std::sync::Arc::clone(&release);
-    std::thread::spawn(move || {
+    let server = std::thread::spawn(move || {
         use std::io::{Read, Write};
         use std::sync::atomic::Ordering;
         let (mut stream, _) = listener.accept().expect("accept");
-        drop(listener);
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
             .expect("timeout");
@@ -775,6 +774,20 @@ async fn closed_idle_connection_is_retried() {
         while !flag.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(10));
         }
+        drop(stream);
+        let (mut stream, _) = listener.accept().expect("second accept");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("timeout");
+        let mut buf = [0_u8; 4096];
+        let _ = stream.read(&mut buf);
+        let body = r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#;
+        let header = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(header.as_bytes()).expect("write");
+        stream.write_all(body.as_bytes()).expect("write");
     });
     let client = support::builder()
         .timeout(Duration::from_secs(5))
@@ -801,27 +814,10 @@ upstreams = [\"primary\"]
     let first = post_text(&client, &running, "/v1/chat/completions", &token, chat).await;
     assert!(first.contains("ok"), "{first}");
 
-    let again = std::net::TcpListener::bind(("127.0.0.1", port)).expect("rebind");
-    let second = std::thread::spawn(move || {
-        use std::io::{Read, Write};
-        let (mut stream, _) = again.accept().expect("accept");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .expect("timeout");
-        let mut buf = [0_u8; 4096];
-        let _ = stream.read(&mut buf);
-        let body = r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#;
-        let header = format!(
-            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-            body.len()
-        );
-        stream.write_all(header.as_bytes()).expect("write");
-        stream.write_all(body.as_bytes()).expect("write");
-    });
     release.store(true, std::sync::atomic::Ordering::Relaxed);
     let retried = post_text(&client, &running, "/v1/chat/completions", &token, chat).await;
     assert!(retried.contains("ok"), "{retried}");
-    second.join().expect("second server");
+    server.join().expect("upstream");
     support::shutdown(running).await;
     fs::remove_dir_all(&dir).ok();
 }
