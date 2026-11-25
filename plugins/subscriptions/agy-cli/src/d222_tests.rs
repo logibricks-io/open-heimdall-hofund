@@ -285,7 +285,7 @@ fn d222_quota_scopes_the_model_and_verification_keeps_one_link() {
     let completion =
         block_on(upstream.execute(request(true, true), ProtocolId::ANTHROPIC_MESSAGES))
             .expect("tool");
-    match completion {
+    match completion.peel() {
         Completion::Stream(mut stream) => {
             let mut saw_tool = false;
             block_on(async {

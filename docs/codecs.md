@@ -224,8 +224,12 @@ Tool results:
   tool-result parts out of a user message. `is_error` has no Chat Completions
   field and is dropped (it comes back `false`).
 
-A legacy `function_call` object on a Chat Completions message is not turned
-into a tool call. It stays in the message bag and is written back.
+A legacy `function_call` object on a Chat Completions message is a tool call,
+so a reply that only carries it is not empty after extension bags are
+stripped. `reasoning` and `reasoning_details` are thinking (readable text, or
+the original JSON when the value has no text). A string `refusal` is text.
+Encode writes thinking back as `reasoning_content` and a legacy call back as
+`tool_calls`.
 
 Chat Completions accepts only `type: "function"` tools. Any other Chat tool
 type is `CodecError::Unsupported`. Responses accepts more than functions;

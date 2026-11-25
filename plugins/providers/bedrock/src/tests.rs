@@ -260,7 +260,7 @@ fn converse_signs_the_model_path_at_the_runtime_root() {
         ))
         .expect("converse");
         assert!(matches!(
-            completion,
+            completion.peel(),
             hofund_plugin_api::Completion::Unary(_)
         ));
         let calls = host.http().calls();

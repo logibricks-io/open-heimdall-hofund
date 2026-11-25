@@ -108,7 +108,7 @@ fn outbound_body(index: usize, host: &TestHost) -> json::Value {
 }
 
 fn thinking_text(completion: Completion) -> Option<String> {
-    let Completion::Unary(response) = completion else {
+    let Completion::Unary(response) = completion.peel() else {
         panic!("expected unary completion");
     };
     response.message.content.iter().find_map(|part| match part {

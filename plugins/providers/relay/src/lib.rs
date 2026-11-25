@@ -174,7 +174,7 @@ mod tests {
                 .execute(Request::new("gpt-test"), ProtocolId::OPENAI_CHAT)
                 .await
                 .expect("execute");
-            let Completion::Raw(mut body) = completion else {
+            let Completion::Raw(mut body) = completion.peel() else {
                 panic!("relay returns raw bytes");
             };
             let chunk = body.next_chunk().await.expect("chunk").expect("bytes");
