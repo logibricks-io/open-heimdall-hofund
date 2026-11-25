@@ -23,8 +23,10 @@ use json::Value;
 use serde::{Deserialize, Serialize};
 
 mod desktop;
+mod subagent;
 
 pub use desktop::{ClaudeDesktopLocator, ClaudeDesktopStore, DESKTOP_AGENT};
+pub use subagent::{SubagentSetting, inheriting_subagent_from_env, inheriting_subagent_model};
 
 /// The session agent id.
 pub const AGENT: &str = "claude";

@@ -1454,12 +1454,17 @@ const CATALOG_ENTRY_FIELD
 const LOOPBACK_CANCEL_PATH
 const PREFERRED_API_FIELD
 const PROBE_CAP
+fn home_dir () -> PathBuf
+fn home_dir_from_env (home : Option < OsString > , userprofile : Option < OsString > , windows : bool ,) -> PathBuf
 fn preferred_api_name (raw : & str) -> Option < & 'static str >
 fn preferred_api_path (name : & str) -> Option < & 'static str >
 fn read_budget (request : & http :: Request < crate :: Body >) -> Option < Duration >
 fn redact_token (text : & str , secret : & str) -> String
 fn safe_url (url : & str) -> String
 fn set_read_budget (request : & mut http :: Request < crate :: Body > , budget : Duration)
+fn usable_override (value : & OsStr) -> bool
+home_dir
+home_dir_from_env
 kernel::AccountBackend
 kernel::AccountBackend::async fn lease (& self , plugin : & PluginKey , id : & AccountId , wait : Duration ,) -> Result < Box < dyn AccountLeaseBackend > , PluginError >
 kernel::AccountBackend::async fn list (& self , plugin : & PluginKey) -> Result < Vec < Account > , PluginError >
@@ -1547,4 +1552,5 @@ redact_token
 safe_url
 set_read_budget
 too_long
+usable_override
 words_of

@@ -997,6 +997,7 @@ RoutingDecision.served_member
 RoutingDecision.served_provider
 RoutingDecision.session
 RoutingDecision.status
+RoutingDecision.subagent
 RoutingDecision.time_ms
 RoutingDecision.tries
 RoutingDecision.unrouted
@@ -1289,6 +1290,11 @@ StatusResponse.serves
 StatusResponse.shutdown
 StatusResponse.started_at_ms
 StatusResponse.version
+SubagentRoute #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
+SubagentRoute.asked
+SubagentRoute.kept
+SubagentRoute.to
+SubagentRoute::fn new (asked : impl Into < String > , to : impl Into < String > , kept : impl Into < String >) -> Self
 SubscriptionAccount #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)
 SubscriptionAccount.id
 SubscriptionAccount.label

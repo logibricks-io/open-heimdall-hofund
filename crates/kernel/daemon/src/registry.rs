@@ -19,6 +19,27 @@ pub(crate) use hofund_plugin_registry::{
     split_catalogs, storage_id, wire_for_protocol,
 };
 
+/// The subagent model for an inheriting tool turn, when the linked agents set one.
+pub(crate) fn inheriting_subagent_model(
+    agent_id: &str,
+    body: &[u8],
+    settings_dir: Option<&std::path::Path>,
+    gateway_origin: &str,
+    is_route: impl Fn(&str) -> bool,
+) -> Option<hofund_gateway::SubagentModelChoice> {
+    hofund_plugin_registry::inheriting_subagent_model(
+        agent_id,
+        body,
+        settings_dir,
+        gateway_origin,
+        is_route,
+    )
+    .map(|found| hofund_gateway::SubagentModelChoice {
+        model: found.model,
+        effort_label: found.effort,
+    })
+}
+
 /// Registry operations needed to construct and serve the daemon.
 pub trait DaemonRegistry: Send + Sync {
     /// Returns the upstream factory for `id`.

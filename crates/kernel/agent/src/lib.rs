@@ -42,7 +42,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 // Referenced so this crate's manifest dependency is compiled, not merely declared.
@@ -262,6 +262,14 @@ impl Session {
         self
     }
 
+    /// Returns the directory containing the Claude settings file.
+    #[must_use]
+    pub fn claude_settings_dir(&self) -> PathBuf {
+        self.claude_config_dir
+            .clone()
+            .unwrap_or_else(|| self.home.join(".claude"))
+    }
+
     /// Sets `CODEX_HOME`. Empty and relative paths are treated as unset.
     #[must_use]
     pub fn with_codex_home(mut self, path: impl Into<PathBuf>) -> Self {
@@ -325,9 +333,7 @@ fn env_name_eq(a: &OsStr, b: &OsStr, case_insensitive: bool) -> bool {
 }
 
 pub(crate) fn usable_override(value: &OsStr) -> bool {
-    !value.is_empty()
-        && (Path::new(value).is_absolute()
-            || (cfg!(windows) && matches!(value.as_encoded_bytes().first(), Some(b'\\' | b'/'))))
+    hofund_plugin_api::usable_override(value)
 }
 
 /// One managed file as it exists before an edit.
@@ -538,11 +544,7 @@ pub trait AgentAdapter: Sync {
 }
 
 fn home_dir() -> PathBuf {
-    #[cfg(windows)]
-    let found = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
-    #[cfg(not(windows))]
-    let found = std::env::var_os("HOME");
-    found.map_or_else(|| PathBuf::from("."), PathBuf::from)
+    hofund_plugin_api::home_dir()
 }
 
 #[cfg(test)]
