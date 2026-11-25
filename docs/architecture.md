@@ -460,7 +460,18 @@ is active. An API-key credit refusal climbs 30 minutes, 2 hours, 8 hours,
 manual removal restart it. Retry hints and soon/smaller-request wording stay
 flat at 30 minutes, while a named reset wins. Windowed subscription accounts
 use body reset, header reset, full-window reset, a retry hint longer than five
-hours, then five hours; a later renewed-window observation lifts the rest.
+hours, then five hours. A renewed window lifts a rest whose deadline was not
+vendor-named. A vendor-timed quota or credit rest instead opens one upstream
+probe while keeping the rest. Only a vendor-timed refusal within one second of
+that deadline closes it and pins it. A guessed or farther refusal leaves it
+open while the probed deadline is still the active cooling. A replacement
+rest, including a longer vendor-timed quota or credit rest, closes the probe
+and keeps its own deadline. A model-scoped answer clears only that open
+vendor-timed quota or credit rest and retains its asked deadline. A
+member-wide answer clears every rest for that member and still retains the
+asked deadline. An unused open probe closes when its rest expires. When every
+remaining candidate is held, routing returns the first stored refusal and
+soonest reset without calling upstream.
 Other subscription accounts stay at 30 minutes. Named credit resets cap at 35
 days, generic/rate/quota header hints cap at one hour, and passive window resets
 cap at eight days. New events never shorten a longer active rest. A vendor-restricted account,
@@ -500,10 +511,12 @@ slow-start, or overload rest was guessed, soonest first. Fit does not treat a
 guessed quota, credit, key, or vendor-timed rest as a member that can hold the
 prompt; when no eligible member fits, the soonest probe is still asked. The shared cooldown
 book prevents another hand-on to that resting member for 30 seconds. A
-vendor-timed quota rest is the exception: when every member still to be asked
-rests that way, the stored refusal is returned with `Retry-After` at the
-soonest reset and nobody is asked. A token count skips that rest and uses the
-next member, or the local estimate when none remains.
+vendor-timed quota or credit rest without an open renewal probe is the
+exception: when every member still to be asked rests that way, the stored
+refusal is returned with `Retry-After` at the soonest reset and nobody is asked.
+An open renewal probe is asked. A token count skips a held rest and uses the
+next member, or the local estimate when none remains; an open renewal probe is
+counted upstream.
 
 ## Failover decisions
 
