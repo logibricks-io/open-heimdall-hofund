@@ -9,7 +9,7 @@
 //! | HTTP 429 | Uses the larger of the rate ladder and the retry hint, with the hint capped at 1 hour. The rate ladder starts at 1 minute, doubles for a new 429 within 30 minutes after the previous rate rest ended, and is capped at 30 minutes. A 429 during an active rest does not advance the ladder. A refusal saying the requested model's credentials are cooling uses a model-local ladder. |
 //! | Exhausted quota | Uses a body-written reset capped at 8 days, otherwise the header retry hint capped at 1 hour, or 15 minutes without a positive hint. Model-cooling wording, or a model-scope flag set by the plugin, scopes the rest to that model. |
 //! | API-key credit refusal | Climbs 30 minutes, 2 hours, 8 hours, 24 hours, 3 days, then 7 days after each ended credit rest, repeating 7 days. An active rest keeps its rung. A named reset wins and is capped at 35 days. A retry hint or soon/smaller-request wording stays flat at 30 minutes and off the ladder. Model-cooling wording keys the ladder by model. Success and manual removal restart the ladder. |
-//! | Windowed-account credit refusal | Uses a named body or header reset, the latest full-window reset, a retry hint longer than 5 hours, then 5 hours, capped at 35 days. A renewed window lifts a rest whose deadline was not vendor-named; a vendor-timed rest lifts only when a matching window's reset elapsed or moved to a later cycle. Failed and empty readings lift nothing. Other subscription accounts stay flat at 30 minutes. |
+//! | Windowed-account credit refusal | Uses a named body or header reset, the latest full-window reset, a retry hint longer than 5 hours, then 5 hours, capped at 35 days. A renewed window lifts a rest whose deadline was not vendor-named. For a vendor-timed quota or credit rest, the first renewed reading opens one upstream probe without lifting the rest. Only a vendor-timed refusal within one second of that deadline closes the probe and pins it. A guessed or farther refusal leaves it open while that probed deadline is still the active cooling; a replacement rest, including a longer vendor-timed quota or credit rest, closes the probe and keeps its own deadline. A model-scoped answer clears only that open vendor-timed quota or credit rest and retains its asked deadline. A member-wide answer clears every rest for that member and still retains the asked deadline. An unused open probe closes when its rest expires. A vendor-timed rest lifts only when a matching window's reset elapsed or moved to a later cycle. Failed and empty readings lift nothing. Other subscription accounts stay flat at 30 minutes. |
 //! | Passive observation | Zero remaining uses the window reset capped at 8 days, the retry hint capped at 1 hour, or 15 minutes without either. Positive remaining at least 98% used with a known positive limit rests only for a positive window reset capped at 8 days. Accounts spending credits and all other observations record nothing. Observations do not advance either failure ladder. |
 //! | Account verification | Rests the whole account for 30 minutes when the error asks for verification. It does not climb the generic ladder. The message is kept, including any link, and is not rewritten. |
 //! | Contained panic | Uses the generic failure ladder with [`CooldownCause::Panic`]. |
@@ -38,10 +38,10 @@
 //! accept any own failure allowed for failover; the others accept only momentary
 //! failures. Quota, credit, key, and vendor-timed rests stay out. A member asked
 //! while resting receives no other hand-on for 30 seconds unless it answers.
-//! A vendor-timed quota rest is not asked: when every member still to be asked
-//! rests that way, the stored refusal is returned with the soonest reset and
-//! nobody is called. If every member is cooling for the requested model, only
-//! the soonest probe is tried, unless that probe is a vendor-timed quota rest.
+//! A vendor-timed quota or credit rest is held without a call unless a renewed
+//! window opened its one-shot probe. When every remaining member is held, the
+//! stored refusal and soonest reset are returned. If every member is cooling
+//! for the requested model, only the soonest eligible probe is tried.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -280,8 +280,29 @@ impl Cooling {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProbeState {
+    Closed,
+    Open { until: Instant },
+    Asked { until: Instant },
+}
+
+impl ProbeState {
+    fn is_open(self) -> bool {
+        matches!(self, Self::Open { .. })
+    }
+
+    fn until(self) -> Option<Instant> {
+        match self {
+            Self::Closed => None,
+            Self::Open { until } | Self::Asked { until } => Some(until),
+        }
+    }
+}
+
 struct State {
     cooling: Option<Cooling>,
+    renewal: ProbeState,
     failures: u32,
     rate_failures: u32,
     rate_until: Option<Instant>,
@@ -299,6 +320,7 @@ impl State {
     fn new(now: Instant, revision: u64) -> Self {
         Self {
             cooling: None,
+            renewal: ProbeState::Closed,
             failures: 0,
             rate_failures: 0,
             rate_until: None,
@@ -451,9 +473,13 @@ impl Cooldowns {
     }
 
     /// Records a successful account-wide window reading. A renewed full
-    /// window lifts a rest whose deadline was not named by the vendor. A
-    /// vendor-timed rest lifts only when a matching window's reset elapsed
-    /// or moved to a later cycle. A rate or generic rest stays.
+    /// window lifts a rest whose deadline was not named by the vendor. For a
+    /// vendor-timed quota or credit rest on this account, with no model, it
+    /// instead opens one upstream probe without lifting the rest. A
+    /// model-scoped vendor-timed rest is left unchanged, so this reading
+    /// does not ask that model. A vendor-timed rest lifts only when a matching
+    /// window's reset elapsed or moved to a later cycle. A rate or generic rest
+    /// stays.
     pub fn observe_credit_window(&self, id: &MemberId, windows: &[QuotaWindow]) {
         let now = (self.clock)();
         let wall = SystemTime::now();
@@ -502,32 +528,57 @@ impl Cooldowns {
                 });
         book.credit_windows.insert(id.clone(), current);
         let key = CooldownKey::new(id, None);
-        let lifting = book
-            .states
-            .get(&key)
-            .and_then(|state| state.cooling.as_ref())
-            .filter(|cooling| {
-                (cooling.vendor_timed && started_again || !cooling.vendor_timed && renewed)
-                    && matches!(
-                        cooling.cause,
-                        CooldownCause::Credit | CooldownCause::Quota | CooldownCause::Observed
-                    )
-                    && now < cooling.until
-            })
-            .map(|cooling| cooling.cause);
-        if let Some(cause) = lifting {
-            let revision = next_revision(&mut book);
-            book.spent.remove(&key);
-            let state = book.states.get_mut(&key).expect("existing credit state");
-            state.cooling = None;
-            state.credit_rung = 0;
-            state.credit_until = None;
-            state.credit_ladder = false;
-            state.last_cause = None;
-            state.idle_since = Some(now);
-            state.touched = now;
-            state.revision = revision;
-            recover(&mut book, key, cause);
+        enum WindowAction {
+            Lift(CooldownCause),
+            Probe(Instant),
+        }
+        let action = book.states.get(&key).and_then(|state| {
+            let cooling = state.cooling.as_ref()?;
+            if !matches!(
+                cooling.cause,
+                CooldownCause::Credit | CooldownCause::Quota | CooldownCause::Observed
+            ) || now >= cooling.until
+            {
+                return None;
+            }
+            if (cooling.vendor_timed && started_again) || (!cooling.vendor_timed && renewed) {
+                Some(WindowAction::Lift(cooling.cause))
+            } else if cooling.vendor_timed
+                && renewed
+                && state
+                    .renewal
+                    .until()
+                    .is_none_or(|until| !same_reset(until, cooling.until))
+            {
+                Some(WindowAction::Probe(cooling.until))
+            } else {
+                None
+            }
+        });
+        match action {
+            Some(WindowAction::Lift(cause)) => {
+                let revision = next_revision(&mut book);
+                book.spent.remove(&key);
+                let state = book.states.get_mut(&key).expect("existing credit state");
+                state.cooling = None;
+                state.renewal = ProbeState::Closed;
+                state.credit_rung = 0;
+                state.credit_until = None;
+                state.credit_ladder = false;
+                state.last_cause = None;
+                state.idle_since = Some(now);
+                state.touched = now;
+                state.revision = revision;
+                recover(&mut book, key, cause);
+            }
+            Some(WindowAction::Probe(until)) => {
+                let revision = next_revision(&mut book);
+                let state = book.states.get_mut(&key).expect("existing credit state");
+                state.renewal = ProbeState::Open { until };
+                state.touched = now;
+                state.revision = revision;
+            }
+            None => {}
         }
     }
 
@@ -747,10 +798,15 @@ impl Cooldowns {
             .cloned()
             .collect::<Vec<_>>();
         for key in keys {
-            if let Some(state) = book.states.remove(&key)
-                && let Some(cooling) = state.cooling
-            {
-                recover(&mut book, key, cooling.cause);
+            if let Some(mut state) = book.states.remove(&key) {
+                let recovered = state.cooling.as_ref().map(|cooling| cooling.cause);
+                let keep = key.model.is_none() && preserve_asked_deadline(&mut state, now);
+                if let Some(cause) = recovered {
+                    recover(&mut book, key.clone(), cause);
+                }
+                if keep {
+                    book.states.insert(key, state);
+                }
             }
         }
         book.sunk.retain(|key, _| key.member != *id);
@@ -943,14 +999,20 @@ impl Cooldowns {
         book.suspended.remove(id);
         book.spent.remove(&key);
         book.hand_on_asked.remove(id);
-        if let Some(state) = book.states.remove(&key)
-            && let Some(cooling) = state.cooling
-        {
-            recover(&mut book, key, cooling.cause);
+        if let Some(mut state) = book.states.remove(&key) {
+            let recovered = state.cooling.as_ref().map(|cooling| cooling.cause);
+            let keep = model.is_none() && preserve_asked_deadline(&mut state, now);
+            if let Some(cause) = recovered {
+                recover(&mut book, key.clone(), cause);
+            }
+            if keep {
+                book.states.insert(key, state);
+            }
         }
         if model.is_some() {
-            // A real answer lifts a suspended subscription the same way a list
-            // probe does. Other member-wide rests stay.
+            // A real answer also clears an open renewal probe, retaining its
+            // asked deadline. Other member-wide rests stay.
+            lift_open_renewal(&mut book, &member, now);
             lift_suspended_rest(&mut book, &member);
             if let Some(state) = book.states.get_mut(&member) {
                 state.failures = 0;
@@ -1015,27 +1077,51 @@ impl Cooldowns {
         self.cooling_at(id, Some(model))
     }
 
+    /// Whether a renewed window currently permits a member-wide upstream probe.
+    #[must_use]
+    pub fn renewal_probe(&self, id: &MemberId) -> bool {
+        self.renewal_probe_at(id, None)
+    }
+
+    /// Whether the selected member-wide or model-specific rest has an open
+    /// renewal probe. Model rests themselves never open one.
+    #[must_use]
+    pub fn renewal_probe_for_model(&self, id: &MemberId, model: &str) -> bool {
+        self.renewal_probe_at(id, Some(model))
+    }
+
     fn cooling_at(&self, id: &MemberId, model: Option<&str>) -> Option<Cooling> {
+        self.selected_at(id, model).map(|(cooling, _)| cooling)
+    }
+
+    fn renewal_probe_at(&self, id: &MemberId, model: Option<&str>) -> bool {
+        self.selected_at(id, model)
+            .is_some_and(|(_, renewal)| renewal.is_open())
+    }
+
+    fn selected_at(&self, id: &MemberId, model: Option<&str>) -> Option<(Cooling, ProbeState)> {
         let now = (self.clock)();
         let mut book = self.lock();
         self.maintain_locked(&mut book, now);
         let member = CooldownKey::new(id, None);
         let specific = model.map(|model| CooldownKey::new(id, Some(model)));
-        let mut cooling = None;
+        let mut selected = None;
         for key in std::iter::once(&member).chain(specific.iter()) {
             if let Some(state) = book.states.get_mut(key) {
                 state.touched = now;
                 if let Some(candidate) =
                     state.cooling.as_ref().filter(|cooling| now < cooling.until)
-                    && cooling
+                    && selected
                         .as_ref()
-                        .is_none_or(|current: &Cooling| current.until < candidate.until)
+                        .is_none_or(|(current, _): &(Cooling, ProbeState)| {
+                            current.until < candidate.until
+                        })
                 {
-                    cooling = Some(candidate.clone());
+                    selected = Some((candidate.clone(), state.renewal));
                 }
             }
         }
-        cooling
+        selected
     }
 
     /// Returns active member-wide cooldowns for a future routing view.
@@ -1345,6 +1431,19 @@ impl Cooldowns {
         candidate.status = error.status();
         candidate.error = error.message().trim().chars().take(300).collect();
         candidate.background_probe = background_probe;
+        // A vendor-timed quota or credit refusal at the asked deadline pins
+        // that instant, whether the probe is open or already asked. One second
+        // either way is the same reset. Other refusals leave an open probe;
+        // `apply` still keeps the later rest outside that tolerance.
+        if matches!(failure, Failure::Quota | Failure::Credit)
+            && let Some(until) = state
+                .renewal
+                .until()
+                .filter(|until| candidate.vendor_timed && same_reset(*until, candidate.until))
+        {
+            candidate.until = until;
+            state.renewal = ProbeState::Asked { until };
+        }
         candidate.hand_on = hand_on_rest(failure, error);
         let candidate_until = candidate.until;
         let applied = apply(state, candidate, named);
@@ -1451,7 +1550,9 @@ impl Cooldowns {
             let oldest = book
                 .states
                 .iter()
-                .filter(|(_, state)| !state.active(now))
+                .filter(|(_, state)| {
+                    !state.active(now) && !matches!(state.renewal, ProbeState::Asked { .. })
+                })
                 .min_by_key(|(_, state)| state.touched)
                 .map(|(key, _)| key.clone());
             let oldest = oldest?;
@@ -1522,7 +1623,19 @@ impl Cooldowns {
                 && let Some(cooling) = state.cooling.take()
             {
                 state.idle_since = Some(cooling.until);
+                if state.renewal.is_open() {
+                    state.renewal = ProbeState::Closed;
+                }
                 recovered.push((key.clone(), cooling.cause));
+            }
+            // The reference drops a past asked mark. One second is still the
+            // same reset; only an inactive entry past that is forgotten, so
+            // the slot can be reused.
+            if let ProbeState::Asked { until } = state.renewal
+                && !state.active(now)
+                && now.saturating_duration_since(until) > Duration::from_secs(1)
+            {
+                state.renewal = ProbeState::Closed;
             }
             if state.rate_until.is_some_and(|until| {
                 now.saturating_duration_since(until) >= self.policy.rate_forget
@@ -1547,7 +1660,9 @@ impl Cooldowns {
                 && state
                     .idle_since
                     .is_none_or(|since| now.saturating_duration_since(since) < forget);
-            ordinary || (state.credit_ladder && state.credit_rung > 0)
+            ordinary
+                || (state.credit_ladder && state.credit_rung > 0)
+                || !matches!(state.renewal, ProbeState::Closed)
         });
     }
 
@@ -1774,6 +1889,46 @@ fn qualify_suspension(book: &Book, id: &MemberId, failure: Failure) -> Failure {
     failure
 }
 
+fn lift_open_renewal(book: &mut Book, member: &CooldownKey, now: Instant) {
+    let lifted = {
+        let Some(state) = book.states.get_mut(member) else {
+            return;
+        };
+        if !state.renewal.is_open() {
+            return;
+        }
+        let Some(cooling) = state.cooling.as_ref() else {
+            state.renewal = ProbeState::Closed;
+            return;
+        };
+        let probe_until = state.renewal.until().expect("open reset");
+        let matches_probe = matches!(cooling.cause, CooldownCause::Quota | CooldownCause::Credit)
+            && cooling.vendor_timed
+            && same_reset(cooling.until, probe_until);
+        if !matches_probe {
+            // The open probe belonged to a vendor-timed quota or credit rest
+            // at this deadline. Keep the winning rest and close the probe.
+            state.renewal = ProbeState::Closed;
+            return;
+        }
+        (cooling.cause, probe_until)
+    };
+    let (cause, until) = lifted;
+    let revision = next_revision(book);
+    let state = book.states.get_mut(member).expect("open renewal state");
+    state.cooling = None;
+    state.renewal = ProbeState::Asked { until };
+    state.credit_rung = 0;
+    state.credit_until = None;
+    state.credit_ladder = false;
+    state.last_cause = None;
+    state.idle_since = Some(now);
+    state.touched = now;
+    state.revision = revision;
+    book.spent.remove(member);
+    recover(book, member.clone(), cause);
+}
+
 fn lift_suspended_rest(book: &mut Book, member: &CooldownKey) {
     let lifted = {
         let Some(state) = book.states.get_mut(member) else {
@@ -1870,6 +2025,13 @@ fn positive_hint(duration: Option<Duration>) -> Option<Duration> {
     duration.filter(|duration| !duration.is_zero())
 }
 
+/// Whether two instants are one reset. A difference of one second is still
+/// the same time, as with a window reading's reset.
+fn same_reset(left: Instant, right: Instant) -> bool {
+    left.saturating_duration_since(right) <= Duration::from_secs(1)
+        && right.saturating_duration_since(left) <= Duration::from_secs(1)
+}
+
 fn overload_duration(policy: &CooldownPolicy, error: &PluginError) -> Duration {
     positive_hint(error.retry_after())
         .map(|after| after.min(policy.overload_max))
@@ -1932,7 +2094,9 @@ fn cooling(now: Instant, duration: Duration, cause: CooldownCause, failures: u32
 /// shortens a longer rest (ruling R-494b, superseding R-494). One
 /// exception: a guessed quota or credit rest gives way to a rest of the same
 /// cause whose time the vendor named (`named`), though it is sooner
-/// (`reference: internal/gateway/routing.go:1518-1533`).
+/// (`reference: internal/gateway/routing.go:1518-1533`). A renewal probe
+/// pins a same-deadline vendor refusal to the stored instant before this
+/// call, so a sample one second later does not move that deadline.
 fn apply(state: &mut State, candidate: Cooling, named: bool) -> Cooling {
     let applied = match &state.cooling {
         Some(current)
@@ -1945,6 +2109,7 @@ fn apply(state: &mut State, candidate: Cooling, named: bool) -> Cooling {
     };
     state.cooling = Some(applied.clone());
     state.last_cause = Some(applied.cause);
+    close_open_probe_for_other_cause(state);
     applied
 }
 
@@ -1957,7 +2122,57 @@ fn apply_observation(state: &mut State, candidate: Cooling) -> Cooling {
     };
     state.cooling = Some(applied.clone());
     state.last_cause = Some(applied.cause);
+    close_open_probe_for_other_cause(state);
     applied
+}
+
+/// An open probe stays only while the active cooling is the vendor-timed
+/// quota or credit rest at the probed deadline. Any other winner, including
+/// a longer vendor-timed quota or credit rest, keeps its own rest and closes
+/// the probe.
+fn close_open_probe_for_other_cause(state: &mut State) {
+    let probe_until = state.renewal.until();
+    let keeps_probe = state.cooling.as_ref().is_some_and(|cooling| {
+        matches!(cooling.cause, CooldownCause::Quota | CooldownCause::Credit)
+            && cooling.vendor_timed
+            && probe_until.is_some_and(|until| same_reset(cooling.until, until))
+    });
+    if !keeps_probe && state.renewal.is_open() {
+        state.renewal = ProbeState::Closed;
+    }
+}
+
+/// A member-wide answer clears every rest but keeps the deadline a probe
+/// already asked, including an open probe of the vendor-timed quota or
+/// credit rest this answer clears, and restarts both failure ladders.
+/// A model-scoped answer clears only that matching rest in
+/// [`lift_open_renewal`] and leaves every other member rest.
+fn preserve_asked_deadline(state: &mut State, now: Instant) -> bool {
+    let until = match state.renewal {
+        ProbeState::Asked { until } => until,
+        ProbeState::Open { until }
+            if state.cooling.as_ref().is_some_and(|cooling| {
+                cooling.vendor_timed
+                    && matches!(cooling.cause, CooldownCause::Quota | CooldownCause::Credit)
+                    && same_reset(cooling.until, until)
+            }) =>
+        {
+            until
+        }
+        _ => return false,
+    };
+    state.cooling = None;
+    state.renewal = ProbeState::Asked { until };
+    state.failures = 0;
+    state.rate_failures = 0;
+    state.rate_until = None;
+    state.credit_rung = 0;
+    state.credit_until = None;
+    state.credit_ladder = false;
+    state.last_cause = None;
+    state.idle_since = Some(now);
+    state.touched = now;
+    true
 }
 
 fn u128_as_u64(value: u128) -> u64 {
