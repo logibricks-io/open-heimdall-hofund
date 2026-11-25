@@ -2722,7 +2722,7 @@ impl DispatchState {
                         .member
                         .protocol()
                         .to_owned();
-                    if has_continuation {
+                    if has_continuation && !self.pinned {
                         if let Some(trace) = self.trace.as_mut() {
                             trace.sync_open();
                         }

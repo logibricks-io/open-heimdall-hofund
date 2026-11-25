@@ -11,7 +11,9 @@ use hofund_codec::{Codec, OpenAiChat};
 use hofund_gateway::{Gateway, QuotaAccess, QuotaCaller, QuotaScope, QuotaScopeHook};
 use hofund_plugin_api::{MemberId, MemberKey, PluginError, PresetId};
 use hofund_router::account_pin::AccountFace;
-use hofund_router::{FailoverPolicy, Hop, Member, Request, Router, Snapshot};
+use hofund_router::{
+    CooldownPolicy, Cooldowns, FailoverPolicy, Hop, Member, Request, Router, Snapshot,
+};
 use hofund_secrets::KeyStore;
 use hofund_usage::Ledger;
 use serde_json::Value;
@@ -46,6 +48,10 @@ impl Member for Fake {
 
     fn protocol(&self) -> &str {
         "plain"
+    }
+
+    fn account_refs(&self) -> Vec<String> {
+        vec![self.key_id.to_owned()]
     }
 
     async fn execute(
@@ -299,4 +305,151 @@ async fn d243_request_pin_returns_that_accounts_error() {
     assert!(!body.contains("sk-"));
     assert_eq!(bad_hits.load(Ordering::SeqCst), 1);
     assert_eq!(good_hits.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn d243_pin_http_statuses_are_429_403_400_and_404() {
+    let chat = r#"{"model":"demo","messages":[{"role":"user","content":"hi"}]}"#;
+    let resting_hits = Arc::new(AtomicUsize::new(0));
+    let other_hits = Arc::new(AtomicUsize::new(0));
+    let resting = member("keyed", "aaa111bbb2", &resting_hits);
+    let other = member("keyed", "ccc333ddd4", &other_hits);
+    let cooldowns = Arc::new(Cooldowns::new(CooldownPolicy::default()));
+    cooldowns.record_failure_for_model(
+        resting.id(),
+        "demo",
+        &PluginError::status_error(429, "slow down"),
+    );
+    let mut routes = BTreeMap::new();
+    routes.insert(
+        "demo".to_owned(),
+        vec![
+            Hop::new(Arc::clone(&resting) as Arc<dyn Member>),
+            Hop::new(Arc::clone(&other) as Arc<dyn Member>),
+        ],
+    );
+    let resting_router = Router::from_hops(routes, FailoverPolicy::default())
+        .with_cooldowns(cooldowns)
+        .with_accounts(vec![
+            AccountFace::key("keyed", "aaa111bbb2", "tired", "", true),
+            AccountFace::key("keyed", "ccc333ddd4", "work", "", true),
+        ]);
+    let (app, _dir) = gateway(resting_router, None);
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/v1/chat/completions",
+        Some("owner-secret"),
+        Some("tired"),
+        chat,
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert!(body.contains("rests"), "{body}");
+    assert!(body.contains("no other account is tried"), "{body}");
+    assert_eq!(resting_hits.load(Ordering::SeqCst), 0);
+    assert_eq!(other_hits.load(Ordering::SeqCst), 0);
+
+    let held_hits = Arc::new(AtomicUsize::new(0));
+    let open_hits = Arc::new(AtomicUsize::new(0));
+    let held = member("keyed", "aaa111bbb2", &held_hits);
+    let open = member("keyed", "ccc333ddd4", &open_hits);
+    let accounts = vec![
+        AccountFace::key("keyed", "aaa111bbb2", "held", "", true),
+        AccountFace::key("keyed", "ccc333ddd4", "open", "", true),
+    ];
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = Arc::new(KeyStore::beside_token(dir.path().join("hofund.token")));
+    store.list().expect("migrate");
+    let token = store.token_file().read().expect("token");
+    let limited = store
+        .add("Limited", Some("limited-secret-value"))
+        .expect("key");
+    store
+        .set_accounts(
+            &limited.key.id,
+            &["keyed/ccc333ddd4".to_owned()],
+            &["keyed/aaa111bbb2".to_owned(), "keyed/ccc333ddd4".to_owned()],
+        )
+        .expect("accounts");
+    let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
+    let mut codecs = HashMap::new();
+    codecs.insert(
+        "/v1/chat/completions".to_owned(),
+        Arc::new(OpenAiChat) as Arc<dyn Codec>,
+    );
+    let app = Gateway::new(
+        Snapshot::new(router_with(
+            accounts,
+            vec![
+                Hop::new(held as Arc<dyn Member>),
+                Hop::new(open as Arc<dyn Member>),
+            ],
+        )),
+        token,
+        codecs,
+        usage,
+    )
+    .with_key_store(store)
+    .into_router();
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/v1/chat/completions",
+        Some("limited-secret-value"),
+        Some("keyed/aaa111bbb2"),
+        chat,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(body.contains("may not use"), "{body}");
+    assert_eq!(held_hits.load(Ordering::SeqCst), 0);
+    assert_eq!(open_hits.load(Ordering::SeqCst), 0);
+
+    let plan_hits = Arc::new(AtomicUsize::new(0));
+    let planned = member("keyed", "aaa111bbb2", &plan_hits);
+    let (app, _dir) = gateway(
+        router_with(
+            vec![
+                AccountFace::key("keyed", "aaa111bbb2", "narrow", "plus", true)
+                    .with_models(vec!["other".to_owned()]),
+            ],
+            vec![Hop::new(planned as Arc<dyn Member>)],
+        ),
+        None,
+    );
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/v1/chat/completions",
+        Some("owner-secret"),
+        Some("narrow"),
+        chat,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("plan doesn't list demo"), "{body}");
+    assert_eq!(plan_hits.load(Ordering::SeqCst), 0);
+
+    let miss_hits = Arc::new(AtomicUsize::new(0));
+    let live = member("keyed", "aaa111bbb2", &miss_hits);
+    let (app, _dir) = gateway(
+        router_with(
+            vec![AccountFace::key("keyed", "aaa111bbb2", "work", "", true)],
+            vec![Hop::new(live as Arc<dyn Member>)],
+        ),
+        None,
+    );
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/v1/chat/completions",
+        Some("owner-secret"),
+        Some("missing"),
+        chat,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("no account"), "{body}");
+    assert_eq!(miss_hits.load(Ordering::SeqCst), 0);
 }

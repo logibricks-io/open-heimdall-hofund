@@ -36,7 +36,8 @@ impl QuotaCatalog {
             );
         }
         for subscription in &config.subscriptions {
-            out.insert(subscription.id.clone(), Vec::new());
+            out.entry(subscription.id.clone())
+                .or_insert_with(|| models.get(&subscription.id).cloned().unwrap_or_default());
         }
         Self { models: out }
     }
@@ -76,21 +77,29 @@ impl KeyQuotaScope {
         }
     }
 
+    /// A pattern that names the provider itself, or every model of it.
+    fn grants_whole_provider(&self, provider: &str) -> bool {
+        let every = format!("{provider}/*");
+        self.identity.models.iter().any(|pattern| {
+            let pattern = pattern.trim();
+            pattern.eq_ignore_ascii_case(provider) || pattern.eq_ignore_ascii_case(&every)
+        })
+    }
+
     fn provider_ok(&self, provider: &str) -> bool {
         if self.identity.models.is_empty() {
             return true;
         }
-        let Some(listed) = self.catalog.models.get(provider) else {
-            return true;
-        };
-        if listed.is_empty() {
+        if self.grants_whole_provider(provider) {
             return true;
         }
-        listed.iter().all(|model| {
-            model_allowed(&self.identity.models, &format!("{provider}/{model}"))
-                || model_allowed(&self.identity.models, &format!("{provider}/*"))
-                || model_allowed(&self.identity.models, provider)
-        })
+        let Some(listed) = self.catalog.models.get(provider) else {
+            return false;
+        };
+        !listed.is_empty()
+            && listed
+                .iter()
+                .all(|model| model_allowed(&self.identity.models, &format!("{provider}/{model}")))
     }
 }
 
@@ -160,5 +169,87 @@ mod tests {
         };
         assert!(scope.card("alpha", "two"));
         assert!(!scope.card("alpha", "one"));
+    }
+
+    #[test]
+    fn d243_model_held_key_does_not_see_another_providers_accounts() {
+        let config = load(
+            "[[providers]]\nid = \"alpha\"\npreset = \"relay\"\nbase_url = \"http://127.0.0.1:9\"\n\
+             [[subscriptions]]\nid = \"beta\"\naccounts = \"*\"\n",
+        )
+        .expect("config");
+        let catalog = QuotaCatalog::build(
+            &config,
+            &HashMap::from([("alpha".to_owned(), vec!["m1".to_owned()])]),
+        );
+        let held = Identity {
+            key_id: "k".to_owned(),
+            models: vec!["alpha/*".to_owned()],
+            quotas: true,
+            ..Identity::default()
+        };
+        let QuotaAccess::Scoped(scope) = quota_access(Some(&held), &catalog) else {
+            panic!("expected scoped access");
+        };
+        assert!(scope.card("alpha", "one"));
+        assert!(
+            !scope.card("beta", "other@example.com"),
+            "a model-held key must not see another provider account"
+        );
+        assert!(!scope.card("gamma", "other@example.com"));
+
+        let partial = Identity {
+            key_id: "k".to_owned(),
+            models: vec!["alpha/m1".to_owned()],
+            quotas: true,
+            ..Identity::default()
+        };
+        let wide = QuotaCatalog::build(
+            &config,
+            &HashMap::from([("alpha".to_owned(), vec!["m1".to_owned(), "m2".to_owned()])]),
+        );
+        let QuotaAccess::Scoped(scope) = quota_access(Some(&partial), &wide) else {
+            panic!("expected scoped access");
+        };
+        assert!(
+            !scope.card("alpha", "one"),
+            "one allowed model is not every catalogued model"
+        );
+
+        let exact = Identity {
+            key_id: "k".to_owned(),
+            models: vec!["beta".to_owned()],
+            quotas: true,
+            ..Identity::default()
+        };
+        let QuotaAccess::Scoped(scope) = quota_access(Some(&exact), &catalog) else {
+            panic!("expected scoped access");
+        };
+        assert!(scope.card("beta", "other@example.com"));
+        assert!(!scope.card("alpha", "one"));
+
+        let star = Identity {
+            key_id: "k".to_owned(),
+            models: vec!["beta/*".to_owned()],
+            quotas: true,
+            ..Identity::default()
+        };
+        let QuotaAccess::Scoped(scope) = quota_access(Some(&star), &catalog) else {
+            panic!("expected scoped access");
+        };
+        assert!(scope.card("beta", "other@example.com"));
+
+        let accounts_only = Identity {
+            key_id: "k".to_owned(),
+            accounts: vec!["beta/other@example.com".to_owned()],
+            quotas: true,
+            ..Identity::default()
+        };
+        let QuotaAccess::Scoped(scope) = quota_access(Some(&accounts_only), &catalog) else {
+            panic!("expected scoped access");
+        };
+        assert!(scope.card("beta", "other@example.com"));
+        assert!(!scope.card("beta", "someone-else"));
+        assert!(scope.card("alpha", "one"));
     }
 }

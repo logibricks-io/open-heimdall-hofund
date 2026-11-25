@@ -280,7 +280,7 @@ fn local_call(request: &HttpRequest) -> HttpRequest {
     if let Ok(uri) = "/v1/responses".parse() {
         *call.uri_mut() = uri;
     }
-    for name in ["content-type", "accept"] {
+    for name in ["content-type", "accept", ACCOUNT_HEADER] {
         if let Some(value) = request.headers().get(name) {
             call.headers_mut().insert(name, value.clone());
         }

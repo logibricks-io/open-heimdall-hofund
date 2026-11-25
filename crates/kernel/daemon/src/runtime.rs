@@ -245,23 +245,30 @@ impl Runtime {
             .models
             .get()
             .map(|host| {
-                config
-                    .providers
-                    .iter()
-                    .map(|provider| {
-                        (
-                            provider.id.clone(),
-                            host.cached(&provider.id)
-                                .models
-                                .iter()
-                                .map(|model| model.id().to_owned())
-                                .collect(),
-                        )
-                    })
-                    .collect()
+                let mut models = HashMap::new();
+                for provider in &config.providers {
+                    models.insert(
+                        provider.id.clone(),
+                        Self::cached_model_ids(host.as_ref(), &provider.id),
+                    );
+                }
+                for subscription in &config.subscriptions {
+                    models
+                        .entry(subscription.id.clone())
+                        .or_insert_with(|| Self::cached_model_ids(host.as_ref(), &subscription.id));
+                }
+                models
             })
             .unwrap_or_default();
         crate::quota_scope::QuotaCatalog::build(&config, &models)
+    }
+
+    fn cached_model_ids(host: &ModelsHost, id: &str) -> Vec<String> {
+        host.cached(id)
+            .models
+            .iter()
+            .map(|model| model.id().to_owned())
+            .collect()
     }
 
     pub(crate) fn spend_caps(&self) -> Arc<crate::spend_caps::SpendCapStore> {

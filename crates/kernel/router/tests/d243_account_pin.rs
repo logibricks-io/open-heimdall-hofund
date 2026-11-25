@@ -264,3 +264,96 @@ async fn d243_missing_pin_names_accounts_and_decodes_a_user() {
     assert!(matches!(decoded, RouterError::Upstream { .. }));
     assert_eq!(hits.load(Ordering::SeqCst), 1);
 }
+
+struct Ready {
+    member_id: MemberId,
+    route_id: &'static str,
+    provider: &'static str,
+    key_id: String,
+    hits: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Member for Ready {
+    fn id(&self) -> &MemberId {
+        &self.member_id
+    }
+
+    fn route_id(&self) -> &str {
+        self.route_id
+    }
+
+    fn scope_provider(&self) -> &str {
+        self.provider
+    }
+
+    fn provider_key_id(&self) -> &str {
+        &self.key_id
+    }
+
+    fn account_refs(&self) -> Vec<String> {
+        vec![self.key_id.clone()]
+    }
+
+    fn protocol(&self) -> &str {
+        "plain"
+    }
+
+    async fn execute(
+        &self,
+        _request: Request,
+        _inbound: &str,
+    ) -> Result<hofund_router::Completion, PluginError> {
+        self.hits.fetch_add(1, Ordering::SeqCst);
+        Ok(hofund_router::Completion::Stream(Box::pin(
+            futures_util::stream::iter(vec![Ok(hofund_ir::StreamEvent::TextDelta(
+                hofund_ir::TextDelta {
+                    index: 0,
+                    text: "ok".to_owned(),
+                    extensions: hofund_ir::Extensions::new(),
+                },
+            ))]),
+        )))
+    }
+}
+
+fn ready_member(provider: &'static str, fingerprint: &str, hits: &Arc<AtomicUsize>) -> Arc<Ready> {
+    Arc::new(Ready {
+        member_id: MemberId::from_preset(
+            PresetId::try_from(provider).expect("preset"),
+            MemberKey::try_from(fingerprint).unwrap_or_else(|_| MemberKey::from_static("default")),
+        ),
+        route_id: provider,
+        provider,
+        key_id: fingerprint.to_owned(),
+        hits: Arc::clone(hits),
+    })
+}
+
+#[tokio::test]
+async fn d243_pinned_success_does_not_continue_to_another_match() {
+    let first_hits = Arc::new(AtomicUsize::new(0));
+    let second_hits = Arc::new(AtomicUsize::new(0));
+    let first = ready_member("keyed", "firstkey12", &first_hits);
+    let second = ready_member("keyed", "secondkey1", &second_hits);
+    let table = router(
+        vec![
+            Hop::new(first as Arc<dyn Member>),
+            Hop::new(second as Arc<dyn Member>),
+        ],
+        vec![
+            AccountFace::key("keyed", "firstkey12", "shared", "", true),
+            AccountFace::key("keyed", "secondkey1", "shared", "", true),
+        ],
+    );
+    let mut routed = table
+        .dispatch_scoped_for_account(&Request::new("demo"), "plain", None, Some("shared"))
+        .await
+        .expect("the first match answers");
+    assert!(
+        routed.take_continuation().is_none(),
+        "a pin must not continue to another match"
+    );
+    assert_eq!(first_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(second_hits.load(Ordering::SeqCst), 0);
+}

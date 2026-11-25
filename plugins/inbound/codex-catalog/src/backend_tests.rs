@@ -1600,6 +1600,101 @@ fn a_relayed_turn_that_names_an_account_is_refused() {
     assert_eq!(status, 200, "only a turn is refused");
 }
 
+fn pin_header(seen: &Seen) -> Option<&str> {
+    seen.headers
+        .iter()
+        .find(|(name, _)| name == ACCOUNT_HEADER)
+        .map(|(_, value)| value.as_str())
+}
+
+#[test]
+fn d243_hofund_model_forwards_the_account_and_returns_its_error() {
+    let stub = Stub::default().calling(Err(PluginError::status_error(401, "Incorrect API key")));
+    let (status, _, body) = ask(
+        &stub,
+        request(
+            "POST",
+            "/backend-api/codex/responses",
+            &[
+                (ACCOUNT_HEADER, "keyed/aaa111bbb2"),
+                ("content-type", "application/json"),
+            ],
+            r#"{"model":"keyed/demo","input":"hi"}"#,
+        ),
+    );
+    assert_eq!(status, 401, "{body}");
+    assert!(body.contains("Incorrect API key"), "{body}");
+    let called = stub.called();
+    assert_eq!(called.len(), 1);
+    assert_eq!(pin_header(&called[0]), Some("keyed/aaa111bbb2"));
+    assert!(stub.sent().is_empty());
+}
+
+#[test]
+fn d243_account_model_rewrite_forwards_the_account() {
+    let stub = Stub::default()
+        .listing(&["codex/demo"])
+        .calling(Err(PluginError::status_error(401, "Incorrect API key")));
+    let (status, _, body) = ask(
+        &stub,
+        request(
+            "POST",
+            "/backend-api/codex/responses",
+            &[(ACCOUNT_HEADER, "work")],
+            r#"{"model":"demo"}"#,
+        ),
+    );
+    assert_eq!(status, 401, "{body}");
+    let called = stub.called();
+    assert_eq!(called.len(), 2, "the list, then the rewritten turn");
+    assert_eq!(pin_header(&called[1]), Some("work"));
+    assert!(
+        String::from_utf8_lossy(&called[1].body).contains("codex/demo"),
+        "the bare model is rewritten onto the served route"
+    );
+    assert!(stub.sent().is_empty());
+}
+
+#[test]
+fn d243_summary_forwards_the_account_and_returns_its_error() {
+    let stub = Stub::default().calling(Err(PluginError::status_error(401, "Incorrect API key")));
+    let (status, _, body) = ask(
+        &stub,
+        request(
+            "POST",
+            "/backend-api/codex/responses",
+            &[(ACCOUNT_HEADER, "keyed/aaa111bbb2")],
+            &trigger("keyed/demo"),
+        ),
+    );
+    assert_eq!(status, 401, "{body}");
+    assert!(body.contains("Incorrect API key"), "{body}");
+    let called = stub.called();
+    assert_eq!(called.len(), 1);
+    assert_eq!(pin_header(&called[0]), Some("keyed/aaa111bbb2"));
+    assert!(stub.sent().is_empty());
+}
+
+#[test]
+fn d243_unserved_relay_with_an_account_stays_400() {
+    let stub = Stub::default()
+        .listing(&["codex/gpt-4"])
+        .sending(answer(200, "relayed"));
+    let (status, _, body) = ask(
+        &stub,
+        request(
+            "POST",
+            "/backend-api/codex/responses",
+            &[(ACCOUNT_HEADER, "work")],
+            r#"{"model":"gpt-5"}"#,
+        ),
+    );
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains(ACCOUNT_MESSAGE), "{body}");
+    assert!(stub.called().iter().all(|seen| seen.uri != "/v1/responses"));
+    assert!(stub.sent().is_empty());
+}
+
 const PASSTHROUGH_REFUSAL: &str = r#"{"error":{"message":"[ObjectParam] [input[2].internal_chat_message_metadata_passthrough.content_token_count] [unknown_parameter] Unknown parameter: 'input[2].internal_chat_message_metadata_passthrough.content_token_count'.","type":"invalid_request_error"}}"#;
 
 fn passthrough_turn() -> String {
