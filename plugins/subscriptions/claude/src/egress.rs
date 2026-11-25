@@ -520,82 +520,14 @@ fn host_ok(host: &str) -> bool {
     !host.is_empty() && !host.contains(' ') && !host.contains('/') && !host.contains('@')
 }
 
-pub(crate) fn redact_error(text: &str, choice: &str) -> String {
-    let mut out = text.to_owned();
-    let choice = choice.trim();
-    if !choice.is_empty() && !choice.eq_ignore_ascii_case("direct") {
-        out = out.replace(choice, &shown(choice));
+/// External transport text is not forwarded because URL token boundaries cannot make it safe.
+pub(crate) fn redact_error(_text: &str, choice: &str) -> String {
+    let choice = choice_label(choice);
+    if choice.is_empty() {
+        "way-out lookup failed using the process proxy".to_owned()
+    } else {
+        format!("way-out lookup failed through {choice}")
     }
-    redact_embedded_urls(&out)
-}
-
-fn redact_embedded_urls(text: &str) -> String {
-    let mut out = String::new();
-    let mut rest = text;
-    while let Some(start) = rest.find("://") {
-        let scheme_start = rest[..start]
-            .rfind(|ch: char| ch.is_whitespace())
-            .map(|index| index + 1)
-            .unwrap_or(0);
-        out.push_str(&rest[..scheme_start]);
-        let tail = &rest[scheme_start..];
-        let end = url_span_end(tail);
-        out.push_str(&redact_url(&tail[..end]));
-        rest = &tail[end..];
-    }
-    out.push_str(rest);
-    out
-}
-
-/// End of one proxy URL inside an error string.
-///
-/// A space inside userinfo ends the first token before `@host`. When that
-/// token is not a numeric `host:port`, the following tokens through the one
-/// that contains `@` are part of the same URL.
-fn url_span_end(tail: &str) -> usize {
-    let first_end = tail
-        .find(|ch: char| ch.is_whitespace())
-        .unwrap_or(tail.len());
-    let token = &tail[..first_end];
-    if token.contains('@') || !truncated_userinfo(token) {
-        return first_end;
-    }
-    let mut cursor = first_end;
-    for _ in 0..8 {
-        let rest = &tail[cursor..];
-        let Some(body_off) = rest.find(|ch: char| !ch.is_whitespace()) else {
-            break;
-        };
-        let body = &rest[body_off..];
-        let token_end = body
-            .find(|ch: char| ch.is_whitespace())
-            .unwrap_or(body.len());
-        let next = &body[..token_end];
-        if next.contains("://") {
-            break;
-        }
-        let absolute = cursor + body_off + token_end;
-        if next.contains('@') {
-            return absolute;
-        }
-        cursor = absolute;
-    }
-    first_end
-}
-
-/// `scheme://user:secret` with no `@` and a non-numeric tail. A `host:port`
-/// has a numeric port and is left as one token.
-fn truncated_userinfo(token: &str) -> bool {
-    let Some((_, rest)) = token.split_once("://") else {
-        return false;
-    };
-    if rest.is_empty() || rest.contains('@') {
-        return false;
-    }
-    let Some((_, after_colon)) = rest.rsplit_once(':') else {
-        return false;
-    };
-    !after_colon.is_empty() && !after_colon.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn age(now: SystemTime, earlier: SystemTime) -> Duration {
@@ -1270,6 +1202,73 @@ mod tests {
         assert!(
             out.contains("10.0.0.1"),
             "the host of a split userinfo url stays visible"
+        );
+    }
+
+    #[test]
+    fn d245_external_errors_and_held_text_never_expose_split_userinfo() {
+        let cases = [
+            (
+                "numeric first piece",
+                "socks5://alice:1234 d245-numeric-tail@10.0.0.1:1080",
+                "http://alice:1234 d245-numeric-tail@10.0.0.1:1080",
+                vec!["1234", "d245-numeric-tail"],
+            ),
+            (
+                "more than eight pieces",
+                "socks5h://alice:prefix d245-long-01 d245-long-02 d245-long-03 d245-long-04 d245-long-05 d245-long-06 d245-long-07 d245-long-08 d245-long-09 d245-long-10@10.0.0.1:1080",
+                "http://alice:prefix d245-long-01 d245-long-02 d245-long-03 d245-long-04 d245-long-05 d245-long-06 d245-long-07 d245-long-08 d245-long-09 d245-long-10@10.0.0.1:1080",
+                vec![
+                    "prefix",
+                    "d245-long-01",
+                    "d245-long-02",
+                    "d245-long-03",
+                    "d245-long-04",
+                    "d245-long-05",
+                    "d245-long-06",
+                    "d245-long-07",
+                    "d245-long-08",
+                    "d245-long-09",
+                    "d245-long-10",
+                ],
+            ),
+            (
+                "tab separator",
+                "socks5://alice:prefix\td245-tab-tail@10.0.0.1:1080",
+                "http://alice:prefix\td245-tab-tail@10.0.0.1:1080",
+                vec!["prefix", "d245-tab-tail"],
+            ),
+            (
+                "newline and Unicode separators",
+                "socks5://alice:prefix\nd245-line-tail\u{2003}d245-unicode-tail@10.0.0.1:1080",
+                "http://alice:prefix\nd245-line-tail\u{2003}d245-unicode-tail@10.0.0.1:1080",
+                vec!["prefix", "d245-line-tail", "d245-unicode-tail"],
+            ),
+            (
+                "scheme variant",
+                "socks5://alice:prefix d245-scheme-tail@10.0.0.1:1080",
+                "http://alice:prefix d245-scheme-tail@10.0.0.1:1080",
+                vec!["prefix", "d245-scheme-tail"],
+            ),
+        ];
+        let mut failures = Vec::new();
+        for (name, choice, observed, secrets) in cases {
+            let error = redact_error(&format!("connect to {observed} failed"), choice);
+            let reading = Reading {
+                state: State::Unsupported,
+                loc: "CN".to_owned(),
+                via: shown(choice),
+                at: Some(epoch()),
+                error,
+            };
+            let visible = format!("{} {}", reading.error, held_error(&reading).message());
+            if secrets.iter().any(|secret| visible.contains(secret)) {
+                failures.push(name);
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "credential material remained visible in cases: {failures:?}"
         );
     }
 
