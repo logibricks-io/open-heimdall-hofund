@@ -130,6 +130,7 @@ fn shipped_agent_descriptions_preserve_public_fields() {
                 },
             ),
             ("env.ANTHROPIC_SMALL_FAST_MODEL", tier("fast")),
+            ("env.CLAUDE_CODE_SUBAGENT_MODEL", Slot::model_if_unset(None)),
         ],
     );
 
@@ -2215,14 +2216,52 @@ fn b7_goose_yaml_comments_survive_pick_clear_and_disconnect() {
 }
 
 #[test]
+fn d267_claude_connect_writes_and_preserves_the_subagent_model() {
+    let home = scratch();
+    let session = Session::new(&*home);
+    let agent = adapter("claude-code", TargetOs::Linux);
+    let target = target();
+    let path = home.join(".claude/settings.json");
+    agent.apply(&session, &target).expect("connect");
+    let connected: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).expect("settings")).expect("JSON");
+    assert_eq!(connected["env"]["CLAUDE_CODE_SUBAGENT_MODEL"], "route-a");
+
+    let mut changed = connected;
+    changed["env"]["CLAUDE_CODE_SUBAGENT_MODEL"] =
+        serde_json::Value::String("custom:high".to_owned());
+    write(
+        &path,
+        &serde_json::to_string_pretty(&changed).expect("JSON"),
+    );
+    agent.apply(&session, &target).expect("reconnect");
+    let preserved: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(path).expect("settings")).expect("JSON");
+    assert_eq!(
+        preserved["env"]["CLAUDE_CODE_SUBAGENT_MODEL"],
+        "custom:high"
+    );
+}
+
+#[test]
+fn d267_claude_subagent_header_keeps_agent_identity() {
+    let claude = hofund_plugin_registry::agent("claude-code").expect("claude-code");
+    let headers = [
+        ("user-agent", "claude-cli/2.1.327 (external, cli)"),
+        ("x-claude-code-agent-id", "acd536fa4f017c34d"),
+    ];
+    assert_eq!(
+        hofund_agent::request_agent_id(headers, "", &[claude]),
+        Some("claude-code".to_owned())
+    );
+}
+
+#[test]
 fn g2_15_shipped_agents_declare_request_hints() {
     let claude = hofund_plugin_registry::agent("claude-code").expect("claude-code");
-    assert_eq!(
-        claude.request_agent_header(),
-        Some("x-claude-code-agent-id")
-    );
+    assert!(claude.request_agent_header().is_none());
     assert!(claude.client_prefixes().is_empty());
-    assert!(claude.nested_turn_headers().is_empty());
+    assert_eq!(claude.nested_turn_headers(), ["x-claude-code-agent-id"]);
 
     let codex = hofund_plugin_registry::agent("codex").expect("codex");
     assert!(codex.request_agent_header().is_none());

@@ -6,7 +6,8 @@
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "fable-x",
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "fable-x",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "fable-x",
-    "ANTHROPIC_SMALL_FAST_MODEL": "fable-x"
+    "ANTHROPIC_SMALL_FAST_MODEL": "fable-x",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "fable-x"
   },
   "model": "fable-x"
 }

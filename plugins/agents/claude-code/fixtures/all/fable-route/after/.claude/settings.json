@@ -7,7 +7,8 @@
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-fable-5",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-fable-5",
     "ANTHROPIC_DEFAULT_FABLE_MODEL": "claude-fable-5",
-    "ANTHROPIC_SMALL_FAST_MODEL": "claude-fable-5"
+    "ANTHROPIC_SMALL_FAST_MODEL": "claude-fable-5",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "claude-fable-5"
   },
   "model": "claude-fable-5"
 }
