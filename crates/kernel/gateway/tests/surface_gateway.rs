@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use futures_util::FutureExt;
 use hofund_codec::{Codec, OpenAiChat};
 use hofund_gateway::Gateway;
 use hofund_ir::{ContentPart, Message, Request as ModelRequest, Response, Role};
@@ -429,4 +430,76 @@ async fn d253_dropping_an_in_flight_call_records_client_closed() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].model, "demo");
     assert_eq!(rows[0].status, "499");
+}
+
+struct Boom {
+    member_id: MemberId,
+    hits: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Member for Boom {
+    fn id(&self) -> &MemberId {
+        &self.member_id
+    }
+
+    fn route_id(&self) -> &str {
+        "boom"
+    }
+
+    fn protocol(&self) -> &str {
+        "plain"
+    }
+
+    async fn execute(
+        &self,
+        _request: ModelRequest,
+        _inbound_protocol: &str,
+    ) -> Result<Completion, PluginError> {
+        self.hits.fetch_add(1, Ordering::SeqCst);
+        panic!("dispatch failed");
+    }
+}
+
+#[tokio::test]
+async fn d253_a_panic_after_dispatch_is_not_a_client_close() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
+    let hits = Arc::new(AtomicUsize::new(0));
+    let member: Arc<dyn Member> = Arc::new(Boom {
+        member_id: MemberId::from_preset(
+            PresetId::try_from("boom").expect("preset"),
+            MemberKey::from_static("row"),
+        ),
+        hits: Arc::clone(&hits),
+    });
+    let routes = BTreeMap::from([("demo".to_owned(), vec![member])]);
+    let codecs = HashMap::from([(
+        "/v1/chat/completions".to_owned(),
+        Arc::new(OpenAiChat) as Arc<dyn Codec>,
+    )]);
+    let app = Gateway::new(
+        Snapshot::new(Router::new(routes, FailoverPolicy::default())),
+        "secret".to_owned(),
+        codecs,
+        Arc::clone(&usage),
+    )
+    .into_router();
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("authorization", "Bearer secret")
+        .header("content-type", "application/json")
+        .body(Body::from(CHAT))
+        .expect("request");
+    let result = std::panic::AssertUnwindSafe(app.oneshot(request))
+        .catch_unwind()
+        .await;
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    assert!(result.is_err(), "the dispatch panic was swallowed");
+    let rows = usage.rows().expect("usage rows");
+    assert!(
+        rows.iter().all(|row| row.status != "499"),
+        "a panic was stored as a client close: {rows:?}"
+    );
 }

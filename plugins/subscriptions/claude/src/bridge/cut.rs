@@ -61,13 +61,14 @@ pub(crate) fn completed_reply_id(stdout: &str) -> Option<String> {
         let event = value.get("event").unwrap_or(&value);
         match event.get("type").and_then(Value::as_str) {
             Some("message_start") => {
-                if let Some(found) = event
+                // A later message starts over. An earlier `end_turn` must not
+                // make this message the completed reply when it does not end.
+                ended = false;
+                id = event
                     .pointer("/message/id")
                     .and_then(Value::as_str)
-                    .filter(|id| !id.is_empty())
-                {
-                    id = Some(found.to_owned());
-                }
+                    .filter(|found| !found.is_empty())
+                    .map(str::to_owned);
             }
             Some("message_delta")
                 if event.pointer("/delta/stop_reason").and_then(Value::as_str)
@@ -248,6 +249,8 @@ pub(crate) fn write_cut(
     for dir in dirs {
         let path = dir.join(format!("{id}.jsonl"));
         if write_private(&path, &copied).is_ok() {
+            #[cfg(test)]
+            CUTS_WRITTEN.with(|count| count.set(count.get() + 1));
             return Some(id);
         }
     }
@@ -368,6 +371,23 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut file = options.open(path)?;
     file.write_all(bytes)?;
     Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    static CUTS_WRITTEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Zeroes the per-thread count of copies [`write_cut`] has written.
+#[cfg(test)]
+pub(crate) fn reset_cuts_written() {
+    CUTS_WRITTEN.with(|count| count.set(0));
+}
+
+/// How many copies [`write_cut`] has written on this thread since the reset.
+#[cfg(test)]
+pub(crate) fn cuts_written() -> u64 {
+    CUTS_WRITTEN.with(|count| count.get())
 }
 
 /// Removes a copy this bridge wrote. A live session file is left in place.

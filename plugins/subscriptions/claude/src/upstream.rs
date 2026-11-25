@@ -215,6 +215,46 @@ fn token_for_run(blob: &SecretObject) -> Result<OsString, PluginError> {
         })
 }
 
+/// Deletes a mode-0600 transcript copy unless the run adopts it.
+///
+/// `retry_branch` writes the copy before room, sign-in, or launch can fail.
+/// Dropping this guard on those returns removes the file. `adopt` runs once
+/// the run records the copy.
+struct TranscriptCopy {
+    paths: Vec<PathBuf>,
+    session: String,
+    armed: bool,
+}
+
+impl TranscriptCopy {
+    fn hold(saved: Option<&crate::bridge::session::SavedSession>) -> Self {
+        match saved.filter(|saved| saved.copy) {
+            Some(saved) => Self {
+                paths: saved.sessions.clone(),
+                session: saved.session.clone(),
+                armed: true,
+            },
+            None => Self {
+                paths: Vec::new(),
+                session: String::new(),
+                armed: false,
+            },
+        }
+    }
+
+    fn adopt(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for TranscriptCopy {
+    fn drop(&mut self) {
+        if self.armed {
+            crate::bridge::cut::delete_copy(&self.paths, &self.session);
+        }
+    }
+}
+
 fn running_as_root() -> bool {
     #[cfg(unix)]
     {
@@ -306,6 +346,7 @@ impl ClaudeUpstream {
             .bridge
             .unshelve(&request, &self.account)
             .or_else(|| self.bridge.retry_branch(&request, &self.account));
+        let mut transcript = TranscriptCopy::hold(unshelved.as_ref().map(|(saved, _)| saved));
         self.bridge.retire(&self.account, &request);
         let room = self
             .bridge
@@ -374,6 +415,7 @@ impl ClaudeUpstream {
             if persists && let Some((saved, since)) = &unshelved {
                 self.bridge
                     .note_started_from(id, saved, &request, since.len());
+                transcript.adopt();
             }
             guard.bind(id);
             run_id = Some(id);
@@ -1402,5 +1444,87 @@ mod tests {
         let blob = stored_blob(&host, &id);
         assert!(!blob.flag(creds::LAPSED));
         assert_eq!(blob.number(creds::VERSION), Some(2));
+    }
+
+    #[test]
+    fn d253_retry_copy_is_deleted_when_execute_returns_before_adopt() {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = TestHost::open_for(
+            PluginKind::Subscription,
+            PluginId::from_static("claude"),
+            dir.path(),
+        );
+        let id = AccountId::from_static("a-00000000000000aa");
+        let bridge = crate::bridge::Bridge::new();
+        let sessions = dir.path().join("sessions");
+        std::fs::create_dir_all(&sessions).expect("sessions");
+        std::fs::write(
+            sessions.join("sess_1.jsonl"),
+            "{\"type\":\"assistant\",\"uuid\":\"line-1\",\"sessionId\":\"sess_1\",\"message\":{\"id\":\"msg_1\",\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}\n",
+        )
+        .expect("transcript");
+        let tools = json!([{"name": "read", "input_schema": {"type": "object"}}]);
+        let seed = d253_request(
+            json!([
+                {"role": "system", "content": [{"type": "text", "text": "rules"}]},
+                {"role": "user", "content": [{"type": "text", "text": "original ask"}]}
+            ]),
+            tools.clone(),
+        );
+        let run = bridge.park_run(id.clone(), vec!["read".into()]);
+        bridge.ensure_session_run(run, &id, vec!["read".into()]);
+        bridge.set_session(run, "sess_1", vec![sessions.clone()]);
+        bridge.note_completed_reply(run, "msg_1");
+        bridge.heard(run, &seed.messages);
+        bridge.ended(
+            run,
+            &id,
+            &seed,
+            "ok",
+            crate::bridge::session::TurnStop::Stop,
+            true,
+        );
+        let follow = d253_request(
+            json!([
+                {"role": "system", "content": [{"type": "text", "text": "rules"}]},
+                {"role": "user", "content": [{"type": "text", "text": "original ask"}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+                {"role": "user", "content": [{"type": "text", "text": "cancelled ask"}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "No response requested."}]},
+                {"role": "user", "content": [{"type": "text", "text": "and run the tests"}]}
+            ]),
+            tools,
+        );
+        bridge.resume(&follow, &id).expect("resume");
+        bridge.heard(run, &follow.messages);
+        let (saved, _) = bridge
+            .retry_branch(&follow, &id)
+            .expect("the busy run cuts a transcript");
+        let copy = sessions.join(format!("{}.jsonl", saved.session));
+        assert!(copy.is_file(), "the probe cut was not written");
+        std::fs::remove_file(&copy).expect("remove probe cut");
+        drop(saved);
+        crate::bridge::cut::reset_cuts_written();
+        let provider = ClaudeUpstream::new(
+            id,
+            host.context().clone(),
+            Some(program()),
+            bridge,
+            crate::limits::Store::new(),
+        );
+        let error = match block_on(provider.execute(follow, ProtocolId::AnthropicMessages)) {
+            Err(error) => error,
+            Ok(_) => panic!("missing sign-in"),
+        };
+        assert_eq!(error.kind(), hofund_plugin_api::PluginErrorKind::Auth);
+        assert!(
+            crate::bridge::cut::cuts_written() >= 1,
+            "execute returned before writing the retry transcript"
+        );
+        assert!(
+            !copy.exists(),
+            "execute left the transcript copy at {}",
+            copy.display()
+        );
     }
 }

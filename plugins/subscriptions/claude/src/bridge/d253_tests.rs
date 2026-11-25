@@ -734,3 +734,111 @@ fn d253_completed_reply_id_needs_end_turn() {
     assert_eq!(cut::completed_reply_id(stdout).as_deref(), Some("msg_text"));
     assert!(cut::completed_reply_id("{\"type\":\"stream_event\",\"event\":{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}}").is_none());
 }
+
+#[test]
+fn d253_completed_reply_id_resets_on_the_next_message_start() {
+    let open = |id: &str| {
+        format!(
+            "{{\"type\":\"stream_event\",\"event\":{{\"type\":\"message_start\",\"message\":{{\"id\":\"{id}\"}}}}}}\n"
+        )
+    };
+    let stop = |reason: &str| {
+        format!(
+            "{{\"type\":\"stream_event\",\"event\":{{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"{reason}\"}}}}}}\n"
+        )
+    };
+    let unfinished = format!(
+        "{}{}{}{}",
+        open("msg_done"),
+        stop("end_turn"),
+        open("msg_tool"),
+        stop("tool_use")
+    );
+    assert!(
+        cut::completed_reply_id(&unfinished).is_none(),
+        "a later message that does not end the turn became the completed reply"
+    );
+    let finished = format!(
+        "{}{}{}{}",
+        open("msg_done"),
+        stop("end_turn"),
+        open("msg_next"),
+        stop("end_turn")
+    );
+    assert_eq!(
+        cut::completed_reply_id(&finished).as_deref(),
+        Some("msg_next")
+    );
+}
+
+#[test]
+fn d253_handover_in_the_publish_gap_is_not_shelved() {
+    for case in ["handed", "stopping"] {
+        let bridge = Bridge::new();
+        let dir = tempfile::tempdir().expect("dir");
+        let run = idle_with_reply(&bridge, dir.path());
+        let cancelled = base_request(vec![
+            text("user", "original ask"),
+            text("assistant", "ok"),
+            text("user", "CANCEL ME"),
+        ]);
+        bridge.resume(&cancelled, &owner()).expect("resume");
+        let gate = Arc::new(CutGate::new());
+        bridge.install_publish_gate(Arc::clone(&gate));
+        let cutting = {
+            let bridge = bridge.clone();
+            let cancelled = cancelled.clone();
+            thread::spawn(move || bridge.client_cancelled(run, &cancelled, &owner()))
+        };
+        gate.wait_entered();
+        match case {
+            "handed" => bridge.account_handed_over(&owner()),
+            "stopping" => bridge.mark_stopping(),
+            _ => unreachable!(),
+        }
+        gate.release();
+        cutting.join().expect("cut");
+        let next = base_request(vec![
+            text("user", "original ask"),
+            text("assistant", "ok"),
+            text("user", "replacement"),
+        ]);
+        assert!(
+            bridge.unshelve(&next, &owner()).is_none(),
+            "{case} published a cut after the flag landed before the insert"
+        );
+    }
+}
+
+#[test]
+fn d253_shelf_insert_holds_the_publish_exclusion() {
+    let bridge = Bridge::new();
+    let dir = tempfile::tempdir().expect("dir");
+    let run = idle_with_reply(&bridge, dir.path());
+    let cancelled = base_request(vec![
+        text("user", "original ask"),
+        text("assistant", "ok"),
+        text("user", "CANCEL ME"),
+    ]);
+    bridge.resume(&cancelled, &owner()).expect("resume");
+    let gate = Arc::new(CutGate::new());
+    bridge.install_insert_gate(Arc::clone(&gate));
+    let cutting = {
+        let bridge = bridge.clone();
+        let cancelled = cancelled.clone();
+        thread::spawn(move || bridge.client_cancelled(run, &cancelled, &owner()))
+    };
+    gate.wait_entered();
+    assert!(
+        bridge.publish_exclusion_held(),
+        "the shelf insert did not hold the same exclusion as handover and stopping"
+    );
+    gate.release();
+    cutting.join().expect("cut");
+    let next = base_request(vec![
+        text("user", "original ask"),
+        text("assistant", "ok"),
+        text("user", "replacement"),
+    ]);
+    assert!(bridge.unshelve(&next, &owner()).is_some());
+}

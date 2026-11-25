@@ -348,6 +348,14 @@ impl RequestTrack {
         ));
     }
 
+    /// Records an unfinished drop of this dispatched request as the client closing it.
+    ///
+    /// The HTTP server reports that close by dropping the handler. A panic is
+    /// not that close: [`Drop`] records 500 and writes no 499 usage row. A
+    /// caller that stopped on its own deadline is 504 via [`Self::stop_waiting`].
+    /// Any other unfinished drop after this point is 499. The server has no
+    /// second signal that separates a disconnected client from a handler that
+    /// was dropped without [`Self::finish`].
     fn client_waiting(&mut self, usage: Arc<Ledger>, request: &ModelRequest, identity: &Identity) {
         self.drop_status = 499;
         self.cancel_usage = Some((
@@ -408,13 +416,20 @@ impl RequestTrack {
 impl Drop for RequestTrack {
     fn drop(&mut self) {
         if !self.finished {
-            // Panic, cancellation, or a path that forgot finish: still emit and
-            // return the counter to zero.
-            let stopped = self
-                .stopped_waiting
-                .as_ref()
-                .is_some_and(StoppedWaiting::is_stopped);
-            let status = if stopped {
+            // Still emit and return the counter to zero. A panic is an internal
+            // error, not a client close. Any other unfinished drop uses
+            // `drop_status`, which [`RequestTrack::client_waiting`] sets to 499
+            // once dispatch has started: that drop is the only client-close
+            // signal, and it is also how a handler that forgot `finish` ends.
+            let panicked = std::thread::panicking();
+            let stopped = !panicked
+                && self
+                    .stopped_waiting
+                    .as_ref()
+                    .is_some_and(StoppedWaiting::is_stopped);
+            let status = if panicked {
+                StatusCode::INTERNAL_SERVER_ERROR.as_u16()
+            } else if stopped {
                 StatusCode::GATEWAY_TIMEOUT.as_u16()
             } else {
                 self.drop_status

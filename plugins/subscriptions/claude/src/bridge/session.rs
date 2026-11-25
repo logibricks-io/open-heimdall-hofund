@@ -266,6 +266,12 @@ pub(crate) struct Sessions {
     waiter_lock: Mutex<()>,
     next_cancel: AtomicU64,
     stopping: AtomicBool,
+    /// Held across the handed or stopping decision and the shelf insert.
+    publish: Mutex<()>,
+    /// Pauses before that decision so a test can set handover or stopping.
+    publish_gate: Mutex<Option<Arc<CutGate>>>,
+    /// Pauses inside the exclusion, immediately before the shelf insert.
+    insert_gate: Mutex<Option<Arc<CutGate>>>,
     ended: Mutex<Vec<EndedRun>>,
     cut_gate: Mutex<Option<Arc<CutGate>>>,
     #[cfg(test)]
@@ -299,6 +305,12 @@ impl Sessions {
 
     fn lock_ended(&self) -> std::sync::MutexGuard<'_, Vec<EndedRun>> {
         self.ended
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn lock_publish(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.publish
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -829,7 +841,11 @@ impl Bridge {
     }
 
     /// Marks every run on an account moved into the agent's own sign-in.
+    ///
+    /// Holds the publish exclusion first, so the handed flag cannot change
+    /// between the cancel decision and the shelf insert.
     pub(crate) fn account_handed_over(&self, owner: &AccountId) {
+        let _publish = self.sessions.lock_publish();
         let mut idle = Vec::new();
         {
             let mut meta = self.sessions.lock_meta();
@@ -857,7 +873,11 @@ impl Bridge {
     }
 
     /// The gateway is stopping. A cancel still cutting keeps no session.
+    ///
+    /// Holds the publish exclusion first, so the flag cannot change between
+    /// the cancel decision and the shelf insert.
     pub(crate) fn mark_stopping(&self) {
+        let _publish = self.sessions.lock_publish();
         self.sessions.stopping.store(true, Ordering::Release);
     }
 
@@ -882,6 +902,32 @@ impl Bridge {
             run.persists = true;
             run.answering = true;
         }
+    }
+
+    /// Pauses a cancel before the publish exclusion, when a test installed one.
+    #[cfg(test)]
+    pub(crate) fn install_publish_gate(&self, gate: Arc<CutGate>) {
+        *self
+            .sessions
+            .publish_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(gate);
+    }
+
+    /// Pauses inside the publish exclusion, immediately before the shelf insert.
+    #[cfg(test)]
+    pub(crate) fn install_insert_gate(&self, gate: Arc<CutGate>) {
+        *self
+            .sessions
+            .insert_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(gate);
+    }
+
+    /// Whether the publish exclusion is currently held.
+    #[cfg(test)]
+    pub(crate) fn publish_exclusion_held(&self) -> bool {
+        self.sessions.publish.try_lock().is_err()
     }
 
     /// Holds a cut at [`CutGate`] when a test installed one.
@@ -1202,12 +1248,6 @@ impl Bridge {
             return;
         };
         self.pause_cut();
-        if cancelled_key.is_some()
-            && (self.is_handed(run_id) || self.sessions.stopping.load(Ordering::Acquire))
-        {
-            super::cut::delete_copy(&snapshot.paths, &cut);
-            return;
-        }
         let Some((key, since)) = super::cut::turn_from(owner.as_str(), request, &took) else {
             super::cut::delete_copy(&snapshot.paths, &cut);
             return;
@@ -1218,6 +1258,18 @@ impl Bridge {
         )
         .pop()
         .unwrap_or_default();
+        // The decision and the insert share one exclusion with handover and
+        // shutdown. A flag that lands after the decision and before the insert
+        // must not publish the cut.
+        self.pause_publish();
+        let _publish = self.sessions.lock_publish();
+        if cancelled_key.is_some()
+            && (self.is_handed(run_id) || self.sessions.stopping.load(Ordering::Acquire))
+        {
+            super::cut::delete_copy(&snapshot.paths, &cut);
+            return;
+        }
+        self.pause_insert();
         self.insert_shelf(SavedSession {
             session: cut,
             sessions: snapshot.paths,
@@ -1233,6 +1285,30 @@ impl Bridge {
         let gate = self
             .sessions
             .cut_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(gate) = gate {
+            gate.pause();
+        }
+    }
+
+    fn pause_publish(&self) {
+        let gate = self
+            .sessions
+            .publish_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(gate) = gate {
+            gate.pause();
+        }
+    }
+
+    fn pause_insert(&self) {
+        let gate = self
+            .sessions
+            .insert_gate
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
