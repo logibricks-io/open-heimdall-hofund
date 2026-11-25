@@ -107,8 +107,8 @@ impl CopilotUpstream {
         inbound: ProtocolId,
         auto: Option<&AutoSession>,
     ) -> Result<Completion, PluginError> {
-        let compact = take_compact(&mut request);
-        if compact {
+        let original = take_compact(&mut request);
+        if original.is_some() {
             request.stream = true;
         }
         let request = image_cap::within(&self.book, &self.account, request);
@@ -120,7 +120,7 @@ impl CopilotUpstream {
             ));
         }
         if protocol == ProtocolId::OPENAI_RESPONSES
-            && !compact
+            && original.is_none()
             && self.book.responses_socket(&self.account, &request.model)
         {
             match crate::socket::try_responses(
@@ -148,9 +148,11 @@ impl CopilotUpstream {
         {
             target = target.rewrite(rewrite).observe(observe);
         }
-        if compact && protocol == ProtocolId::OPENAI_RESPONSES {
-            target = target.rewrite(std::sync::Arc::new(|body| {
-                append_trigger(body);
+        if let Some(original) = original
+            && protocol == ProtocolId::OPENAI_RESPONSES
+        {
+            target = target.rewrite(std::sync::Arc::new(move |body| {
+                append_trigger(body, Some(&original));
                 Vec::new()
             }));
         }
@@ -357,31 +359,62 @@ pub(crate) fn initiator(request: &Request) -> &'static str {
 const COMPACT_FLAG: &str = "hofund_responses_compact";
 const COMPACT_BODY: &str = "hofund_responses_compact_body";
 
-fn take_compact(request: &mut Request) -> bool {
+fn take_compact(request: &mut Request) -> Option<String> {
     let flagged = request
         .extensions
         .get(COMPACT_FLAG)
         .and_then(Value::as_bool)
         == Some(true);
+    let original = match request.extensions.remove(COMPACT_BODY) {
+        Some(Value::String(text)) => text,
+        _ => String::new(),
+    };
     request.extensions.remove(COMPACT_FLAG);
-    request.extensions.remove(COMPACT_BODY);
-    flagged
+    flagged.then_some(original)
 }
 
-fn append_trigger(body: &mut json::Map<String, Value>) {
+/// Replaces `input` with the client's own items, then one trigger when the
+/// last item is not already that trigger. A string input is one user message.
+/// Without a readable client body, the encoded input is normalized the same way.
+fn append_trigger(body: &mut json::Map<String, Value>, original: Option<&str>) {
+    if let Some(items) = original.and_then(client_items) {
+        body.insert("input".to_owned(), Value::Array(with_trigger(items)));
+        return;
+    }
     let input = body
         .entry("input")
         .or_insert_with(|| Value::Array(Vec::new()));
-    if let Some(text) = input.as_str().map(str::to_owned) {
-        *input = json::json!([{
-            "type": "message",
-            "role": "user",
-            "content": [{"type": "input_text", "text": text}]
-        }]);
-    }
-    let Some(items) = input.as_array_mut() else {
-        return;
+    let items = match input {
+        Value::String(text) => vec![user_text(text)],
+        Value::Array(items) => std::mem::take(items),
+        _ => return,
     };
+    *input = Value::Array(with_trigger(items));
+}
+
+fn client_items(original: &str) -> Option<Vec<Value>> {
+    if original.is_empty() {
+        return None;
+    }
+    let Value::Object(client) = json::from_str::<Value>(original).ok()? else {
+        return None;
+    };
+    Some(match client.get("input") {
+        Some(Value::String(text)) => vec![user_text(text)],
+        Some(Value::Array(items)) => items.clone(),
+        _ => Vec::new(),
+    })
+}
+
+fn user_text(text: &str) -> Value {
+    json::json!({
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": text}],
+    })
+}
+
+fn with_trigger(mut items: Vec<Value>) -> Vec<Value> {
     let already = items
         .last()
         .and_then(|item| item.get("type"))
@@ -390,6 +423,7 @@ fn append_trigger(body: &mut json::Map<String, Value>) {
     if !already {
         items.push(json::json!({"type": "compaction_trigger"}));
     }
+    items
 }
 
 /// Whether any message carries an image, including inside a tool result.

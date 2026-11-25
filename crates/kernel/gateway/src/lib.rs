@@ -2159,6 +2159,9 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     }
     model_request.caller = Some(advisor::stamp_caller(&identity));
     if responses_compact::is_path(&path) {
+        // Compact is a unary route. A client `stream` flag must not make the
+        // gateway answer `text/event-stream` or ask a key provider to stream.
+        model_request.stream = false;
         model_request
             .extensions
             .insert(responses_compact::FLAG, serde_json::Value::Bool(true));

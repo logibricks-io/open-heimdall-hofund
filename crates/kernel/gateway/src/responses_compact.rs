@@ -7,6 +7,7 @@
 //! The member that sealed an item is remembered so a later Responses call
 //! carrying that seal is limited to that member.
 
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
@@ -220,25 +221,37 @@ fn gather(original: &[u8], upstream: &[u8]) -> Option<Vec<u8>> {
 
 fn reply_of(upstream: &[u8]) -> Option<(Value, Vec<Value>)> {
     if let Some(events) = sse_values(upstream) {
-        let mut items = Vec::new();
+        let mut indexed = BTreeMap::<i64, Value>::new();
         let mut reply = None;
         for event in events {
             let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
             if kind == "response.output_item.done"
-                && let Some(item) = event.get("item").cloned()
+                && let Some(item) = event.get("item").filter(|item| !item.is_null())
             {
-                items.push(item);
+                let index = event
+                    .get("output_index")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
+                indexed.insert(index, item.clone());
             }
             if matches!(kind, "response.completed" | "response.incomplete")
                 && let Some(response) = event.get("response").cloned()
             {
-                if let Some(output) = response.get("output").and_then(Value::as_array) {
-                    items = output.clone();
-                }
                 reply = Some(response);
             }
         }
-        return Some((reply.unwrap_or(Value::Null), items));
+        let reply = reply.unwrap_or(Value::Null);
+        let completed = reply
+            .get("output")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let items = if completed.is_empty() {
+            indexed.into_values().collect()
+        } else {
+            completed
+        };
+        return Some((reply, items));
     }
     let value = serde_json::from_slice::<Value>(upstream).ok()?;
     let items = value
@@ -350,6 +363,32 @@ mod tests {
         assert_eq!(value["output"][1]["role"], "user");
         assert_eq!(value["output"][2]["encrypted_content"], "NEWSEAL");
         assert!(!value["output"].to_string().contains("gAAAAearlier=="));
+    }
+
+    #[test]
+    fn d247_empty_completed_output_keeps_the_streamed_seal() {
+        let upstream = concat!(
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"compaction\",\"encrypted_content\":\"NEWSEAL\"}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"created_at\":1,\"output\":[]}}\n\n",
+            "data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_1\",\"output\":[]}}\n\n",
+        );
+        let body = gather(ASKED.as_bytes(), upstream.as_bytes()).expect("compaction");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(value["object"], "response.compaction");
+        assert_eq!(value["output"][2]["encrypted_content"], "NEWSEAL");
+    }
+
+    #[test]
+    fn d247_output_index_orders_streamed_items() {
+        let upstream = concat!(
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"compaction\",\"encrypted_content\":\"LATER\"}}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"compaction\",\"encrypted_content\":\"EARLIER\"}}\n\n",
+            "data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_9\",\"output\":[]}}\n\n",
+        );
+        let body = gather(br#"{"input":[]}"#, upstream.as_bytes()).expect("compaction");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(value["output"][0]["encrypted_content"], "EARLIER");
+        assert_eq!(value["output"][1]["encrypted_content"], "LATER");
     }
 
     #[test]

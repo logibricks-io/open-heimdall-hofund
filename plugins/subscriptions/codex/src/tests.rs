@@ -1221,7 +1221,10 @@ fn d247_compact_appends_a_trigger_on_responses_and_does_not_post_compact() {
         .insert("hofund_responses_compact", Value::Bool(true));
     request.extensions.insert(
         "hofund_responses_compact_body",
-        Value::String("{\"model\":\"gpt-5\"}".to_owned()),
+        Value::String(
+            r#"{"model":"gpt-5","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"keep this"}]}]}"#
+                .to_owned(),
+        ),
     );
     host.http()
         .enqueue(b"event: response.completed\ndata: {}\n\n".to_vec());
@@ -1235,6 +1238,7 @@ fn d247_compact_appends_a_trigger_on_responses_and_does_not_post_compact() {
     );
     let body: Value = json::from_slice(call.body()).expect("recorded JSON");
     let input = body["input"].as_array().expect("input");
+    assert_eq!(input[0]["content"][0]["text"], json!("keep this"));
     assert_eq!(
         input
             .last()
@@ -1244,6 +1248,72 @@ fn d247_compact_appends_a_trigger_on_responses_and_does_not_post_compact() {
     );
     assert_eq!(body["stream"], json!(true));
     assert!(body.get("hofund_responses_compact").is_none());
+}
+
+#[test]
+fn d247_compact_keeps_client_seals_and_normalizes_a_string_input() {
+    let cases = [
+        (
+            r#"{"model":"gpt-5","input":[{"type":"compaction","encrypted_content":"SEAL-A","id":"cmp_1"},{"type":"compaction_summary","encrypted_content":"SEAL-B"},{"role":"user","content":"next"}]}"#,
+            json!([
+                {"type":"compaction","encrypted_content":"SEAL-A","id":"cmp_1"},
+                {"type":"compaction_summary","encrypted_content":"SEAL-B"},
+                {"role":"user","content":"next"},
+                {"type":"compaction_trigger"}
+            ]),
+        ),
+        (
+            r#"{"model":"gpt-5","input":"remember this"}"#,
+            json!([
+                {"type":"message","role":"user","content":[{"type":"input_text","text":"remember this"}]},
+                {"type":"compaction_trigger"}
+            ]),
+        ),
+        (
+            r#"{"model":"gpt-5","input":[{"type":"compaction","encrypted_content":"SEAL"},{"type":"compaction_trigger"}]}"#,
+            json!([
+                {"type":"compaction","encrypted_content":"SEAL"},
+                {"type":"compaction_trigger"}
+            ]),
+        ),
+    ];
+    for (original, want) in cases {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let id = seed(&host, &access_token("first", 10_000));
+        let mut request = streaming_request();
+        request.stream = false;
+        request
+            .extensions
+            .insert("hofund_responses_compact", Value::Bool(true));
+        request.extensions.insert(
+            "hofund_responses_compact_body",
+            Value::String(original.to_owned()),
+        );
+        host.http()
+            .enqueue(b"event: response.completed\ndata: {}\n\n".to_vec());
+        block_on(upstream_for(&host, &id).execute(request, ProtocolId::OPENAI_RESPONSES))
+            .expect("compact");
+        let call = &host.http().calls()[0];
+        assert!(
+            call.uri().contains("/responses") && !call.uri().contains("/responses/compact"),
+            "{}",
+            call.uri()
+        );
+        let body: Value = json::from_slice(call.body()).expect("recorded JSON");
+        assert_eq!(body["input"], want, "{original}");
+        assert_eq!(
+            body["input"]
+                .as_array()
+                .expect("input")
+                .iter()
+                .filter(
+                    |item| item.get("type").and_then(Value::as_str) == Some("compaction_trigger")
+                )
+                .count(),
+            1
+        );
+    }
 }
 
 #[test]

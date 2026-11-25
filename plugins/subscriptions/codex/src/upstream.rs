@@ -114,8 +114,8 @@ impl CodexUpstream {
         let codex = self.instructions(access, &request.model).await;
         let declared: Vec<String> = request.tools.iter().map(|tool| tool.name.clone()).collect();
         let back = codex_tool_names::codex_tool_names_back(&declared);
-        let compact = take_compact(&mut request);
-        let unary = !request.stream && !compact;
+        let original = take_compact(&mut request);
+        let unary = !request.stream && original.is_none();
         request.stream = true;
         let posted = Arc::new(Mutex::new(None::<Vec<u8>>));
         let trimmed = Arc::new(Mutex::new(None::<Vec<u8>>));
@@ -127,7 +127,7 @@ impl CodexUpstream {
                 Arc::clone(&posted),
                 Arc::clone(&trimmed),
                 &back,
-                compact,
+                original.clone(),
             );
             match wire::send(
                 self.host.http(),
@@ -194,7 +194,7 @@ impl CodexUpstream {
         posted: Arc<Mutex<Option<Vec<u8>>>>,
         trimmed: Arc<Mutex<Option<Vec<u8>>>>,
         back: &std::collections::BTreeMap<String, String>,
-        compact: bool,
+        original: Option<String>,
     ) -> Target {
         let posted_capture = Arc::clone(&posted);
         let trimmed_body = Arc::clone(&trimmed);
@@ -224,8 +224,8 @@ impl CodexUpstream {
                     return shape::session_headers(body);
                 }
                 let headers = shape::body(body, codex.as_deref());
-                if compact {
-                    append_trigger(body);
+                if let Some(original) = original.as_deref() {
+                    append_trigger(body, Some(original));
                 }
                 let bytes = Value::Object(body.clone()).to_string().into_bytes();
                 *posted_capture
@@ -393,31 +393,62 @@ pub(crate) fn token_expired(message: &str) -> bool {
 const COMPACT_FLAG: &str = "hofund_responses_compact";
 const COMPACT_BODY: &str = "hofund_responses_compact_body";
 
-fn take_compact(request: &mut Request) -> bool {
+fn take_compact(request: &mut Request) -> Option<String> {
     let flagged = request
         .extensions
         .get(COMPACT_FLAG)
         .and_then(Value::as_bool)
         == Some(true);
+    let original = match request.extensions.remove(COMPACT_BODY) {
+        Some(Value::String(text)) => text,
+        _ => String::new(),
+    };
     request.extensions.remove(COMPACT_FLAG);
-    request.extensions.remove(COMPACT_BODY);
-    flagged
+    flagged.then_some(original)
 }
 
-fn append_trigger(body: &mut json::Map<String, Value>) {
+/// Replaces `input` with the client's own items, then one trigger when the
+/// last item is not already that trigger. A string input is one user message.
+/// Without a readable client body, the encoded input is normalized the same way.
+fn append_trigger(body: &mut json::Map<String, Value>, original: Option<&str>) {
+    if let Some(items) = original.and_then(client_items) {
+        body.insert("input".to_owned(), Value::Array(with_trigger(items)));
+        return;
+    }
     let input = body
         .entry("input")
         .or_insert_with(|| Value::Array(Vec::new()));
-    if let Some(text) = input.as_str().map(str::to_owned) {
-        *input = json::json!([{
-            "type": "message",
-            "role": "user",
-            "content": [{"type": "input_text", "text": text}]
-        }]);
-    }
-    let Some(items) = input.as_array_mut() else {
-        return;
+    let items = match input {
+        Value::String(text) => vec![user_text(text)],
+        Value::Array(items) => std::mem::take(items),
+        _ => return,
     };
+    *input = Value::Array(with_trigger(items));
+}
+
+fn client_items(original: &str) -> Option<Vec<Value>> {
+    if original.is_empty() {
+        return None;
+    }
+    let Value::Object(client) = json::from_str::<Value>(original).ok()? else {
+        return None;
+    };
+    Some(match client.get("input") {
+        Some(Value::String(text)) => vec![user_text(text)],
+        Some(Value::Array(items)) => items.clone(),
+        _ => Vec::new(),
+    })
+}
+
+fn user_text(text: &str) -> Value {
+    json::json!({
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": text}],
+    })
+}
+
+fn with_trigger(mut items: Vec<Value>) -> Vec<Value> {
     let already = items
         .last()
         .and_then(|item| item.get("type"))
@@ -426,6 +457,7 @@ fn append_trigger(body: &mut json::Map<String, Value>) {
     if !already {
         items.push(json::json!({"type": "compaction_trigger"}));
     }
+    items
 }
 
 fn has_word(text: &str, word: &str) -> bool {

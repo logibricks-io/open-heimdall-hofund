@@ -45,6 +45,7 @@ struct Fake {
     trigger: bool,
     serves: bool,
     calls: Arc<Mutex<Vec<&'static str>>>,
+    streams: Arc<Mutex<Vec<bool>>>,
     reply: &'static [u8],
 }
 
@@ -79,10 +80,7 @@ impl Member for Fake {
     }
 
     async fn execute(&self, request: Request, _inbound: &str) -> Result<Completion, PluginError> {
-        assert!(
-            !request.stream,
-            "the compact client stays unary; the account forces stream later"
-        );
+        self.streams.lock().expect("streams").push(request.stream);
         self.calls.lock().expect("calls").push(self.route);
         Ok(Completion::Raw(BodyStream::from_bytes(Bytes::from_static(
             self.reply,
@@ -101,6 +99,14 @@ struct Spec {
 }
 
 fn member(spec: Spec, calls: &Arc<Mutex<Vec<&'static str>>>) -> Arc<dyn Member> {
+    member_streams(spec, calls, &Arc::new(Mutex::new(Vec::new())))
+}
+
+fn member_streams(
+    spec: Spec,
+    calls: &Arc<Mutex<Vec<&'static str>>>,
+    streams: &Arc<Mutex<Vec<bool>>>,
+) -> Arc<dyn Member> {
     Arc::new(Fake {
         id: MemberId::from_preset(
             PresetId::try_from("row").expect("preset"),
@@ -112,6 +118,7 @@ fn member(spec: Spec, calls: &Arc<Mutex<Vec<&'static str>>>) -> Arc<dyn Member> 
         trigger: spec.trigger,
         serves: spec.serves,
         calls: Arc::clone(calls),
+        streams: Arc::clone(streams),
         reply: spec.reply,
     })
 }
@@ -138,6 +145,11 @@ fn gateway(hops: Vec<Arc<dyn Member>>) -> (axum::Router, Arc<Ledger>, tempfile::
 }
 
 async fn post(app: &axum::Router, uri: &str, body: &str) -> (StatusCode, String) {
+    let (status, body, _) = post_typed(app, uri, body).await;
+    (status, body)
+}
+
+async fn post_typed(app: &axum::Router, uri: &str, body: &str) -> (StatusCode, String, String) {
     let response = app
         .clone()
         .oneshot(
@@ -152,10 +164,20 @@ async fn post(app: &axum::Router, uri: &str, body: &str) -> (StatusCode, String)
         .await
         .expect("response");
     let status = response.status();
+    let content_type = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("body");
-    (status, String::from_utf8_lossy(&bytes).into_owned())
+    (
+        status,
+        String::from_utf8_lossy(&bytes).into_owned(),
+        content_type,
+    )
 }
 
 #[tokio::test]
@@ -333,5 +355,66 @@ async fn d247_later_responses_call_stays_on_the_member_that_sealed() {
         calls.lock().expect("calls").as_slice(),
         ["responses-key", "responses-key"]
     );
+    drop(dir);
+}
+
+#[tokio::test]
+async fn d247_stream_true_is_unary_json_on_both_paths() {
+    let ask = r#"{"model":"m1","stream":true,"input":[{"type":"compaction","encrypted_content":"SEAL-RELAY"}]}"#;
+    for path in ["/v1/responses/compact", "/responses/compact"] {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let streams = Arc::new(Mutex::new(Vec::new()));
+        let hop = member_streams(
+            Spec {
+                key: "responses",
+                route: "responses-key",
+                protocol: OpenAiResponses.id(),
+                subscription: false,
+                trigger: false,
+                serves: true,
+                reply: RELAY_REPLY,
+            },
+            &calls,
+            &streams,
+        );
+        let (app, _usage, dir) = gateway(vec![hop]);
+        let (status, body, content_type) = post_typed(&app, path, ask).await;
+        assert_eq!(status, StatusCode::OK, "{path} {body}");
+        assert_eq!(content_type, "application/json", "{path} {content_type}");
+        let value: serde_json::Value = serde_json::from_str(&body).expect("json");
+        assert_eq!(value["object"], "response.compaction", "{path}");
+        assert_eq!(value["output"][0]["encrypted_content"], "SEAL-RELAY");
+        assert!(!body.starts_with("data:"), "{path} {body}");
+        assert_eq!(streams.lock().expect("streams").as_slice(), [false]);
+        drop(dir);
+    }
+}
+
+#[tokio::test]
+async fn d247_empty_completed_output_is_still_compaction() {
+    let upstream = concat!(
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"compaction\",\"encrypted_content\":\"NEWSEAL\"}}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"created_at\":1,\"output\":[]}}\n\n",
+    );
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let hop = member(
+        Spec {
+            key: "account",
+            route: "account",
+            protocol: "subscription",
+            subscription: true,
+            trigger: true,
+            serves: true,
+            reply: upstream.as_bytes(),
+        },
+        &calls,
+    );
+    let (app, _usage, dir) = gateway(vec![hop]);
+    let (status, body, content_type) = post_typed(&app, "/responses/compact", TRIGGER_ASK).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(content_type, "application/json");
+    let value: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(value["object"], "response.compaction");
+    assert_eq!(value["output"][2]["encrypted_content"], "NEWSEAL");
     drop(dir);
 }
