@@ -1,7 +1,8 @@
 //! Amazon Bedrock Mantle upstream.
 //!
 //! Mantle serves three wires from `https://bedrock-mantle.<region>.api.aws`
-//! with a Bedrock API key:
+//! with a Bedrock API key, or SigV4 for service `bedrock-mantle` when no API
+//! key is stored:
 //!
 //! - Chat and Responses under `/v1` or `/openai/v1`, with the key as a bearer
 //!   token. The prefix depends on the model: see `route`. A model refused at
@@ -76,11 +77,30 @@ static SPEC: UpstreamSpec = UpstreamSpec::from_static(
 struct MantleConfig {
     base_url: String,
     headers: Vec<(String, String)>,
+    region: String,
+    access_key_id: String,
+    secret_access_key: String,
+    session_token: String,
 }
 
 impl ValidConfig for MantleConfig {}
 
 struct MantleFactory;
+
+const OPTIONS: &[&str] = &[
+    "region",
+    "access_key_id",
+    "secret_access_key",
+    "session_token",
+];
+
+fn string(raw: &RawTable, key: &str) -> Result<String, ConfigError> {
+    match raw.get(key) {
+        None => Ok(String::new()),
+        Some(RawValue::String(value)) => Ok(value.clone()),
+        Some(_) => Err(ConfigError::new("must be a string").with_path(key)),
+    }
+}
 
 impl UpstreamFactory for MantleFactory {
     type Config = MantleConfig;
@@ -90,21 +110,21 @@ impl UpstreamFactory for MantleFactory {
     }
 
     fn config_schema(&self) -> Schema {
-        Schema::object(vec![("base_url".to_owned(), Schema::string())], &[])
-            .expect("bedrock-mantle schema")
+        let mut fields = vec![("base_url".to_owned(), Schema::string())];
+        fields.extend(
+            OPTIONS
+                .iter()
+                .map(|key| ((*key).to_owned(), Schema::string())),
+        );
+        Schema::object(fields, &[]).expect("bedrock-mantle schema")
     }
 
     fn validate(&self, raw: &RawTable) -> Result<Self::Config, ConfigError> {
         for key in raw.keys() {
-            if key != "base_url" && key != "headers" {
+            if key != "base_url" && key != "headers" && !OPTIONS.contains(&key) {
                 return Err(ConfigError::new("unknown key").with_path(key));
             }
         }
-        let base_url = match raw.get("base_url") {
-            None => String::new(),
-            Some(RawValue::String(value)) => value.clone(),
-            Some(_) => return Err(ConfigError::new("must be a string").with_path("base_url")),
-        };
         let mut headers = Vec::new();
         match raw.get("headers") {
             None => {}
@@ -119,7 +139,14 @@ impl UpstreamFactory for MantleFactory {
             }
             Some(_) => return Err(ConfigError::new("headers must be a table").with_path("headers")),
         }
-        Ok(MantleConfig { base_url, headers })
+        Ok(MantleConfig {
+            base_url: string(raw, "base_url")?,
+            headers,
+            region: string(raw, "region")?,
+            access_key_id: string(raw, "access_key_id")?,
+            secret_access_key: string(raw, "secret_access_key")?,
+            session_token: string(raw, "session_token")?,
+        })
     }
 
     fn build(
@@ -158,6 +185,12 @@ impl UpstreamFactory for MantleFactory {
         let base = route::normalize(trimmed, protocol);
         let prefixed =
             protocol != ProtocolId::ANTHROPIC_MESSAGES && route::v1_root(&base).is_some();
+        let signer = mantle_signer(cfg)?;
+        let aws_secrets = [cfg.secret_access_key.trim(), cfg.session_token.trim()]
+            .into_iter()
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .collect();
         Ok(Arc::new(Mantle {
             protocol,
             base,
@@ -165,9 +198,73 @@ impl UpstreamFactory for MantleFactory {
             credential,
             prefixed,
             routes: LearnedRoutes::default(),
+            signer,
+            aws_secrets,
             host: host.clone(),
         }))
     }
+}
+
+fn mantle_signer(
+    cfg: &MantleConfig,
+) -> Result<Option<hofund_plugin_sdk::sigv4::AwsSigner>, BuildError> {
+    let id = cfg.access_key_id.trim();
+    let secret = cfg.secret_access_key.trim();
+    if id.is_empty() || secret.is_empty() {
+        return Ok(None);
+    }
+    header_safe(id, "access key id")?;
+    header_safe(secret, "secret access key")?;
+    let token = cfg.session_token.trim();
+    if !token.is_empty() {
+        header_safe(token, "session token")?;
+    }
+    let host_region = hofund_plugin_sdk::url::Url::parse(&cfg.base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .and_then(|host| {
+            host.strip_prefix("bedrock-mantle.")
+                .and_then(|rest| rest.strip_suffix(".api.aws"))
+                .filter(|region| !region.is_empty())
+                .map(str::to_owned)
+        });
+    let explicit = cfg.region.trim().to_ascii_lowercase();
+    let region = match host_region {
+        Some(region) => region,
+        None if !explicit.is_empty() => explicit,
+        None => "us-east-1".to_owned(),
+    };
+    check_region(&region)?;
+    Ok(Some(
+        hofund_plugin_sdk::sigv4::AwsSigner::new(region, id, SecretString::from(secret.to_owned()))
+            .service("bedrock-mantle")
+            .session_token(SecretString::from(token.to_owned())),
+    ))
+}
+
+fn check_region(region: &str) -> Result<(), BuildError> {
+    let ok = !region.is_empty()
+        && region.len() <= 32
+        && region
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+    if ok {
+        Ok(())
+    } else {
+        Err(BuildError::new("Mantle region is not a region id"))
+    }
+}
+
+fn header_safe(value: &str, what: &str) -> Result<(), BuildError> {
+    if value
+        .bytes()
+        .any(|byte| byte.is_ascii_control() || byte == b' ')
+    {
+        return Err(BuildError::new(format!(
+            "Mantle {what} is not valid header text"
+        )));
+    }
+    Ok(())
 }
 
 struct Mantle {
@@ -181,6 +278,8 @@ struct Mantle {
     /// its prefix.
     prefixed: bool,
     routes: LearnedRoutes,
+    signer: Option<hofund_plugin_sdk::sigv4::AwsSigner>,
+    aws_secrets: Vec<String>,
     host: HostContext,
 }
 
@@ -201,9 +300,13 @@ impl Mantle {
     }
 
     fn target(&self, base: String) -> Target {
-        Target::new(self.protocol, base)
+        let target = Target::new(self.protocol, base)
             .credential(self.credential)
-            .headers(self.headers.clone())
+            .headers(self.headers.clone());
+        match self.signer.clone() {
+            Some(signer) => target.signer(signer),
+            None => target,
+        }
     }
 
     /// Chat and Responses with the prefix choice. A refusal that names the
@@ -305,6 +408,7 @@ impl Mantle {
                 .await?;
         }
         let mut secrets: Vec<&str> = vec![key];
+        secrets.extend(self.aws_secrets.iter().map(String::as_str));
         secrets.extend(self.headers.iter().map(|(_, value)| value.as_str()));
         probe_report(&url, &page, stream, &secrets)
     }
@@ -337,6 +441,11 @@ impl Mantle {
         }
         for (name, value) in &self.headers {
             call = call.sensitive_header(name.to_ascii_lowercase(), value.clone());
+        }
+        if secret.is_none_or(|secret| secret_text(secret).is_empty())
+            && let Some(signer) = self.signer.as_ref()
+        {
+            call = wire::signed_call(call, signer)?;
         }
         let response = call.open_raw(self.host.http(), 1).await?;
         read_probe(response, stream).await
@@ -396,6 +505,8 @@ impl UpstreamProvider for Mantle {
             headers: &self.headers,
             messages: self.protocol == ProtocolId::ANTHROPIC_MESSAGES,
             secret: secret.as_ref(),
+            signer: self.signer.as_ref(),
+            aws_secrets: &self.aws_secrets,
         }
         .list(query)
         .await
@@ -408,5 +519,7 @@ impl UpstreamProvider for Mantle {
     }
 }
 
+#[cfg(test)]
+mod d266_tests;
 #[cfg(test)]
 mod tests;

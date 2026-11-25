@@ -1,6 +1,6 @@
 [package]
 name = "hofund-plugin-bedrock-mantle"
-description = "Amazon Bedrock Mantle upstream: Chat, Responses, and Messages with a Bedrock API key, picking each model's route prefix."
+description = "Amazon Bedrock Mantle upstream with API-key or SigV4 authentication, model lists, and per-model route prefixes."
 version.workspace = true
 authors.workspace = true
 edition.workspace = true

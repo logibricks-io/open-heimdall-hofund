@@ -4,8 +4,9 @@
 //! `https://bedrock-runtime.<region>.amazonaws.com`:
 //!
 //! - Chat and Responses under `/openai/v1`, with a Bedrock API key as a
-//!   bearer token.
-//! - Messages under `/anthropic`, with the key in `x-api-key` alone. Bedrock
+//!   bearer token, or SigV4 when no API key is stored.
+//! - Messages under `/anthropic`, with the key in `x-api-key` alone or the
+//!   same SigV4 fallback. Bedrock
 //!   rejects some Anthropic betas and the `metadata` field, so this plugin
 //!   fits the `anthropic-beta` header and the body's `anthropic_beta` list and
 //!   drops `metadata` before sending.
@@ -220,30 +221,44 @@ impl UpstreamFactory for BedrockFactory {
                 )));
             }
         };
+        let signer = if protocol != ProtocolId::BEDROCK_CONVERSE
+            && !cfg.access_key_id.trim().is_empty()
+            && !cfg.secret_access_key.trim().is_empty()
+        {
+            let region = converse::compatibility_region(&cfg.region, &cfg.base_url)?;
+            Some(converse::Keys::read(cfg)?.signer(region))
+        } else {
+            None
+        };
+        let target = match signer.clone() {
+            Some(signer) => target.signer(signer),
+            None => target,
+        };
+        let aws_secrets = [cfg.secret_access_key.trim(), cfg.session_token.trim()]
+            .into_iter()
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .collect();
         Ok(Arc::new(Bedrock {
             protocol,
             base,
             headers,
             target,
+            signer,
+            aws_secrets,
             host: host.clone(),
         }))
     }
 }
 
-/// Whether `host` is a Bedrock Runtime host,
-/// `bedrock-runtime.<region>.amazonaws.com`. A port is ignored and case does
-/// not matter.
+/// Whether `host` is a Bedrock Runtime host, including FIPS and China
+/// endpoints. A port is ignored and case does not matter.
 #[must_use]
 pub fn runtime_host(host: &str) -> bool {
-    let host = host
-        .rsplit_once(':')
-        .filter(|(_, port)| port.chars().all(|c| c.is_ascii_digit()))
-        .map_or(host, |(name, _)| name)
-        .to_ascii_lowercase();
-    host.starts_with("bedrock-runtime.") && host.ends_with(".amazonaws.com")
+    matches!(converse::host_scope(host), Some((_, "bedrock")))
 }
 
-/// The configured base for the API-key wires. The preset always supplies one.
+/// The configured base for the compatibility wires. The preset supplies one.
 fn api_base(base_url: &str) -> Result<String, BuildError> {
     let base = base_url.trim().trim_end_matches('/');
     if base.is_empty() {
@@ -257,6 +272,8 @@ struct Bedrock {
     base: String,
     headers: Vec<(String, String)>,
     target: Target,
+    signer: Option<hofund_plugin_sdk::sigv4::AwsSigner>,
+    aws_secrets: Vec<String>,
     host: HostContext,
 }
 
@@ -336,11 +353,16 @@ impl Bedrock {
             for (name, value) in &self.headers {
                 call = call.sensitive_header(name.to_ascii_lowercase(), value.clone());
             }
+            let call = match self.signer.as_ref().filter(|_| key.is_empty()) {
+                Some(signer) => wire::signed_call(call, signer)?,
+                None => call,
+            };
             (url, call)
         };
         let response = call.open_raw(self.host.http(), 1).await?;
         let page = read_probe(response, stream).await?;
         let mut secrets: Vec<&str> = vec![key];
+        secrets.extend(self.aws_secrets.iter().map(String::as_str));
         secrets.extend(self.headers.iter().map(|(_, value)| value.as_str()));
         probe_report(&url, &page, stream, &secrets)
     }
@@ -411,5 +433,7 @@ impl UpstreamProvider for Bedrock {
     }
 }
 
+#[cfg(test)]
+mod d266_tests;
 #[cfg(test)]
 mod tests;
