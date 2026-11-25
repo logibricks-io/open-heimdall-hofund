@@ -373,6 +373,7 @@ transport::fn status_for_error (body : & [u8]) -> u16
 transport::fn text_response (status : u16 , body : impl AsRef < [u8] >) -> HttpResponse
 url
 uuid::fn v4 () -> std :: io :: Result < String >
+wire::Observe
 wire::Rewrite
 wire::Sent
 wire::Sent::async fn complete (self) -> Result < Completion , PluginError >
@@ -393,6 +394,7 @@ wire::Target::fn headers (mut self , headers : Vec < (String , String) >) -> Sel
 wire::Target::fn method_root (mut self , root : & 'static str) -> Self
 wire::Target::fn model_root (mut self , root : & 'static str) -> Self
 wire::Target::fn new (protocol : ProtocolId , base_url : impl Into < String >) -> Self
+wire::Target::fn observe (mut self , observe : Observe) -> Self
 wire::Target::fn preset (mut self , preset : Option < String >) -> Self
 wire::Target::fn quirks (mut self , quirks : Option < & 'static hofund_quirks :: Profile >) -> Self
 wire::Target::fn rewrite (mut self , rewrite : Rewrite) -> Self
