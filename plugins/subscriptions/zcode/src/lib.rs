@@ -178,6 +178,7 @@ impl SubscriptionFactory for ZcodeFactory {
             touch_seq: AtomicU64::new(0),
             free_first: cfg.free_first,
             routing: Arc::new(routing::Routing::default()),
+            checkin_answers: checkin::Answers::default(),
         }))
     }
 }
@@ -191,6 +192,7 @@ struct Zcode {
     touch_seq: AtomicU64,
     free_first: bool,
     routing: Arc<routing::Routing>,
+    checkin_answers: checkin::Answers,
 }
 
 #[hofund_plugin_sdk::async_trait]
@@ -324,6 +326,7 @@ impl Subscription for Zcode {
             &self.device_file,
             &self.team_keys,
             &self.touch_seq,
+            &self.checkin_answers,
         )
         .await
     }

@@ -1,9 +1,10 @@
 //! Daily claims for gift plans offered by the Z Code marketing feed.
 
+use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hofund_plugin_api::{
     AccountId, CheckinOutcome, CheckinResult, HostContext, PluginError, SecretString,
@@ -18,6 +19,63 @@ use crate::{APP_VERSION, Endpoints, api, gift, start};
 const RECHECK: Duration = Duration::from_secs(30 * 60);
 const CLAIM_ACTION: &str = "claim_zcode_plan";
 
+#[derive(Default)]
+pub(crate) struct Answers {
+    accounts: Mutex<BTreeMap<AccountId, DayAnswers>>,
+}
+
+#[derive(Default)]
+struct DayAnswers {
+    day: u64,
+    plans: Vec<Answer>,
+}
+
+#[derive(Clone)]
+struct Answer {
+    id: String,
+    name: String,
+    outcome: ClaimOutcome,
+    why: String,
+}
+
+impl Answers {
+    fn today(&self, account: &AccountId, now: SystemTime) -> (u64, Vec<Answer>) {
+        let day = beijing_day(now);
+        let mut accounts = self
+            .accounts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let answers = accounts.entry(account.clone()).or_default();
+        if answers.day != day {
+            answers.day = day;
+            answers.plans.clear();
+        }
+        (day, answers.plans.clone())
+    }
+
+    fn remember(&self, account: &AccountId, day: u64, answer: Answer) {
+        let mut accounts = self
+            .accounts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let answers = accounts.entry(account.clone()).or_default();
+        if answers.day != day {
+            answers.day = day;
+            answers.plans.clear();
+        }
+        if let Some(saved) = answers.plans.iter_mut().find(|saved| saved.id == answer.id) {
+            *saved = answer;
+        } else {
+            answers.plans.push(answer);
+        }
+    }
+}
+
+fn beijing_day(now: SystemTime) -> u64 {
+    let seconds = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    (seconds + 8 * 60 * 60) / (24 * 60 * 60)
+}
+
 pub(crate) async fn run(
     account: &AccountId,
     host: &HostContext,
@@ -25,6 +83,7 @@ pub(crate) async fn run(
     device_file: &Path,
     team_keys: &TokenCache<SecretString>,
     touch_seq: &AtomicU64,
+    answers: &Answers,
 ) -> Result<CheckinResult, PluginError> {
     let stored = session::load(host, &endpoints, account, device_file, team_keys).await?;
     let Some(jwt) = stored.auth.jwt.as_ref() else {
@@ -42,20 +101,38 @@ pub(crate) async fn run(
             return Ok(failed(host, error.message()));
         }
     };
-    if plans.is_empty() {
-        return Ok(
-            CheckinResult::new(CheckinOutcome::Inactive, "no Z Code gift plan to claim")
-                .with_recheck_at(host.clock().now() + RECHECK),
-        );
+    let now = host.clock().now();
+    let (day, mut today) = answers.today(account, now);
+    let fresh = plans
+        .iter()
+        .filter(|plan| !today.iter().any(|answer| answer.id == plan.id))
+        .cloned()
+        .collect::<Vec<_>>();
+    if fresh.is_empty() {
+        return Ok(summarize_answered(host, plans, &today));
     }
     let mut results = Vec::new();
-    for plan in plans {
+    for plan in fresh {
         let result = claim_one(host, &endpoints, &stored, &plan.id).await;
+        if matches!(
+            result.0,
+            ClaimOutcome::Claimed | ClaimOutcome::Done | ClaimOutcome::Captcha
+        ) {
+            let answer = Answer {
+                id: plan.id,
+                name: plan.name.clone(),
+                outcome: result.0,
+                why: result.1.clone(),
+            };
+            answers.remember(account, day, answer.clone());
+            today.push(answer);
+        }
         results.push((plan.name, result));
     }
-    Ok(summarize(host, results))
+    Ok(summarize(host, results, &today))
 }
 
+#[derive(Clone)]
 struct Offer {
     id: String,
     name: String,
@@ -254,15 +331,39 @@ fn failed(host: &HostContext, message: impl Into<String>) -> CheckinResult {
         .with_recheck_at(host.clock().now() + RECHECK)
 }
 
-fn summarize(host: &HostContext, results: Vec<(String, (ClaimOutcome, String))>) -> CheckinResult {
-    let names = |outcome| {
-        results
-            .iter()
-            .filter(|(_, (actual, _))| *actual == outcome)
-            .map(|(name, _)| name.clone())
-            .collect::<Vec<_>>()
-    };
-    let claimed = names(ClaimOutcome::Claimed);
+fn summarize_answered(host: &HostContext, plans: Vec<Offer>, today: &[Answer]) -> CheckinResult {
+    let checked = checked_names(today);
+    if !checked.is_empty() {
+        return done(host, checked, Vec::new());
+    }
+    if plans.is_empty() {
+        return CheckinResult::new(CheckinOutcome::Inactive, "no Z Code gift plan to claim")
+            .with_recheck_at(host.clock().now() + RECHECK);
+    }
+    let message = plans
+        .iter()
+        .map(|plan| {
+            let answer = today
+                .iter()
+                .find(|answer| answer.id == plan.id)
+                .expect("every answered offer has a saved answer");
+            format!("{}: claim it in the Z Code app ({})", plan.name, answer.why)
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    CheckinResult::new(CheckinOutcome::Captcha, message)
+}
+
+fn summarize(
+    host: &HostContext,
+    results: Vec<(String, (ClaimOutcome, String))>,
+    today: &[Answer],
+) -> CheckinResult {
+    let claimed = results
+        .iter()
+        .filter(|(_, (outcome, _))| *outcome == ClaimOutcome::Claimed)
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
     let mut messages = Vec::new();
     if !claimed.is_empty() {
         messages.push(format!("claimed {}", claimed.join(", ")));
@@ -292,19 +393,39 @@ fn summarize(host: &HostContext, results: Vec<(String, (ClaimOutcome, String))>)
         return CheckinResult::new(CheckinOutcome::Captcha, message);
     }
     if !claimed.is_empty() {
-        return CheckinResult::new(CheckinOutcome::Claimed, message);
+        return CheckinResult::new(CheckinOutcome::Claimed, message)
+            .with_recheck_at(host.clock().now() + RECHECK);
     }
-    if results
+    let checked = checked_names(today);
+    let not_offered = results
         .iter()
-        .any(|(_, (outcome, _))| *outcome == ClaimOutcome::Ineligible)
-    {
+        .filter(|(_, (outcome, _))| *outcome == ClaimOutcome::Ineligible)
+        .map(|(name, (_, why))| format!("{name}: {why}"))
+        .collect::<Vec<_>>();
+    if checked.is_empty() && !not_offered.is_empty() {
         return CheckinResult::new(CheckinOutcome::Ineligible, message)
             .with_recheck_at(host.clock().now() + RECHECK);
     }
-    CheckinResult::new(
-        CheckinOutcome::Done,
-        format!("already claimed: {}", names(ClaimOutcome::Done).join(", ")),
-    )
+    done(host, checked, not_offered)
+}
+
+fn checked_names(today: &[Answer]) -> Vec<String> {
+    let mut names = Vec::new();
+    for answer in today {
+        if matches!(answer.outcome, ClaimOutcome::Claimed | ClaimOutcome::Done)
+            && !names.contains(&answer.name)
+        {
+            names.push(answer.name.clone());
+        }
+    }
+    names
+}
+
+fn done(host: &HostContext, checked: Vec<String>, not_offered: Vec<String>) -> CheckinResult {
+    let mut messages = vec![format!("already claimed: {}", checked.join(", "))];
+    messages.extend(not_offered);
+    CheckinResult::new(CheckinOutcome::Done, messages.join("; "))
+        .with_recheck_at(host.clock().now() + RECHECK)
 }
 
 fn marketing_headers(stored: &Stored) -> Vec<(&'static str, String)> {
@@ -341,5 +462,29 @@ mod tests {
         assert_eq!(offers.len(), 1);
         assert_eq!(offers[0].id, "plan-1");
         assert_eq!(offers[0].name, "Weekend");
+    }
+
+    #[test]
+    fn d258_answers_reset_at_beijing_midnight() {
+        let answers = Answers::default();
+        let account = AccountId::try_from("a-0000000000000258").expect("account");
+        let before_midnight = UNIX_EPOCH + Duration::from_secs(16 * 60 * 60 - 1);
+        let (day, _) = answers.today(&account, before_midnight);
+        answers.remember(
+            &account,
+            day,
+            Answer {
+                id: "weekend".to_owned(),
+                name: "Weekend Build".to_owned(),
+                outcome: ClaimOutcome::Claimed,
+                why: String::new(),
+            },
+        );
+        assert_eq!(answers.today(&account, before_midnight).1.len(), 1);
+
+        let after_midnight = UNIX_EPOCH + Duration::from_secs(16 * 60 * 60);
+        let (next_day, today) = answers.today(&account, after_midnight);
+        assert_ne!(day, next_day);
+        assert!(today.is_empty());
     }
 }

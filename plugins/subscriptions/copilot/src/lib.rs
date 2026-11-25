@@ -24,6 +24,7 @@ mod discover;
 mod image_cap;
 mod models;
 mod quota;
+mod reasoning;
 mod session;
 mod sign_in;
 mod site;
@@ -335,6 +336,8 @@ mod conformance;
 mod d229_image_cap_tests;
 #[cfg(test)]
 mod d235_socket_tests;
+#[cfg(test)]
+mod d262_reasoning_opaque_tests;
 #[cfg(test)]
 mod entitlement_tests;
 #[cfg(test)]
