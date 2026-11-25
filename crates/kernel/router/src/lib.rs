@@ -17,6 +17,7 @@ mod attempt;
 mod cooldown;
 pub mod credits_mode;
 mod decision;
+mod effort_models;
 mod member;
 mod overflow_memory;
 mod patience;
@@ -49,6 +50,7 @@ pub use attempt::{Attempt, AttemptError, AttemptHook, MemberAttempt};
 use cooldown::HandOnRest;
 pub use cooldown::{CooldownCause, CooldownPolicy, Cooldowns, Cooling, PersistedRest};
 pub use decision::{region_agent_note, with_region_agent_note};
+pub use effort_models::EffortModels;
 pub use hofund_plugin_api::{Completion, MemberId, PluginError, Request};
 pub use member::{Member, ModelListAnswer};
 pub use overflow_memory::OverflowMemory;
@@ -607,6 +609,26 @@ impl Router {
         } else {
             Vec::new()
         }
+    }
+
+    /// Reasoning levels a listed effort-id family offers for `model`.
+    #[must_use]
+    pub fn effort_levels(&self, model: &str) -> Vec<&str> {
+        let mut levels = Vec::new();
+        if let Some(route) = self.routes.get(model) {
+            for family in route
+                .hops
+                .iter()
+                .filter_map(|hop| hop.member.effort_models())
+            {
+                for level in family.levels() {
+                    if !levels.contains(&level) {
+                        levels.push(level);
+                    }
+                }
+            }
+        }
+        levels
     }
 
     /// Short name of the API `/v1/models` should name for `model`.
@@ -1837,7 +1859,13 @@ impl Router {
         {
             let found = self.matching(|route_model, hop| {
                 hop.member.route_id() == provider_id
-                    && (route_model == model || hop.wire_model.as_deref() == Some(model))
+                    && (route_model == model
+                        || hop.wire_model.as_deref() == Some(model)
+                        || (hop.member.stands_in_for().is_none()
+                            && hop
+                                .member
+                                .effort_models()
+                                .is_some_and(|family| family.contains(model))))
             });
             if found.len() == 1
                 && let Some((route_model, primary, stays, _)) = found.first()
@@ -1866,12 +1894,15 @@ impl Router {
             resolved.patience = patience;
             return Ok(resolved);
         }
-        let found = self.matching(|_, hop| hop.wire_model.as_deref() == Some(asked));
-        let bare = found
-            .first()
-            .and_then(|(_, hop, ..)| hop.wire_model.clone())
-            .unwrap_or_else(|| asked.to_owned());
-        self.one(asked, &bare, found)
+        let found = self.matching(|_, hop| {
+            hop.wire_model.as_deref() == Some(asked)
+                || (hop.member.stands_in_for().is_none()
+                    && hop
+                        .member
+                        .effort_models()
+                        .is_some_and(|family| family.contains(asked)))
+        });
+        self.one(asked, asked, found)
     }
 
     fn matching(
@@ -3498,6 +3529,12 @@ fn order_hops(hops: Vec<Hop>, cooldowns: &Cooldowns, bare: &str) -> (Vec<Hop>, V
 
 fn apply_wire(request: &mut Request, hop: &Hop, bare: &str, served: &[hofund_codec::ServedModel]) {
     request.model = hop.wire_model.clone().unwrap_or_else(|| bare.to_owned());
+    if let Some(family) = hop.member.effort_models() {
+        if bare != family.family() && family.contains(bare) {
+            request.model = bare.to_owned();
+        }
+        request.model = family.at(&request.model, request.params.effort);
+    }
     if request.params.max_tokens.is_none() {
         request.params.max_tokens = hop.max_output_tokens;
     }

@@ -14,6 +14,9 @@ pub struct ModelEntry {
     pub context: Option<u64>,
     /// Optional output-token limit.
     pub max_output: Option<u64>,
+    /// Supported reasoning effort names, weakest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub efforts: Vec<String>,
     /// Current token multiplier, when the subscription reports one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate: Option<f64>,
@@ -249,5 +252,27 @@ impl CatalogDisabledListResponse {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ModelEntry;
+
+    #[test]
+    fn d246_model_entry_efforts_round_trip_and_empty_is_omitted() {
+        let entry = ModelEntry {
+            id: "model-4-alpha".to_owned(),
+            efforts: vec!["low".to_owned(), "high".to_owned()],
+            ..ModelEntry::default()
+        };
+        let bytes = serde_json::to_vec(&entry).expect("encode");
+        let decoded: ModelEntry = serde_json::from_slice(&bytes).expect("decode");
+        assert_eq!(decoded, entry);
+        assert!(
+            !serde_json::to_string(&ModelEntry::default())
+                .expect("encode empty")
+                .contains("efforts")
+        );
     }
 }

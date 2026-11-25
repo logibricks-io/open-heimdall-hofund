@@ -336,6 +336,7 @@ pub struct ModelsHost {
     instances: RwLock<HashMap<String, RegisteredInstance>>,
     /// Every key instance of a provider, so a list or a saved seed reaches all of them.
     upstreams: RwLock<HashMap<String, Vec<Arc<dyn UpstreamProvider>>>>,
+    fold_efforts: RwLock<HashMap<String, bool>>,
     registry: Arc<dyn DaemonRegistry>,
     state: Mutex<super::models_state::StateStore>,
     events: OnceLock<Arc<EventBus>>,
@@ -365,6 +366,7 @@ impl ModelsHost {
             host_overrides: HashMap::new(),
             instances: RwLock::new(HashMap::new()),
             upstreams: RwLock::new(HashMap::new()),
+            fold_efforts: RwLock::new(HashMap::new()),
             registry: Arc::new(RegistryAdapter),
             state: Mutex::new(super::models_state::StateStore::new(None)),
             events: OnceLock::new(),
@@ -568,7 +570,8 @@ impl ModelsHost {
                 {
                     return Err(PicksError::Stale);
                 }
-                let listed = super::models_state::models(&state.list);
+                let source = super::models_state::models(&state.list);
+                let listed = self.fold_models(provider_id, &source);
                 let next = next_picks(provider_id, &state.picks, &listed, form)?;
                 let picked_from = listed
                     .iter()
@@ -604,9 +607,24 @@ impl ModelsHost {
             .map_err(|error| super::DaemonError::new(error.to_string()))
     }
 
-    /// Reads cached models without building a provider or contacting an upstream.
+    fn fold_models(&self, provider_id: &str, models: &[ModelSpec]) -> Vec<ModelSpec> {
+        if self
+            .fold_efforts
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(provider_id)
+            .copied()
+            .unwrap_or(false)
+        {
+            super::effort_variants::fold(models).0
+        } else {
+            models.to_vec()
+        }
+    }
+
+    /// Reads the source list used for routing and old-id compatibility.
     #[must_use]
-    pub fn cached(&self, provider_id: &str) -> Cached {
+    pub(crate) fn source_cached(&self, provider_id: &str) -> Cached {
         let mut store = self.state.lock().unwrap_or_else(|error| error.into_inner());
         let state = store.get(provider_id);
         Cached {
@@ -614,6 +632,42 @@ impl ModelsHost {
             fetched_at: state.fetched_at,
             delisted: state.delisted.clone(),
         }
+    }
+
+    /// Reads cached models without building a provider or contacting an upstream.
+    #[must_use]
+    pub fn cached(&self, provider_id: &str) -> Cached {
+        let mut cached = self.source_cached(provider_id);
+        cached.models = self.fold_models(provider_id, &cached.models);
+        cached
+    }
+
+    pub(crate) fn effort_models(
+        &self,
+        provider_id: &str,
+        model: &str,
+    ) -> Option<hofund_router::EffortModels> {
+        if !self
+            .fold_efforts
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(provider_id)
+            .copied()
+            .unwrap_or(false)
+        {
+            return None;
+        }
+        super::effort_variants::resolver(&self.source_cached(provider_id).models, model)
+    }
+
+    pub(crate) fn sent_id(
+        &self,
+        provider_id: &str,
+        model: &str,
+        effort: Option<hofund_plugin_api::Effort>,
+    ) -> String {
+        self.effort_models(provider_id, model)
+            .map_or_else(|| model.to_owned(), |family| family.at(model, effort))
     }
 
     /// Saves picked ids in the supplied order and restores them from delisted.
@@ -896,7 +950,11 @@ impl ModelsHost {
                     Some(&provider.model_list.auto_include),
                 )
                 .await
-                .map(|applied| applied.models);
+                .map(|applied| {
+                    let mut models = applied.models;
+                    models.models = self.fold_models(provider_id, &models.models);
+                    models
+                });
             match &result {
                 Ok(models) => {
                     tracing::Span::current().record("kind", format_args!("{:?}", models.kind));
@@ -971,9 +1029,10 @@ impl ModelsHost {
         let mut store = self.state.lock().unwrap_or_else(|error| error.into_inner());
         let state = store.get(provider_id);
         let kind = applied.models.kind;
-        let count = applied.models.models.len() as u64;
+        let models = self.fold_models(provider_id, &applied.models.models);
+        let count = models.len() as u64;
         let refreshed = Refreshed {
-            models: applied.models.models,
+            models,
             added: applied.taken,
             removed: applied.dropped,
             delisted: state.delisted.clone(),
@@ -1103,6 +1162,10 @@ impl ModelsHost {
             let redactor = redactor.clone();
             async move {
                 let model = selected.exposed.clone();
+                let selected = Selected {
+                    upstream: self.sent_id(&provider.id, &selected.upstream, None),
+                    ..selected
+                };
                 let started = std::time::Instant::now();
                 let result = self
                     .probe_one(
@@ -1158,11 +1221,13 @@ impl ModelsHost {
         auto_include: Vec<regex::Regex>,
     ) -> Applied {
         let listed = super::models_state::rows(&fetched.models.models);
+        let public = self.fold_models(&provider.id, &fetched.models.models);
         let now_ids = listed
             .iter()
             .map(|row| row.id.clone())
+            .chain(public.iter().map(|model| model.id().to_owned()))
             .collect::<HashSet<_>>();
-        let chat_ids = default_exposed(&fetched.models.models);
+        let chat_ids = default_exposed(&public);
         let mut dropped = Vec::new();
         let mut taken = Vec::new();
         // Memory keeps the new list even when the save fails, so a list
@@ -1178,10 +1243,16 @@ impl ModelsHost {
                     return;
                 }
                 state.retry_at = None;
+                let previous = super::models_state::models(&state.list);
                 let before = state
                     .list
                     .iter()
                     .map(|row| row.id.clone())
+                    .chain(
+                        self.fold_models(&provider.id, &previous)
+                            .iter()
+                            .map(|model| model.id().to_owned()),
+                    )
                     .collect::<HashSet<_>>();
                 let mut kept = Vec::new();
                 for id in &state.picks {
@@ -1699,7 +1770,17 @@ impl ModelsHost {
         &self,
         provider: &hofund_config::Provider,
     ) -> Result<Planned, DaemonError> {
-        self.planned_with(provider, |id| self.registry.find_preset(id))
+        let planned = self.planned_with(provider, |id| self.registry.find_preset(id))?;
+        let plugin = self.plugin_for(provider, &planned);
+        let folds = provider.preset.is_none()
+            && !provider.base_url.trim().is_empty()
+            && matches!(planned.wire, Wire::Chat | Wire::Responses | Wire::Messages)
+            && self.registry.is_kernel_factory(&plugin);
+        self.fold_efforts
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(provider.id.clone(), folds);
+        Ok(planned)
     }
 
     fn planned_with(

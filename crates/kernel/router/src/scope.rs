@@ -32,6 +32,13 @@ impl RouteScope {
             format!("{provider}/{route}"),
             format!("{provider}/{}", hop.wire_model.as_deref().unwrap_or(asked)),
         ];
+        if let Some(family) = hop.member.effort_models() {
+            candidates.extend(
+                family
+                    .member_ids()
+                    .map(|member| format!("{provider}/{member}")),
+            );
+        }
         if asked.contains('/') {
             candidates.push(asked.to_owned());
         }

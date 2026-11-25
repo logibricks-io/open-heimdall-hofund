@@ -503,6 +503,7 @@ MemberSummary.resting_models
 ModelEntry #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Serialize, Deserialize)
 ModelEntry.context
 ModelEntry.display_name
+ModelEntry.efforts
 ModelEntry.id
 ModelEntry.max_output
 ModelEntry.rate
