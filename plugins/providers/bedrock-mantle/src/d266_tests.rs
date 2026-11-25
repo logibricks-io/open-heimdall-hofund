@@ -294,3 +294,139 @@ fn d266_list_errors_redact_the_access_secret_and_session_token() {
     assert!(!text.contains(SECRET));
     assert!(!text.contains(TOKEN));
 }
+
+#[test]
+fn d266_execute_retry_and_count_errors_redact_credentials_on_every_route() {
+    const API_KEY: &str = "ABSK-test-secret";
+
+    fn assert_clean(error: &hofund_plugin_api::PluginError, api_key: Option<&str>) {
+        let text = error.to_string();
+        assert!(!text.contains(SECRET));
+        assert!(!text.contains(TOKEN));
+        if let Some(api_key) = api_key {
+            assert!(!text.contains(api_key));
+        }
+        assert_eq!(error.retry_after(), Some(std::time::Duration::from_secs(7)));
+    }
+
+    fn body(api_key: Option<&str>) -> String {
+        format!(
+            r#"{{"message":"canonical request {SECRET} {TOKEN} {}"}}"#,
+            api_key.unwrap_or("")
+        )
+    }
+
+    fn route_refusal() -> String {
+        format!("The model isn't supported on this route: {SECRET} {TOKEN}")
+    }
+
+    let root = tempfile::tempdir().expect("root");
+    let host = TestHost::open(PluginId::from_static("bedrock-mantle"), root.path());
+    for (index, protocol) in [
+        ProtocolId::OPENAI_CHAT,
+        ProtocolId::OPENAI_RESPONSES,
+        ProtocolId::ANTHROPIC_MESSAGES,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let base = if protocol == ProtocolId::ANTHROPIC_MESSAGES {
+            "https://proxy.test/anthropic"
+        } else {
+            "https://proxy.test/v1"
+        };
+        let provider = build(host.context(), base, protocol);
+        let status = if index % 2 == 0 { 401 } else { 403 };
+        host.http()
+            .enqueue_response(status, &[("retry-after", "7")], body(None));
+        let error = block_on(provider.execute(request("openai.gpt-oss-120b"), protocol))
+            .map(drop)
+            .expect_err("refused");
+        assert_eq!(error.status(), Some(status));
+        assert_clean(&error, None);
+    }
+    let messages = build(
+        host.context(),
+        "https://proxy.test/anthropic",
+        ProtocolId::ANTHROPIC_MESSAGES,
+    );
+    host.http()
+        .enqueue_response(403, &[("retry-after", "7")], body(None));
+    let error = block_on(messages.count_input(request("demo"), ProtocolId::ANTHROPIC_MESSAGES))
+        .expect_err("count refused");
+    assert_clean(&error, None);
+
+    let chat = build(
+        host.context(),
+        "https://proxy.test/v1",
+        ProtocolId::OPENAI_CHAT,
+    );
+    host.http()
+        .enqueue_response(400, &[], format!(r#"{{"message":"{}"}}"#, route_refusal()));
+    host.http()
+        .enqueue_response(403, &[("retry-after", "7")], body(None));
+    let error = block_on(chat.execute(request("newmaker.model"), ProtocolId::OPENAI_CHAT))
+        .map(drop)
+        .expect_err("second route refused");
+    assert_clean(&error, None);
+
+    host.http().enqueue_response(
+        400,
+        &[("retry-after", "7")],
+        format!(r#"{{"message":"{}"}}"#, route_refusal()),
+    );
+    host.http().enqueue_response(
+        400,
+        &[("retry-after", "7")],
+        format!(r#"{{"message":"{}"}}"#, route_refusal()),
+    );
+    let error = block_on(chat.execute(request("newmaker.other"), ProtocolId::OPENAI_CHAT))
+        .map(drop)
+        .expect_err("both routes refused");
+    assert_clean(&error, None);
+
+    host.secrets()
+        .insert(&PluginId::from_static("bedrock-mantle"), "api_key", API_KEY);
+    for protocol in [
+        ProtocolId::OPENAI_CHAT,
+        ProtocolId::OPENAI_RESPONSES,
+        ProtocolId::ANTHROPIC_MESSAGES,
+    ] {
+        let base = if protocol == ProtocolId::ANTHROPIC_MESSAGES {
+            "https://proxy.test/anthropic"
+        } else {
+            "https://proxy.test/v1"
+        };
+        let provider = build(host.context(), base, protocol);
+        host.http()
+            .enqueue_response(401, &[("retry-after", "7")], body(Some(API_KEY)));
+        let error = block_on(provider.execute(request("openai.gpt-oss-120b"), protocol))
+            .map(drop)
+            .expect_err("refused");
+        assert_clean(&error, Some(API_KEY));
+    }
+    let messages = build(
+        host.context(),
+        "https://proxy.test/anthropic",
+        ProtocolId::ANTHROPIC_MESSAGES,
+    );
+    host.http()
+        .enqueue_response(403, &[("retry-after", "7")], body(Some(API_KEY)));
+    let error = block_on(messages.count_input(request("demo"), ProtocolId::ANTHROPIC_MESSAGES))
+        .expect_err("count refused");
+    assert_clean(&error, Some(API_KEY));
+}
+
+#[test]
+fn d266_incomplete_access_key_pairs_fail_compatibility_builds() {
+    for (key, expected) in [
+        ("access_key_id", "Mantle access key id is empty"),
+        ("secret_access_key", "Mantle secret access key is empty"),
+    ] {
+        let mut config = raw("https://proxy.test/v1");
+        config.insert(key, RawValue::String(String::new()));
+        let config = UpstreamFactory::validate(&MantleFactory, &config).expect("config");
+        let error = super::mantle_signer(&config).expect_err("incomplete pair");
+        assert!(error.to_string().contains(expected));
+    }
+}

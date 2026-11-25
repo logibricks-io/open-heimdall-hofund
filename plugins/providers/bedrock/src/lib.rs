@@ -36,7 +36,7 @@ use hofund_plugin_api::{
     BuildContext, BuildError, Completion, ConfigError, CountOutcome, CredentialStyle, HostContext,
     ListKind, ListQuery, ModelList, ModelSpec, PluginError, PluginId, ProbeQuery, ProbeReport,
     ProtocolId, RawTable, RawValue, Request, Schema, SecretString, UpstreamFactory,
-    UpstreamProvider, UpstreamSpec, ValidConfig,
+    UpstreamProvider, UpstreamSpec, ValidConfig, redact_token,
 };
 use hofund_plugin_sdk::bedrock;
 use hofund_plugin_sdk::json::{Value, json};
@@ -222,8 +222,7 @@ impl UpstreamFactory for BedrockFactory {
             }
         };
         let signer = if protocol != ProtocolId::BEDROCK_CONVERSE
-            && !cfg.access_key_id.trim().is_empty()
-            && !cfg.secret_access_key.trim().is_empty()
+            && (!cfg.access_key_id.trim().is_empty() || !cfg.secret_access_key.trim().is_empty())
         {
             let region = converse::compatibility_region(&cfg.region, &cfg.base_url)?;
             Some(converse::Keys::read(cfg)?.signer(region))
@@ -281,6 +280,18 @@ impl Bedrock {
     /// The stored Bedrock API key, if any. Converse refuses a non-empty one.
     async fn secret(&self) -> Result<Option<SecretString>, PluginError> {
         self.host.secrets().get("api_key").await
+    }
+
+    fn redact_error(&self, error: PluginError, api_key: Option<&SecretString>) -> PluginError {
+        let mut message = error.message().to_owned();
+        for secret in api_key
+            .map(secret_text)
+            .into_iter()
+            .chain(self.aws_secrets.iter().map(String::as_str))
+        {
+            message = redact_token(&message, secret);
+        }
+        error.with_message(message)
     }
 
     async fn probe_inner(&self, query: &ProbeQuery) -> Result<ProbeReport, PluginError> {
@@ -395,6 +406,7 @@ impl UpstreamProvider for Bedrock {
             inbound,
         )
         .await
+        .map_err(|error| self.redact_error(error, secret.as_ref()))
     }
 
     async fn count_input(
@@ -415,6 +427,7 @@ impl UpstreamProvider for Bedrock {
             inbound,
         )
         .await
+        .map_err(|error| self.redact_error(error, secret.as_ref()))
     }
 
     async fn list_models(&self, query: &ListQuery) -> Result<ModelList, PluginError> {

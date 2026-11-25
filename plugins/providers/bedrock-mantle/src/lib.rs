@@ -33,7 +33,7 @@ use hofund_plugin_api::{
     BuildContext, BuildError, Completion, ConfigError, CountOutcome, CredentialStyle, HostContext,
     ListKind, ListQuery, ModelList, PluginError, PluginErrorKind, PluginId, ProbeQuery,
     ProbeReport, ProtocolId, RawTable, RawValue, Request, Schema, SecretString, UpstreamFactory,
-    UpstreamProvider, UpstreamSpec, ValidConfig,
+    UpstreamProvider, UpstreamSpec, ValidConfig, redact_token,
 };
 use hofund_plugin_sdk::bedrock;
 use hofund_plugin_sdk::json::{Value, json};
@@ -210,8 +210,11 @@ fn mantle_signer(
 ) -> Result<Option<hofund_plugin_sdk::sigv4::AwsSigner>, BuildError> {
     let id = cfg.access_key_id.trim();
     let secret = cfg.secret_access_key.trim();
-    if id.is_empty() || secret.is_empty() {
-        return Ok(None);
+    match (id.is_empty(), secret.is_empty()) {
+        (true, true) => return Ok(None),
+        (true, false) => return Err(BuildError::new("Mantle access key id is empty")),
+        (false, true) => return Err(BuildError::new("Mantle secret access key is empty")),
+        (false, false) => {}
     }
     header_safe(id, "access key id")?;
     header_safe(secret, "secret access key")?;
@@ -287,6 +290,18 @@ impl Mantle {
     /// The stored Bedrock API key, if any.
     async fn secret(&self) -> Result<Option<SecretString>, PluginError> {
         self.host.secrets().get("api_key").await
+    }
+
+    fn redact_error(&self, error: PluginError, api_key: Option<&SecretString>) -> PluginError {
+        let mut message = error.message().to_owned();
+        for secret in api_key
+            .map(secret_text)
+            .into_iter()
+            .chain(self.aws_secrets.iter().map(String::as_str))
+        {
+            message = redact_token(&message, secret);
+        }
+        error.with_message(message)
     }
 
     /// The base a call for `model` uses; `other` picks the prefix the id rule
@@ -460,21 +475,30 @@ impl UpstreamProvider for Mantle {
         inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
         let secret = self.secret().await?;
-        if self.protocol == ProtocolId::ANTHROPIC_MESSAGES {
+        let result = if self.protocol == ProtocolId::ANTHROPIC_MESSAGES {
             bedrock::fit_request(&mut request);
+            wire::execute(
+                self.host.http(),
+                &self.target(self.base.clone()),
+                secret.as_ref(),
+                request,
+                inbound,
+            )
+            .await
         } else if self.prefixed {
-            return self
-                .execute_prefixed(request, inbound, secret.as_ref())
-                .await;
-        }
-        wire::execute(
-            self.host.http(),
-            &self.target(self.base.clone()),
-            secret.as_ref(),
-            request,
-            inbound,
-        )
-        .await
+            self.execute_prefixed(request, inbound, secret.as_ref())
+                .await
+        } else {
+            wire::execute(
+                self.host.http(),
+                &self.target(self.base.clone()),
+                secret.as_ref(),
+                request,
+                inbound,
+            )
+            .await
+        };
+        result.map_err(|error| self.redact_error(error, secret.as_ref()))
     }
 
     async fn count_input(
@@ -495,6 +519,7 @@ impl UpstreamProvider for Mantle {
             inbound,
         )
         .await
+        .map_err(|error| self.redact_error(error, secret.as_ref()))
     }
 
     async fn list_models(&self, query: &ListQuery) -> Result<ModelList, PluginError> {

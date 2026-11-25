@@ -190,48 +190,36 @@ fn d266_probes_and_message_count_sign_without_an_api_key() {
 
 #[test]
 fn d266_an_api_key_wins_on_compatibility_routes() {
-    let root = tempfile::tempdir().expect("root");
-    let host = TestHost::open(PluginId::from_static("bedrock"), root.path());
-    host.secrets()
-        .insert(&PluginId::from_static("bedrock"), "api_key", "ABSK-test");
-    for (protocol, base, reply) in [
-        (
-            ProtocolId::OPENAI_CHAT,
-            "https://proxy.test/openai/v1",
-            CHAT_REPLY,
-        ),
-        (
-            ProtocolId::ANTHROPIC_MESSAGES,
-            "https://proxy.test/anthropic",
-            MESSAGES_REPLY,
-        ),
-    ] {
-        let provider = build(host.context(), base, protocol);
-        host.http().enqueue(reply);
-        block_on(provider.execute(request("demo"), protocol)).expect("execute");
-    }
-    let calls = host.http().calls();
-    assert_eq!(calls.len(), 2);
-    assert!(
-        !calls[0]
-            .sensitive_headers()
-            .iter()
-            .any(|name| name == "x-amz-security-token")
-    );
-    assert_eq!(calls[0].header("x-amz-date"), None);
-    assert!(
-        calls[1]
-            .sensitive_headers()
-            .iter()
-            .any(|name| name == "x-api-key")
-    );
-    assert!(
-        !calls[1]
-            .sensitive_headers()
-            .iter()
-            .any(|name| name == "authorization")
-    );
-    assert_eq!(calls[1].header("x-amz-date"), None);
+    block_on(async {
+        const API_KEY: &str = "ABSK-test";
+        let server = MockServer::start().await;
+        mount_post(&server, "/openai/v1/chat/completions", CHAT_REPLY).await;
+        mount_post(&server, "/openai/v1/responses", RESPONSES_REPLY).await;
+        mount_post(&server, "/anthropic/v1/messages", MESSAGES_REPLY).await;
+        let (_root, host) = runtime(API_KEY);
+        for (protocol, base) in [
+            (ProtocolId::OPENAI_CHAT, "openai/v1"),
+            (ProtocolId::OPENAI_RESPONSES, "openai/v1"),
+            (ProtocolId::ANTHROPIC_MESSAGES, "anthropic"),
+        ] {
+            let provider = build(&host, &format!("{}/{base}", server.uri()), protocol);
+            provider
+                .execute(request("demo"), protocol)
+                .await
+                .expect("execute");
+        }
+        let received = server.received_requests().await.expect("requests");
+        assert_eq!(received.len(), 3);
+        let bearer = format!("Bearer {API_KEY}");
+        for request in &received[..2] {
+            assert_eq!(header(request, "authorization"), bearer.as_str());
+            assert_eq!(header(request, "x-amz-date"), "");
+            assert_eq!(header(request, "x-amz-security-token"), "");
+        }
+        assert_eq!(header(&received[2], "x-api-key"), API_KEY);
+        assert_eq!(header(&received[2], "authorization"), "");
+        assert_eq!(header(&received[2], "x-amz-date"), "");
+    });
 }
 
 #[test]
@@ -355,4 +343,114 @@ fn d266_probe_errors_redact_the_access_secret_and_session_token() {
     };
     assert!(!text.contains(SECRET));
     assert!(!text.contains(TOKEN));
+}
+
+#[test]
+fn d266_execute_and_count_errors_redact_credentials_on_every_route() {
+    const API_KEY: &str = "ABSK-test-secret";
+
+    fn assert_clean(error: &hofund_plugin_api::PluginError, api_key: Option<&str>) {
+        let text = error.to_string();
+        assert!(!text.contains(SECRET));
+        assert!(!text.contains(TOKEN));
+        if let Some(api_key) = api_key {
+            assert!(!text.contains(api_key));
+        }
+        assert_eq!(error.retry_after(), Some(std::time::Duration::from_secs(7)));
+    }
+
+    fn body(api_key: Option<&str>) -> String {
+        format!(
+            r#"{{"message":"canonical request {SECRET} {TOKEN} {}"}}"#,
+            api_key.unwrap_or("")
+        )
+    }
+
+    let root = tempfile::tempdir().expect("root");
+    let host = TestHost::open(PluginId::from_static("bedrock"), root.path());
+    for (index, (protocol, base)) in [
+        (ProtocolId::OPENAI_CHAT, "https://proxy.test/openai/v1"),
+        (ProtocolId::OPENAI_RESPONSES, "https://proxy.test/openai/v1"),
+        (
+            ProtocolId::ANTHROPIC_MESSAGES,
+            "https://proxy.test/anthropic",
+        ),
+        (ProtocolId::BEDROCK_CONVERSE, "https://proxy.test"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let provider = build(host.context(), base, protocol);
+        let status = if index % 2 == 0 { 401 } else { 403 };
+        host.http()
+            .enqueue_response(status, &[("retry-after", "7")], body(None));
+        let error = block_on(provider.execute(request("demo"), protocol))
+            .map(drop)
+            .expect_err("refused");
+        assert_eq!(error.status(), Some(status));
+        assert_clean(&error, None);
+    }
+    let messages = build(
+        host.context(),
+        "https://proxy.test/anthropic",
+        ProtocolId::ANTHROPIC_MESSAGES,
+    );
+    host.http()
+        .enqueue_response(403, &[("retry-after", "7")], body(None));
+    let error = block_on(messages.count_input(request("demo"), ProtocolId::ANTHROPIC_MESSAGES))
+        .expect_err("count refused");
+    assert_clean(&error, None);
+
+    host.secrets()
+        .insert(&PluginId::from_static("bedrock"), "api_key", API_KEY);
+    for protocol in [
+        ProtocolId::OPENAI_CHAT,
+        ProtocolId::OPENAI_RESPONSES,
+        ProtocolId::ANTHROPIC_MESSAGES,
+    ] {
+        let base = if protocol == ProtocolId::ANTHROPIC_MESSAGES {
+            "https://proxy.test/anthropic"
+        } else {
+            "https://proxy.test/openai/v1"
+        };
+        let provider = build(host.context(), base, protocol);
+        host.http()
+            .enqueue_response(401, &[("retry-after", "7")], body(Some(API_KEY)));
+        let error = block_on(provider.execute(request("demo"), protocol))
+            .map(drop)
+            .expect_err("refused");
+        assert_clean(&error, Some(API_KEY));
+    }
+    let messages = build(
+        host.context(),
+        "https://proxy.test/anthropic",
+        ProtocolId::ANTHROPIC_MESSAGES,
+    );
+    host.http()
+        .enqueue_response(403, &[("retry-after", "7")], body(Some(API_KEY)));
+    let error = block_on(messages.count_input(request("demo"), ProtocolId::ANTHROPIC_MESSAGES))
+        .expect_err("count refused");
+    assert_clean(&error, Some(API_KEY));
+}
+
+#[test]
+fn d266_incomplete_access_key_pairs_fail_compatibility_builds() {
+    let root = tempfile::tempdir().expect("root");
+    let host = TestHost::open(PluginId::from_static("bedrock"), root.path());
+    for (key, expected) in [
+        ("access_key_id", "Converse access key id is empty"),
+        ("secret_access_key", "Converse secret access key is empty"),
+    ] {
+        let mut config = raw("https://proxy.test/openai/v1");
+        config.insert(key, RawValue::String(String::new()));
+        let error = DynUpstreamFactory::validate_and_build_with(
+            &BedrockFactory,
+            &config,
+            host.context(),
+            &BuildContext::new(ProtocolId::OPENAI_CHAT),
+        )
+        .map(drop)
+        .expect_err("incomplete pair");
+        assert!(error.to_string().contains(expected));
+    }
 }
