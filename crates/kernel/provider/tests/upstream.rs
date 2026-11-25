@@ -152,6 +152,7 @@ fn truncated_server_with_status(status: u16, body: &'static [u8]) -> (String, Ar
 }
 
 async fn text_of(completion: Completion) -> String {
+    let completion = completion.peel();
     match completion {
         Completion::Unary(response) => text_in(&response),
         Completion::Stream(mut stream) => {
@@ -164,6 +165,7 @@ async fn text_of(completion: Completion) -> String {
             text
         }
         Completion::Raw(stream) => text_in_raw(&collect_raw(stream).await),
+        Completion::Produced { .. } => panic!("peel removes the producing codec"),
     }
 }
 
@@ -394,7 +396,7 @@ async fn leading_failed_responses_stream_is_a_status_error() {
         .execute(user_request(true), "openai-chat")
         .await
         .expect("cross");
-    let Completion::Stream(mut stream) = foreign else {
+    let Completion::Stream(mut stream) = foreign.peel() else {
         panic!("expected a decoded stream");
     };
     let error = stream.next().await.expect("item").expect_err("status");
@@ -603,7 +605,7 @@ async fn streaming_body_breaks_are_interrupted_for_raw_and_decoded_streams() {
             .execute(user_request(true), inbound)
             .await
             .expect("headers");
-        match completion {
+        match completion.peel() {
             Completion::Raw(mut stream) => {
                 let error = loop {
                     match stream.next().await {
@@ -624,7 +626,7 @@ async fn streaming_body_breaks_are_interrupted_for_raw_and_decoded_streams() {
                 };
                 assert_eq!(error.kind, ProviderErrorKind::Interrupted, "{inbound}");
             }
-            Completion::Unary(_) => panic!("expected a stream"),
+            Completion::Unary(_) | Completion::Produced { .. } => panic!("expected a stream"),
         }
     }
 }
@@ -1012,6 +1014,7 @@ fn event_created(event: &StreamEvent) -> bool {
 }
 
 async fn event_has_created(completion: Completion) -> bool {
+    let completion = completion.peel();
     match completion {
         Completion::Stream(mut stream) => {
             let mut found = false;
@@ -1028,7 +1031,7 @@ async fn event_has_created(completion: Completion) -> bool {
             .decode_stream(&collect_raw(stream).await)
             .map(|events| events.iter().any(event_created))
             .unwrap_or(false),
-        Completion::Unary(_) => false,
+        Completion::Unary(_) | Completion::Produced { .. } => false,
     }
 }
 
@@ -1426,7 +1429,7 @@ async fn a7_finish_reason_error_fails_raw_and_translated_streams() {
         .execute(user_request(true), "anthropic-messages")
         .await
         .expect("translated stream");
-    let Completion::Stream(mut events) = completion else {
+    let Completion::Stream(mut events) = completion.peel() else {
         panic!("stream");
     };
     let error = loop {

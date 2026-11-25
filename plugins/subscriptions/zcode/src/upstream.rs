@@ -416,15 +416,29 @@ fn start_refused(error: &PluginError) -> bool {
 }
 
 async fn unary_spent(completion: Completion) -> Result<(Completion, bool), PluginError> {
+    let (codec, completion) = completion.split_produced();
     let Completion::Raw(mut body) = completion else {
-        return Ok((completion, false));
+        return Ok((restore_codec(codec, completion), false));
     };
     let mut bytes = Vec::new();
     while let Some(chunk) = body.next_chunk().await {
         bytes.extend_from_slice(&chunk?);
     }
     let spent = spent_body(&bytes);
-    Ok((Completion::Raw(BodyStream::from_bytes(bytes)), spent))
+    Ok((
+        restore_codec(codec, Completion::Raw(BodyStream::from_bytes(bytes))),
+        spent,
+    ))
+}
+
+fn restore_codec(
+    codec: Option<hofund_plugin_api::ProtocolId>,
+    completion: Completion,
+) -> Completion {
+    match codec {
+        Some(codec) => completion.produced(codec),
+        None => completion,
+    }
 }
 
 #[hofund_plugin_sdk::async_trait]
@@ -514,7 +528,7 @@ impl UpstreamProvider for ZcodeUpstream {
                     result = if spent {
                         self.routing
                             .rest_gift(&self.account, &original.model, now, true);
-                        let Completion::Raw(body) = completion else {
+                        let Completion::Raw(body) = completion.peel() else {
                             unreachable!("unary spent returns a raw body");
                         };
                         let mut bytes = Vec::new();

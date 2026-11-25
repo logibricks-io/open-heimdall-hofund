@@ -116,7 +116,7 @@ struct Outcome {
 
 async fn collect(completion: Completion) -> Result<Outcome, String> {
     let mut outcome = Outcome::default();
-    match completion {
+    match completion.peel() {
         Completion::Unary(response) => {
             for part in &response.message.content {
                 match part {

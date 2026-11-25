@@ -117,7 +117,7 @@ fn built_protocol(provider: &Arc<dyn UpstreamProvider>) -> String {
             .execute(Request::new("model"), ProtocolId::OPENAI_CHAT)
             .await
             .expect("execute");
-        let Completion::Raw(mut body) = completion else {
+        let Completion::Raw(mut body) = completion.peel() else {
             panic!("echo returns a raw body");
         };
         let chunk = body.next_chunk().await.expect("chunk").expect("bytes");

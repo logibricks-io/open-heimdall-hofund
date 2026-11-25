@@ -2038,7 +2038,7 @@ fn rate_limits_event_observed_and_unary_folded() {
     let completion =
         block_on(upstream_for(&host, &id).execute(unary, ProtocolId::OPENAI_RESPONSES))
             .expect("execute");
-    let Completion::Unary(response) = completion else {
+    let Completion::Unary(response) = completion.peel() else {
         panic!("a unary request gets one reply");
     };
     assert_eq!(response.model.as_deref(), Some("gpt-5"));
@@ -2076,7 +2076,7 @@ fn d224_codex_unary_fold_keeps_the_completed_served_tier() {
     let completion =
         block_on(upstream_for(&host, &id).execute(unary, ProtocolId::OPENAI_RESPONSES))
             .expect("execute");
-    let Completion::Unary(response) = completion else {
+    let Completion::Unary(response) = completion.peel() else {
         panic!("a unary request gets one reply");
     };
     assert_eq!(
@@ -2102,7 +2102,7 @@ fn streaming_reply_passes_through_while_watched() {
         upstream_for(&host, &id).execute(streaming_request(), ProtocolId::OPENAI_RESPONSES),
     )
     .expect("execute");
-    let Completion::Raw(mut body) = completion else {
+    let Completion::Raw(mut body) = completion.peel() else {
         panic!("a same-protocol stream passes through");
     };
     let mut bytes = Vec::new();

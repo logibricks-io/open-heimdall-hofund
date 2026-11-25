@@ -338,9 +338,14 @@ ClockHandle::fn monotonic (& self) -> Duration
 ClockHandle::fn now (& self) -> SystemTime
 Completion
 Completion #[non_exhaustive]
+Completion::Produced
 Completion::Raw
 Completion::Stream
 Completion::Unary
+Completion::fn peel (self) -> Self
+Completion::fn produced (self , codec : ProtocolId) -> Self
+Completion::fn produced_codec (& self) -> Option < ProtocolId >
+Completion::fn split_produced (self) -> (Option < ProtocolId > , Self)
 ConfigError
 ConfigError #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 ConfigError::fn message (& self) -> & str

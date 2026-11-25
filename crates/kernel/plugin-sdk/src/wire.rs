@@ -459,8 +459,9 @@ impl Sent {
         if !self.streaming {
             return self.complete().await;
         }
+        let codec = self.codec;
         let messages_base = self.messages_base.clone();
-        let mut decoder = self.codec.stream_decoder();
+        let mut decoder = codec.stream_decoder();
         let mut body = self.into_body();
         let mut events = Vec::new();
         while let Some(chunk) = body.next_chunk().await {
@@ -472,7 +473,7 @@ impl Sent {
         }
         let mut response = hofund_ir::assemble(&events);
         hofund_codec::service_tier::stamp_last_served_tier(&events, &mut response);
-        Ok(Completion::Unary(Box::new(response)))
+        Ok(tag_codec(codec, Completion::Unary(Box::new(response))))
     }
 
     /// The body with the watch and the unwrap applied, in that order.
@@ -1472,10 +1473,13 @@ async fn decoded(
             billed: BilledUsage::default(),
             messages_base,
         };
-        return Ok(Completion::Stream(Box::pin(futures_util::stream::unfold(
-            events,
-            |mut events| async move { events.next().await.map(|item| (item, events)) },
-        ))));
+        return Ok(tag_codec(
+            codec,
+            Completion::Stream(Box::pin(futures_util::stream::unfold(
+                events,
+                |mut events| async move { events.next().await.map(|item| (item, events)) },
+            ))),
+        ));
     }
     let bytes = collect(body).await?;
     if let Some(error) = carried_error(&bytes, allocation_quota_rate) {
@@ -1485,7 +1489,7 @@ async fn decoded(
         .decode_response(&bytes)
         .map_err(|error| PluginError::decode(error.to_string()))?;
     hofund_codec::service_tier::retain_response_tier(&mut response);
-    Ok(Completion::Unary(Box::new(response)))
+    Ok(tag_codec(codec, Completion::Unary(Box::new(response))))
 }
 
 async fn raw(
@@ -1500,7 +1504,10 @@ async fn raw(
         if let Some(error) = carried_error(&bytes, allocation_quota_rate) {
             return Err(account_off_stream(messages_base.as_deref(), error));
         }
-        return Ok(Completion::Raw(BodyStream::from_bytes(bytes)));
+        return Ok(tag_codec(
+            codec,
+            Completion::Raw(BodyStream::from_bytes(bytes)),
+        ));
     }
     let mut decoder = codec.stream_decoder();
     let mut buffered: Vec<Bytes> = Vec::new();
@@ -1522,7 +1529,14 @@ async fn raw(
     for chunk in buffered.into_iter().rev() {
         stream = BodyStream::resume(chunk, stream);
     }
-    Ok(Completion::Raw(stream))
+    Ok(tag_codec(codec, Completion::Raw(stream)))
+}
+
+fn tag_codec(codec: &dyn Codec, completion: Completion) -> Completion {
+    match ProtocolId::try_from(codec.id()) {
+        Ok(id) => completion.produced(id),
+        Err(_) => completion,
+    }
 }
 
 fn stream_commits(event: &StreamEvent) -> bool {
@@ -2817,7 +2831,7 @@ mod tests {
         }
 
         async fn read(completion: Completion) -> Vec<u8> {
-            let Completion::Raw(mut body) = completion else {
+            let Completion::Raw(mut body) = completion.peel() else {
                 panic!("raw expected");
             };
             let mut out = Vec::new();
@@ -2836,7 +2850,7 @@ mod tests {
                     .map(http::HeaderValue::as_bytes),
                 Some(&b"yes"[..])
             );
-            let Completion::Unary(response) = sent.fold().await.expect("fold") else {
+            let Completion::Unary(response) = sent.fold().await.expect("fold").peel() else {
                 panic!("unary expected");
             };
             let text: String = response

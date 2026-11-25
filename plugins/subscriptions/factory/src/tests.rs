@@ -714,7 +714,7 @@ fn r52e_anthropic_unwraps_unary_tool_calls() {
     }];
     let completion =
         block_on(upstream.execute(request, ProtocolId::ANTHROPIC_MESSAGES)).expect("execute");
-    let Completion::Raw(mut body) = completion else {
+    let Completion::Raw(mut body) = completion.peel() else {
         panic!("raw completion");
     };
     let mut bytes = Vec::new();
@@ -762,7 +762,7 @@ fn r52e_anthropic_unwraps_streamed_tool_arguments() {
     }];
     let completion =
         block_on(upstream.execute(request, ProtocolId::ANTHROPIC_MESSAGES)).expect("execute");
-    let Completion::Raw(mut body) = completion else {
+    let Completion::Raw(mut body) = completion.peel() else {
         panic!("raw completion");
     };
     let mut out = Vec::new();

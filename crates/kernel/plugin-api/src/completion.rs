@@ -7,6 +7,7 @@ use hofund_ir::{ContentPart, Response, StreamEvent};
 
 use crate::body::BodyStream;
 use crate::error::PluginError;
+use crate::id::ProtocolId;
 
 /// How many bytes of a probe body are kept. The rest is dropped, not drained.
 pub const PROBE_CAP: usize = 4096;
@@ -20,6 +21,61 @@ pub enum Completion {
     Stream(Pin<Box<dyn Stream<Item = Result<StreamEvent, PluginError>> + Send>>),
     /// Same-protocol bytes. The gateway forwards them and only observes them.
     Raw(BodyStream),
+    /// `inner` was produced by `codec`.
+    ///
+    /// Host rules that depend on the outbound codec read this before the body.
+    /// A member label is not that codec when the member is a subscription or a
+    /// plugin fetch. Callers that only forward the body use [`Completion::peel`].
+    Produced {
+        /// Codec that encoded the request and decoded or relayed this body.
+        codec: ProtocolId,
+        /// The unary, stream, or raw body.
+        inner: Box<Completion>,
+    },
+}
+
+impl Completion {
+    /// Tags `self` with the codec that produced it.
+    #[must_use]
+    pub fn produced(self, codec: ProtocolId) -> Self {
+        Self::Produced {
+            codec,
+            inner: Box::new(self),
+        }
+    }
+
+    /// The producing codec, when this completion was tagged.
+    #[must_use]
+    pub fn produced_codec(&self) -> Option<ProtocolId> {
+        match self {
+            Self::Produced { codec, .. } => Some(*codec),
+            _ => None,
+        }
+    }
+
+    /// Removes producing-codec tags and returns the body.
+    #[must_use]
+    pub fn peel(self) -> Self {
+        match self {
+            Self::Produced { inner, .. } => inner.peel(),
+            other => other,
+        }
+    }
+
+    /// Splits producing-codec tags from the body.
+    ///
+    /// Nested tags keep the codec closest to the body. An untagged completion
+    /// returns `None` and itself.
+    #[must_use]
+    pub fn split_produced(self) -> (Option<ProtocolId>, Self) {
+        match self {
+            Self::Produced { codec, inner } => {
+                let (inner_codec, body) = inner.split_produced();
+                (Some(inner_codec.unwrap_or(codec)), body)
+            }
+            other => (None, other),
+        }
+    }
 }
 
 /// The result of asking an upstream to count input tokens.
@@ -76,6 +132,7 @@ impl ProbeReport {
     ///
     /// Returns the stream or body error unchanged.
     pub async fn from_completion(completion: Completion) -> Result<Self, PluginError> {
+        let completion = completion.peel();
         match completion {
             Completion::Unary(response) => Ok(Self::new(text_of(&response))),
             Completion::Stream(mut stream) => {
@@ -101,6 +158,7 @@ impl ProbeReport {
                     Err(error) => Err(error),
                 }
             }
+            Completion::Produced { inner, .. } => Box::pin(Self::from_completion(*inner)).await,
         }
     }
 

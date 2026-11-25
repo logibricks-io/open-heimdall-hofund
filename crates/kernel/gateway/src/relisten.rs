@@ -91,6 +91,9 @@ struct Shared {
     addresses: Mutex<Addresses>,
     gate: tokio::sync::Mutex<()>,
     hook: Option<BindHook>,
+    /// Listeners a test already bound. A relisten to one of their addresses
+    /// installs that socket instead of binding again.
+    prepared: Mutex<Vec<std::net::TcpListener>>,
 }
 
 /// Moves a running model listener. Clones share one listener.
@@ -129,9 +132,30 @@ pub(crate) fn swappable(
             addresses: Mutex::new(Addresses { requested, bound }),
             gate: tokio::sync::Mutex::new(()),
             hook: None,
+            prepared: Mutex::new(Vec::new()),
         }),
     };
     (accept, handle)
+}
+
+/// Turns a blocking standard listener into a Tokio listener.
+///
+/// `requested` is the address the caller asked to serve. Port 0 means any
+/// port, so the socket's own address is accepted. Any other request must
+/// already be this socket's address: the socket is never closed and rebound.
+pub(crate) fn adopt_std_listener(
+    requested: SocketAddr,
+    listener: std::net::TcpListener,
+) -> io::Result<TcpListener> {
+    let bound = listener.local_addr()?;
+    if requested.port() != 0 && bound != requested {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("prepared listener is bound to {bound}"),
+        ));
+    }
+    listener.set_nonblocking(true)?;
+    TcpListener::from_std(listener)
 }
 
 impl Relisten {
@@ -154,6 +178,18 @@ impl Relisten {
         if let Some(shared) = Arc::get_mut(&mut self.shared) {
             shared.hook = Some(hook);
         }
+    }
+
+    /// Keeps `listener` open until a relisten asks for its address, then
+    /// installs that socket instead of binding. Safe to call after the handle
+    /// is cloned: the socket stays in the shared list.
+    #[doc(hidden)]
+    pub fn hold_for_relisten(&self, listener: std::net::TcpListener) {
+        self.shared
+            .prepared
+            .lock()
+            .expect("prepared listeners")
+            .push(listener);
     }
 
     fn addresses(&self) -> Addresses {
@@ -209,7 +245,18 @@ impl Relisten {
         if let Some(hook) = &self.shared.hook {
             (hook.0)(addr)?;
         }
+        if let Some(prepared) = self.take_prepared(addr) {
+            return adopt_std_listener(addr, prepared);
+        }
         TcpListener::bind(addr).await
+    }
+
+    fn take_prepared(&self, addr: SocketAddr) -> Option<std::net::TcpListener> {
+        let mut prepared = self.shared.prepared.lock().expect("prepared listeners");
+        let index = prepared
+            .iter()
+            .position(|listener| listener.local_addr().is_ok_and(|bound| bound == addr))?;
+        Some(prepared.swap_remove(index))
     }
 
     async fn install(
@@ -347,6 +394,7 @@ mod tests {
         serve_relistenable(
             router,
             listen,
+            None,
             Arc::new(crate::responses_ws::SocketRegistry::default()),
             Arc::new(crate::realtime::Registry::new()),
         )
@@ -358,13 +406,11 @@ mod tests {
         SocketAddr::from((Ipv4Addr::LOCALHOST, port))
     }
 
-    /// A loopback port that was free a moment ago.
-    fn free_port() -> u16 {
-        std::net::TcpListener::bind(loopback(0))
-            .expect("probe")
-            .local_addr()
-            .expect("probe addr")
-            .port()
+    /// Binds a loopback socket and returns it still held, with its address.
+    fn held_loopback() -> (std::net::TcpListener, SocketAddr) {
+        let listener = std::net::TcpListener::bind(loopback(0)).expect("bind");
+        let addr = listener.local_addr().expect("address");
+        (listener, addr)
     }
 
     fn accepts(addr: SocketAddr) -> bool {
@@ -393,7 +439,8 @@ mod tests {
     async fn relisten_port_change_binds_new_before_closing_old() {
         let running = serve(loopback(0)).await;
         let old = running.local_addr;
-        let to = loopback(free_port());
+        let (held, to) = held_loopback();
+        running.hold_for_relisten(held);
         let old_open_at_bind = Arc::new(Mutex::new(Vec::new()));
         let seen = Arc::clone(&old_open_at_bind);
         let running = running.with_bind_hook(BindHook::new(move |addr| {
@@ -519,7 +566,8 @@ mod tests {
         let (head, tail) = REQUEST.split_at(10);
         stream.write_all(head).await.expect("partial request");
 
-        let to = loopback(free_port());
+        let (held, to) = held_loopback();
+        running.hold_for_relisten(held);
         running.relisten(to).await.expect("relisten");
 
         assert!(!accepts(old), "no new connections on the old address");
@@ -536,10 +584,9 @@ mod tests {
         let handle = running.relisten_handle().expect("handle");
         running.shutdown().await;
 
-        let error = handle
-            .relisten(loopback(free_port()))
-            .await
-            .expect_err("stopped");
+        let (held, to) = held_loopback();
+        handle.hold_for_relisten(held);
+        let error = handle.relisten(to).await.expect_err("stopped");
 
         assert!(matches!(error, RelistenError::Stopped), "{error:?}");
     }

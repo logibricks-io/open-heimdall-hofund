@@ -324,12 +324,12 @@ async fn shutdown_route_drains_inflight_model_request() {
     std::fs::create_dir_all(&runtime).expect("runtime directory");
     std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700))
         .expect("runtime permissions");
-    let options = StartOptions {
+    let options = || StartOptions {
         control_enabled: true,
-        control_runtime: Some(ControlRuntime::new(Some(runtime), dir.0.clone())),
+        control_runtime: Some(ControlRuntime::new(Some(runtime.clone()), dir.0.clone())),
         ..StartOptions::default()
     };
-    let running = start_with_options(&config, options.clone())
+    let running = start_with_options(&config, options())
         .await
         .expect("daemon");
     let model_addr = running.local_addr;
@@ -402,7 +402,7 @@ async fn shutdown_route_drains_inflight_model_request() {
         "the model port still accepts connections"
     );
     assert!(!socket.exists(), "the control socket was not removed");
-    let again = start_with_options(&config, options)
+    let again = start_with_options(&config, options())
         .await
         .expect("the daemon lock was released");
     support::shutdown(again).await;
