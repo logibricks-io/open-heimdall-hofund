@@ -117,6 +117,7 @@ pub struct QuotaWindow {
     runs_out_at: Option<SystemTime>,
     runs_out: Option<f64>,
     window_span: Option<Duration>,
+    pool: String,
     /// The vendor refused further use of this window until it resets.
     held: bool,
 }
@@ -212,6 +213,7 @@ impl QuotaWindow {
             runs_out_at: None,
             runs_out: None,
             window_span: None,
+            pool: String::new(),
             held: false,
         })
     }
@@ -293,6 +295,13 @@ impl QuotaWindow {
         self
     }
 
+    /// Sets the shared pool this window draws on.
+    #[must_use]
+    pub fn with_pool(mut self, pool: impl Into<String>) -> Self {
+        self.pool = pool.into();
+        self
+    }
+
     /// Amount used in the vendor's unit, when reported.
     #[must_use]
     pub const fn provider_amount(&self) -> Option<f64> {
@@ -327,6 +336,12 @@ impl QuotaWindow {
     #[must_use]
     pub const fn window_span(&self) -> Option<Duration> {
         self.window_span
+    }
+
+    /// Shared pool this window draws on, or an empty string when it stands alone.
+    #[must_use]
+    pub fn pool(&self) -> &str {
+        &self.pool
     }
 
     /// Whether an exhausted window stops routing to the account.
@@ -1839,6 +1854,7 @@ pub struct SubscriptionSpec {
     agent_sign_in: Option<AgentSignIn>,
     daily_warmup: bool,
     daily_checkin: bool,
+    stale_replica_quota: bool,
 }
 
 impl SubscriptionSpec {
@@ -1866,6 +1882,7 @@ impl SubscriptionSpec {
             agent_sign_in: None,
             daily_warmup: false,
             daily_checkin: false,
+            stale_replica_quota: false,
         }
     }
 
@@ -1899,6 +1916,13 @@ impl SubscriptionSpec {
     #[must_use]
     pub const fn with_daily_checkin(mut self, daily_checkin: bool) -> Self {
         self.daily_checkin = daily_checkin;
+        self
+    }
+
+    /// Declares that replicas can return a quota window already replaced by a reset.
+    #[must_use]
+    pub const fn with_stale_replica_quota(mut self, stale_replica_quota: bool) -> Self {
+        self.stale_replica_quota = stale_replica_quota;
         self
     }
 
@@ -1943,6 +1967,12 @@ impl SubscriptionSpec {
     #[must_use]
     pub const fn daily_checkin(&self) -> bool {
         self.daily_checkin
+    }
+
+    /// Whether quota history rejects a running window's stale predecessors.
+    #[must_use]
+    pub const fn stale_replica_quota(&self) -> bool {
+        self.stale_replica_quota
     }
 }
 

@@ -1006,11 +1006,13 @@ QuotaWindow::fn excluded_models (& self) -> & [String]
 QuotaWindow::fn models (& self) -> & [String]
 QuotaWindow::fn name (& self) -> & str
 QuotaWindow::fn new (name : impl Into < String > , used : u64 , limit : Option < u64 > , resets_at : Option < SystemTime > ,) -> Result < Self , PluginError >
+QuotaWindow::fn pool (& self) -> & str
 QuotaWindow::fn scope_model (& self) -> Option < & str >
 QuotaWindow::fn unit (& self) -> & str
 QuotaWindow::fn with_display (mut self , display : impl Into < String >) -> Self
 QuotaWindow::fn with_excluded_models (mut self , models : Vec < String >) -> Self
 QuotaWindow::fn with_models (mut self , models : Vec < String >) -> Self
+QuotaWindow::fn with_pool (mut self , pool : impl Into < String >) -> Self
 QuotaWindow::fn with_provider_count (mut self , amount : f64 , limit : f64 , unit : impl Into < String >) -> Self
 QuotaWindow::fn with_scope_model (mut self , model : impl Into < String >) -> Self
 RawAnswer
@@ -1327,10 +1329,12 @@ SubscriptionSpec::const fn flow (& self) -> SignInFlowKind
 SubscriptionSpec::const fn from_static (plugin : PluginId , display_name : & 'static str , flow : SignInFlowKind ,) -> Self
 SubscriptionSpec::const fn max_accounts (& self) -> u64
 SubscriptionSpec::const fn plugin (& self) -> & PluginId
+SubscriptionSpec::const fn stale_replica_quota (& self) -> bool
 SubscriptionSpec::const fn with_agent_sign_in (mut self , agent_sign_in : AgentSignIn) -> Self
 SubscriptionSpec::const fn with_daily_checkin (mut self , daily_checkin : bool) -> Self
 SubscriptionSpec::const fn with_daily_warmup (mut self , daily_warmup : bool) -> Self
 SubscriptionSpec::const fn with_max_accounts (mut self , max_accounts : u64) -> Self
+SubscriptionSpec::const fn with_stale_replica_quota (mut self , stale_replica_quota : bool) -> Self
 SurfaceHost
 SurfaceHost #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq)
 SurfaceHost::const fn auth (& self) -> AuthResult

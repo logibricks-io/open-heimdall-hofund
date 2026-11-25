@@ -507,6 +507,7 @@ fn window_info(window: &PlanWindow) -> WindowInfo {
         excluded_models: Vec::new(),
         window_span: window.span(),
         reset_after: None,
+        stale_replica_quota: false,
     }
 }
 
@@ -540,6 +541,7 @@ fn wallet_info(wallet: &BalanceWallet) -> WindowInfo {
         excluded_models: Vec::new(),
         window_span: None,
         reset_after: None,
+        stale_replica_quota: false,
     }
 }
 
