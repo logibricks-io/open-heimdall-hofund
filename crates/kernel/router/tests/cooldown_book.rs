@@ -2494,6 +2494,101 @@ fn d251_20_lift_move_and_reload_keep_the_probe_with_its_rest() {
 }
 
 #[test]
+fn d251_21_a_longer_vendor_timed_refusal_does_not_inherit_the_probe() {
+    for credit in [false, true] {
+        let (book, id, clock) = windowed();
+        let window_reset = *clock.lock().expect("clock") + Duration::from_secs(DAY);
+        let reading = |used| window_at(&clock, window_reset, used);
+        book.observe_credit_window(&id, &[reading(10)]);
+        let rest = book
+            .record_failure(
+                &id,
+                &PluginError::quota("empty").with_reset_after(Duration::from_secs(6 * HOUR)),
+            )
+            .expect("vendor-timed rest");
+        book.observe_credit_window(&id, &[reading(8)]);
+        assert!(book.renewal_probe(&id));
+
+        let later = if credit {
+            credit_error().with_reset_after(Duration::from_secs(12 * HOUR))
+        } else {
+            PluginError::quota("empty").with_reset_after(Duration::from_secs(12 * HOUR))
+        };
+        let replaced = book
+            .record_failure(&id, &later)
+            .expect("longer vendor-timed rest");
+        assert_eq!(
+            replaced.cause(),
+            if credit {
+                CooldownCause::Credit
+            } else {
+                CooldownCause::Quota
+            }
+        );
+        assert!(replaced.until() > rest.until());
+        assert!(
+            !book.renewal_probe(&id),
+            "credit={credit}: a new deadline is not asked without a renewed reading"
+        );
+
+        book.record_success_for_model(&id, "served-model");
+        assert_eq!(book.cooling(&id), Some(replaced.clone()));
+        assert!(!book.renewal_probe(&id));
+        assert!(book.drain_recoveries().is_empty());
+
+        book.observe_credit_window(&id, &[reading(10)]);
+        book.observe_credit_window(&id, &[reading(8)]);
+        assert!(book.renewal_probe(&id));
+        assert_eq!(
+            book.cooling(&id).expect("probed rest").until(),
+            replaced.until()
+        );
+    }
+}
+
+#[test]
+fn d251_22_success_that_keeps_the_asked_deadline_restarts_the_ladder() {
+    for conditional in [false, true] {
+        let (book, id, clock) = windowed();
+        let window_reset = *clock.lock().expect("clock") + Duration::from_secs(DAY);
+        let reading = |used| window_at(&clock, window_reset, used);
+        book.record_failure(&id, &PluginError::connect("down"))
+            .expect("first rung");
+        advance(&clock, MINUTE + 1);
+        let climbed = book
+            .record_failure(&id, &PluginError::connect("down"))
+            .expect("second rung");
+        assert_eq!(climbed.failures(), 2);
+
+        book.observe_credit_window(&id, &[reading(10)]);
+        book.record_failure(
+            &id,
+            &PluginError::quota("empty").with_reset_after(Duration::from_secs(6 * HOUR)),
+        )
+        .expect("vendor-timed rest");
+        book.observe_credit_window(&id, &[reading(8)]);
+        assert!(book.renewal_probe(&id));
+
+        if conditional {
+            let revision = book.revision(&id);
+            book.record_success_if_unchanged(&id, revision);
+        } else {
+            book.record_success(&id);
+        }
+        assert_eq!(book.cooling(&id), None);
+
+        let next = if conditional {
+            book.record_failure(&id, &PluginError::connect("down"))
+                .expect("rung after the answer")
+        } else {
+            book.record_panic(&id)
+        };
+        assert_eq!(next.failures(), 1, "conditional={conditional}");
+        assert_eq!(remaining(&book, &id, &clock), Duration::from_secs(MINUTE));
+    }
+}
+
+#[test]
 fn d29_6_same_reset_read_a_moment_later_keeps_vendor_timed_rest() {
     let (book, id, clock) = windowed();
     let reset = SystemTime::now() + Duration::from_secs(3 * HOUR);

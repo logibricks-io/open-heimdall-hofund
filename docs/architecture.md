@@ -463,8 +463,12 @@ use body reset, header reset, full-window reset, a retry hint longer than five
 hours, then five hours. A renewed window lifts a rest whose deadline was not
 vendor-named. A vendor-timed quota or credit rest instead opens one upstream
 probe while keeping the rest. Only a vendor-timed refusal within one second of
-that deadline closes it; a guessed or farther refusal leaves it open. A real
-answer clears only an open vendor-timed quota or credit rest and retains its
+that deadline closes it and pins it. A guessed or farther refusal leaves it
+open while the probed deadline is still the active cooling. A replacement
+rest, including a longer vendor-timed quota or credit rest, closes the probe
+and keeps its own deadline. A model-scoped answer clears only that open
+vendor-timed quota or credit rest and retains its asked deadline. A
+member-wide answer clears every rest for that member and still retains the
 asked deadline. An unused open probe closes when its rest expires. When every
 remaining candidate is held, routing returns the first stored refusal and
 soonest reset without calling upstream.

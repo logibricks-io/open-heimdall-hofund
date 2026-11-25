@@ -9,7 +9,7 @@
 //! | HTTP 429 | Uses the larger of the rate ladder and the retry hint, with the hint capped at 1 hour. The rate ladder starts at 1 minute, doubles for a new 429 within 30 minutes after the previous rate rest ended, and is capped at 30 minutes. A 429 during an active rest does not advance the ladder. A refusal saying the requested model's credentials are cooling uses a model-local ladder. |
 //! | Exhausted quota | Uses a body-written reset capped at 8 days, otherwise the header retry hint capped at 1 hour, or 15 minutes without a positive hint. Model-cooling wording, or a model-scope flag set by the plugin, scopes the rest to that model. |
 //! | API-key credit refusal | Climbs 30 minutes, 2 hours, 8 hours, 24 hours, 3 days, then 7 days after each ended credit rest, repeating 7 days. An active rest keeps its rung. A named reset wins and is capped at 35 days. A retry hint or soon/smaller-request wording stays flat at 30 minutes and off the ladder. Model-cooling wording keys the ladder by model. Success and manual removal restart the ladder. |
-//! | Windowed-account credit refusal | Uses a named body or header reset, the latest full-window reset, a retry hint longer than 5 hours, then 5 hours, capped at 35 days. A renewed window lifts a rest whose deadline was not vendor-named. For a vendor-timed quota or credit rest, the first renewed reading opens one upstream probe without lifting the rest. Only a vendor-timed refusal within one second of that deadline closes the probe; a guessed or farther refusal leaves it open. A real answer clears only the open vendor-timed quota or credit rest and retains its asked deadline. An unused open probe closes when its rest expires. A vendor-timed rest lifts only when a matching window's reset elapsed or moved to a later cycle. Failed and empty readings lift nothing. Other subscription accounts stay flat at 30 minutes. |
+//! | Windowed-account credit refusal | Uses a named body or header reset, the latest full-window reset, a retry hint longer than 5 hours, then 5 hours, capped at 35 days. A renewed window lifts a rest whose deadline was not vendor-named. For a vendor-timed quota or credit rest, the first renewed reading opens one upstream probe without lifting the rest. Only a vendor-timed refusal within one second of that deadline closes the probe and pins it. A guessed or farther refusal leaves it open while that probed deadline is still the active cooling; a replacement rest, including a longer vendor-timed quota or credit rest, closes the probe and keeps its own deadline. A model-scoped answer clears only that open vendor-timed quota or credit rest and retains its asked deadline. A member-wide answer clears every rest for that member and still retains the asked deadline. An unused open probe closes when its rest expires. A vendor-timed rest lifts only when a matching window's reset elapsed or moved to a later cycle. Failed and empty readings lift nothing. Other subscription accounts stay flat at 30 minutes. |
 //! | Passive observation | Zero remaining uses the window reset capped at 8 days, the retry hint capped at 1 hour, or 15 minutes without either. Positive remaining at least 98% used with a known positive limit rests only for a positive window reset capped at 8 days. Accounts spending credits and all other observations record nothing. Observations do not advance either failure ladder. |
 //! | Account verification | Rests the whole account for 30 minutes when the error asks for verification. It does not climb the generic ladder. The message is kept, including any link, and is not rewritten. |
 //! | Contained panic | Uses the generic failure ladder with [`CooldownCause::Panic`]. |
@@ -1901,16 +1901,17 @@ fn lift_open_renewal(book: &mut Book, member: &CooldownKey, now: Instant) {
             state.renewal = ProbeState::Closed;
             return;
         };
-        if !matches!(cooling.cause, CooldownCause::Quota | CooldownCause::Credit) {
-            // The open probe belonged to a quota or credit rest that is no
-            // longer active. Keep this other rest and close the probe.
+        let probe_until = state.renewal.until().expect("open reset");
+        let matches_probe = matches!(cooling.cause, CooldownCause::Quota | CooldownCause::Credit)
+            && cooling.vendor_timed
+            && same_reset(cooling.until, probe_until);
+        if !matches_probe {
+            // The open probe belonged to a vendor-timed quota or credit rest
+            // at this deadline. Keep the winning rest and close the probe.
             state.renewal = ProbeState::Closed;
             return;
         }
-        if !cooling.vendor_timed {
-            return;
-        }
-        (cooling.cause, state.renewal.until().expect("open reset"))
+        (cooling.cause, probe_until)
     };
     let (cause, until) = lifted;
     let revision = next_revision(book);
@@ -2125,21 +2126,27 @@ fn apply_observation(state: &mut State, candidate: Cooling) -> Cooling {
     applied
 }
 
-/// An open probe stays only while a quota or credit rest is the active
-/// cooling. Another cause keeps its own rest and closes the probe.
+/// An open probe stays only while the active cooling is the vendor-timed
+/// quota or credit rest at the probed deadline. Any other winner, including
+/// a longer vendor-timed quota or credit rest, keeps its own rest and closes
+/// the probe.
 fn close_open_probe_for_other_cause(state: &mut State) {
+    let probe_until = state.renewal.until();
     let keeps_probe = state.cooling.as_ref().is_some_and(|cooling| {
         matches!(cooling.cause, CooldownCause::Quota | CooldownCause::Credit)
+            && cooling.vendor_timed
+            && probe_until.is_some_and(|until| same_reset(cooling.until, until))
     });
     if !keeps_probe && state.renewal.is_open() {
         state.renewal = ProbeState::Closed;
     }
 }
 
-/// A member-wide answer clears the rest but keeps the deadline a probe
+/// A member-wide answer clears every rest but keeps the deadline a probe
 /// already asked, including an open probe of the vendor-timed quota or
-/// credit rest this answer clears. Model-scoped answers do the same in
-/// [`lift_open_renewal`].
+/// credit rest this answer clears, and restarts both failure ladders.
+/// A model-scoped answer clears only that matching rest in
+/// [`lift_open_renewal`] and leaves every other member rest.
 fn preserve_asked_deadline(state: &mut State, now: Instant) -> bool {
     let until = match state.renewal {
         ProbeState::Asked { until } => until,
@@ -2156,6 +2163,9 @@ fn preserve_asked_deadline(state: &mut State, now: Instant) -> bool {
     };
     state.cooling = None;
     state.renewal = ProbeState::Asked { until };
+    state.failures = 0;
+    state.rate_failures = 0;
+    state.rate_until = None;
     state.credit_rung = 0;
     state.credit_until = None;
     state.credit_ladder = false;
