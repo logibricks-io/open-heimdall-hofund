@@ -256,7 +256,7 @@ This table covers normal and build dependencies, including their target-specific
 | `hofund-codec` | `hofund-ir` |
 | `hofund-quirks` | `hofund-ir` |
 | `hofund-plugin-api` | `hofund-ir` |
-| `hofund-plugin-agent-claude` | `hofund-agent`, `hofund-plugin-api`, `hofund-plugin-sdk` |
+| `hofund-plugin-agent-claude` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-agent-codex` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-agent-agy` | `hofund-plugin-api`, `hofund-plugin-sdk` |
 | `hofund-plugin-agent-alma` | `hofund-plugin-api`, `hofund-plugin-sdk` |

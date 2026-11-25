@@ -11,7 +11,6 @@ homepage.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-hofund-agent = { workspace = true }
 hofund-plugin-api = { workspace = true }
 hofund-plugin-sdk = { workspace = true }
 

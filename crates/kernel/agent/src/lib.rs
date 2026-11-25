@@ -42,7 +42,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 // Referenced so this crate's manifest dependency is compiled, not merely declared.
@@ -333,9 +333,7 @@ fn env_name_eq(a: &OsStr, b: &OsStr, case_insensitive: bool) -> bool {
 }
 
 pub(crate) fn usable_override(value: &OsStr) -> bool {
-    !value.is_empty()
-        && (Path::new(value).is_absolute()
-            || (cfg!(windows) && matches!(value.as_encoded_bytes().first(), Some(b'\\' | b'/'))))
+    hofund_plugin_api::usable_override(value)
 }
 
 /// One managed file as it exists before an edit.
@@ -546,23 +544,7 @@ pub trait AgentAdapter: Sync {
 }
 
 fn home_dir() -> PathBuf {
-    home_dir_from_env(
-        std::env::var_os("HOME"),
-        std::env::var_os("USERPROFILE"),
-        cfg!(windows),
-    )
-}
-
-/// Resolves injected home variables for platform-specific path tests.
-#[doc(hidden)]
-#[must_use]
-pub fn home_dir_from_env(
-    home: Option<OsString>,
-    userprofile: Option<OsString>,
-    windows: bool,
-) -> PathBuf {
-    let found = if windows { userprofile.or(home) } else { home };
-    found.map_or_else(|| PathBuf::from("."), PathBuf::from)
+    hofund_plugin_api::home_dir()
 }
 
 #[cfg(test)]

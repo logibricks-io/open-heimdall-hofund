@@ -72,7 +72,7 @@ pub fn inheriting_subagent_from_env(
     gateway_origin: &str,
     is_route: impl Fn(&str) -> bool,
 ) -> Option<SubagentSetting> {
-    let dir = settings_directory()?;
+    let dir = settings_directory();
     inheriting_subagent_model(agent_id, body, &dir, gateway_origin, is_route)
 }
 
@@ -95,8 +95,20 @@ fn setting_in_directory(
     interpret(raw, &is_route)
 }
 
-fn settings_directory() -> Option<PathBuf> {
-    Some(hofund_agent::Session::from_process_env().claude_settings_dir())
+fn settings_directory() -> PathBuf {
+    settings_directory_from(
+        std::env::var_os("CLAUDE_CONFIG_DIR"),
+        &hofund_plugin_api::home_dir(),
+    )
+}
+
+fn settings_directory_from(dir: Option<std::ffi::OsString>, home: &Path) -> PathBuf {
+    if let Some(dir) = dir
+        && hofund_plugin_api::usable_override(&dir)
+    {
+        return PathBuf::from(dir);
+    }
+    home.join(".claude")
 }
 
 fn read_limited(path: &Path) -> Option<Vec<u8>> {
@@ -203,7 +215,10 @@ fn system_texts(system: Option<&Value>) -> Vec<&str> {
 mod tests {
     use hofund_plugin_sdk::json;
 
-    use super::{OPENINGS, inheriting_subagent_model, inheriting_tool_turn, setting_in_directory};
+    use super::{
+        OPENINGS, inheriting_subagent_model, inheriting_tool_turn, setting_in_directory,
+        settings_directory_from,
+    };
 
     const ORIGIN: &str = "http://127.0.0.1:3425";
 
@@ -332,15 +347,13 @@ mod tests {
         let settings = home.path().join(".claude");
         std::fs::create_dir(&settings).expect("settings dir");
         write_settings(&settings, "sub", ORIGIN);
-        let session =
-            hofund_agent::Session::from_env_iter(home.path(), [("CLAUDE_CONFIG_DIR", "relative")]);
-        let dir = session.claude_settings_dir();
+        let dir = settings_directory_from(Some(std::ffi::OsString::from("relative")), home.path());
         let got = inheriting_subagent_model("claude-code", &explore(), &dir, ORIGIN, served)
             .expect("relative override reads the home file");
         assert_eq!(got.model, "sub");
 
         let profile = tempfile::tempdir().expect("profile");
-        let windows_home = hofund_agent::home_dir_from_env(
+        let windows_home = hofund_plugin_api::home_dir_from_env(
             Some(home.path().as_os_str().to_os_string()),
             Some(profile.path().as_os_str().to_os_string()),
             true,
@@ -349,8 +362,8 @@ mod tests {
         let settings = windows_home.join(".claude");
         std::fs::create_dir(&settings).expect("Windows settings dir");
         write_settings(&settings, "sub", ORIGIN);
-        let session = hofund_agent::Session::new(windows_home).with_claude_config_dir("relative");
-        let dir = session.claude_settings_dir();
+        let dir =
+            settings_directory_from(Some(std::ffi::OsString::from("relative")), &windows_home);
         let got = inheriting_subagent_model("claude-code", &explore(), &dir, ORIGIN, served)
             .expect("Windows order reads the profile file");
         assert_eq!(got.model, "sub");

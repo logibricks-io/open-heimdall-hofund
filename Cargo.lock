@@ -2475,7 +2475,6 @@ dependencies = [
 name = "hofund-plugin-agent-claude"
 version = "0.2.0-rc.3"
 dependencies = [
- "hofund-agent",
  "hofund-plugin-api",
  "hofund-plugin-sdk",
  "tempfile",

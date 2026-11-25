@@ -1,5 +1,6 @@
 //! Agent descriptions, the plan the engine applies, and the gateway target.
 
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -10,6 +11,36 @@ use crate::id::{PluginId, ProtocolId};
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::records::AgentDescription;
+
+/// Whether an environment value is a usable absolute agent path override.
+#[must_use]
+pub fn usable_override(value: &OsStr) -> bool {
+    !value.is_empty()
+        && (Path::new(value).is_absolute()
+            || (cfg!(windows) && matches!(value.as_encoded_bytes().first(), Some(b'\\' | b'/'))))
+}
+
+/// Returns the home directory using the agent integration's platform order.
+#[must_use]
+pub fn home_dir() -> PathBuf {
+    home_dir_from_env(
+        std::env::var_os("HOME"),
+        std::env::var_os("USERPROFILE"),
+        cfg!(windows),
+    )
+}
+
+/// Resolves injected home variables for platform-specific path tests.
+#[doc(hidden)]
+#[must_use]
+pub fn home_dir_from_env(
+    home: Option<OsString>,
+    userprofile: Option<OsString>,
+    windows: bool,
+) -> PathBuf {
+    let found = if windows { userprofile.or(home) } else { home };
+    found.map_or_else(|| PathBuf::from("."), PathBuf::from)
+}
 
 /// Where the local gateway is listening, and the bearer token clients send.
 ///
