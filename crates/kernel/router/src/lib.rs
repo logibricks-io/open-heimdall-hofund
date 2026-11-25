@@ -41,9 +41,7 @@ use hofund_codec::responses_empty::{
 };
 use hofund_control_proto::{RouteTry, SkipReason};
 use hofund_ir::{StreamEvent, estimate_input_tokens};
-use hofund_plugin_api::{
-    BodyStream, CountOutcome, Forward, PluginErrorKind, ProtocolId, RawAnswer,
-};
+use hofund_plugin_api::{BodyStream, CountOutcome, Forward, PluginErrorKind, RawAnswer};
 use tracing::Instrument;
 
 pub use api_fitness::ApiFitness;
@@ -3480,7 +3478,7 @@ pub enum RouterError {
 
 fn compact_carrier(hop: &Hop, model: &str) -> bool {
     let attempt = hop.member.attempt();
-    let responses = ProtocolId::OPENAI_RESPONSES.as_str();
+    let responses = hofund_plugin_api::ProtocolId::OPENAI_RESPONSES.as_str();
     let speaks = hop.member.protocol() == responses
         || attempt.wire_protocol == responses
         || hop.member.serves_responses(model);
