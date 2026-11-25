@@ -108,7 +108,8 @@ fn summary(reply: &Value) -> Result<Vec<QuotaWindow>, PluginError> {
                     Some(SCALE),
                     reset,
                 )?
-                .with_blocking(false),
+                .with_blocking(false)
+                .with_pool(pool.clone()),
             );
         }
     }
@@ -177,5 +178,15 @@ mod tests {
         assert_eq!(windows[1].name(), "Claude & GPT · 7 days");
         assert_eq!(windows[1].used(), 10_000);
         assert_eq!(pool_name(" Gemini Models "), "Gemini");
+    }
+
+    #[test]
+    fn d256_summary_windows_carry_their_pool_identity() {
+        let windows = summary(&json!({"groups": [{
+            "displayName": "Pool models",
+            "buckets": [{"window": "weekly", "remainingFraction": 0.5}]
+        }]}))
+        .expect("windows");
+        assert_eq!(windows[0].pool(), "Pool");
     }
 }

@@ -1,6 +1,6 @@
 //! Quota snapshots, cached readings, history, and router allowance views.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -68,6 +68,9 @@ pub struct WindowInfo {
     /// Relative reset, converted against the reading clock on report.
     #[serde(default)]
     pub reset_after: Option<Duration>,
+    /// Whether a stale replica's earlier window must not replace a running later one.
+    #[serde(default)]
+    pub stale_replica_quota: bool,
 }
 
 impl WindowInfo {
@@ -83,6 +86,7 @@ impl WindowInfo {
             excluded_models: Vec::new(),
             window_span: None,
             reset_after: None,
+            stale_replica_quota: false,
         }
     }
 
@@ -121,6 +125,13 @@ impl WindowInfo {
         self
     }
 
+    /// Sets whether stale replicas can report this window after its reset.
+    #[must_use]
+    pub fn with_stale_replica_quota(mut self, stale_replica_quota: bool) -> Self {
+        self.stale_replica_quota = stale_replica_quota;
+        self
+    }
+
     /// Converts a plugin count window to the shared model.
     #[must_use]
     pub fn from_plugin(window: &QuotaWindow) -> Self {
@@ -149,6 +160,7 @@ impl WindowInfo {
             amount,
             limit,
             unit,
+            pool: window.pool().to_owned(),
             runs_out_at: window.runs_out_at().map(quota_time),
             runs_out: window.runs_out().unwrap_or(0.0),
             unlimited: window.limit().is_none() && window.provider_limit().is_none(),
@@ -163,6 +175,7 @@ impl WindowInfo {
             excluded_models: window.excluded_models().to_vec(),
             window_span: window.window_span(),
             reset_after: None,
+            stale_replica_quota: false,
         }
     }
 
@@ -201,6 +214,7 @@ struct State {
     issues: BTreeMap<String, ReadIssue>,
     history: BTreeMap<String, BTreeMap<String, Vec<QuotaPoint>>>,
     balance_moves: BTreeMap<String, Vec<BalanceMove>>,
+    stale_replica_quota: BTreeSet<String>,
 }
 
 /// Explicit quota cache and history state for one daemon.
@@ -257,6 +271,18 @@ impl QuotaStore {
             root: Some(root),
             clock,
             state: Mutex::new(state),
+        }
+    }
+
+    /// Replaces the provider set whose saved cards and histories need stale-replica filtering.
+    pub fn set_stale_replica_quota_providers(&self, providers: &BTreeSet<String>) {
+        let mut state = self.state.lock().expect("quota store");
+        state.stale_replica_quota.clone_from(providers);
+        for record in &mut state.records {
+            let protected = providers.contains(&record.quota.provider);
+            for info in &mut record.windows {
+                info.stale_replica_quota = protected;
+            }
         }
     }
 
@@ -318,8 +344,6 @@ impl QuotaStore {
                 info.span.resets_at = Some(quota_time(reset));
             }
         }
-        quota.windows = windows.iter().map(|info| info.span.clone()).collect();
-        let persistent = !quota.windows.is_empty() || !quota.balance.is_empty();
         let mut state = self.state.lock().expect("quota store");
         let key = quota_key(&quota);
         let previous_balance = state
@@ -356,6 +380,9 @@ impl QuotaStore {
                 )
             },
         );
+        note_history(&mut state, &quota, &mut windows, read_at, now);
+        quota.windows = windows.iter().map(|info| info.span.clone()).collect();
+        let persistent = !quota.windows.is_empty() || !quota.balance.is_empty();
         let record = QuotaRecord {
             quota: quota.clone(),
             windows,
@@ -377,7 +404,6 @@ impl QuotaStore {
         if let Some(previous) = previous_balance.as_deref() {
             note_balance_move(&mut state, &quota, previous, &quota.balance, read_at);
         }
-        note_history(&mut state, &quota, read_at, now);
         if let Some(root) = &self.root {
             save_state(root, &state);
         }
@@ -500,6 +526,20 @@ impl QuotaStore {
             }
             let mut lines = Vec::new();
             for (name, points) in windows {
+                let protected = state.stale_replica_quota.contains(owner)
+                    || state.records.iter().any(|record| {
+                        record.quota.provider == owner
+                            && record.quota.user.eq_ignore_ascii_case(account)
+                            && record
+                                .windows
+                                .iter()
+                                .any(|info| info.stale_replica_quota && info.span.name == *name)
+                    });
+                let points = if protected {
+                    without_stale(points)
+                } else {
+                    points.clone()
+                };
                 let first = points.partition_point(|point| {
                     parse_quota_time(&point.at).is_some_and(|at| at < since)
                 });
@@ -1119,24 +1159,31 @@ fn report_of(state: &State) -> Vec<Quota> {
     out
 }
 
-fn note_history(state: &mut State, quota: &Quota, read_at: SystemTime, now: SystemTime) {
+fn note_history(
+    state: &mut State,
+    quota: &Quota,
+    windows: &mut [WindowInfo],
+    read_at: SystemTime,
+    now: SystemTime,
+) {
     if !quota.error.is_empty() || quota.as_of.is_some() || quota.provider.is_empty() {
         return;
     }
     let key = format!("{}|{}", quota.provider, quota.user.to_lowercase());
-    let record = state
-        .records
-        .iter()
-        .find(|record| quota_key(&record.quota) == quota_key(quota));
-    let Some(record) = record else {
-        return;
-    };
-    for info in &record.windows {
+    for index in 0..windows.len() {
+        let info = &windows[index];
+        let protected =
+            info.stale_replica_quota || state.stale_replica_quota.contains(&quota.provider);
         let window = &info.span;
-        if window.unlimited || !info.blocking || window.name.is_empty() || !window.used.is_finite()
+        if window.unlimited
+            || (!info.blocking && !protected)
+            || (protected && info.scope_model.is_some())
+            || window.name.is_empty()
+            || !window.used.is_finite()
         {
             continue;
         }
+        let name = window.name.clone();
         let reset = info.reset(read_at);
         let point = QuotaPoint {
             at: quota_time(read_at),
@@ -1147,15 +1194,91 @@ fn note_history(state: &mut State, quota: &Quota, read_at: SystemTime, now: Syst
             }),
             resets_at: reset.map(quota_time),
         };
+        let newest = if protected {
+            state
+                .history
+                .get(&key)
+                .and_then(|history| history.get(&name))
+                .map(|points| without_stale(points.as_slice()))
+                .and_then(|points| points.last().cloned())
+        } else {
+            None
+        };
+        if let Some(newest) = newest.filter(|newest| stale_after(newest, &point)) {
+            replace_stale_windows(windows, index, &newest);
+            continue;
+        }
         let points = state
             .history
             .entry(key.clone())
             .or_default()
-            .entry(window.name.clone())
+            .entry(name)
             .or_default();
         *points = add_point(std::mem::take(points), point);
     }
     prune_history(&mut state.history, now);
+}
+
+fn stale_after(newest: &QuotaPoint, point: &QuotaPoint) -> bool {
+    let (Some(newest_at), Some(point_at)) =
+        (parse_quota_time(&newest.at), parse_quota_time(&point.at))
+    else {
+        return false;
+    };
+    let (Some(newest_start), Some(point_start)) = (
+        newest.start.as_ref().and_then(parse_quota_time),
+        point.start.as_ref().and_then(parse_quota_time),
+    ) else {
+        return false;
+    };
+    let (Some(newest_reset), Some(point_reset)) = (
+        newest.resets_at.as_ref().and_then(parse_quota_time),
+        point.resets_at.as_ref().and_then(parse_quota_time),
+    ) else {
+        return false;
+    };
+    point_at >= newest_at
+        && point_start
+            < newest_start
+                .checked_sub(HISTORY_SLACK)
+                .unwrap_or(UNIX_EPOCH)
+        && newest_reset > point_at
+        && point_reset > point_at
+}
+
+fn without_stale(points: &[QuotaPoint]) -> Vec<QuotaPoint> {
+    let mut out: Vec<QuotaPoint> = Vec::with_capacity(points.len());
+    for point in points {
+        if out.last().is_some_and(|newest| stale_after(newest, point)) {
+            continue;
+        }
+        out.push(point.clone());
+    }
+    out
+}
+
+fn replace_stale_windows(windows: &mut [WindowInfo], index: usize, newest: &QuotaPoint) {
+    let stale = windows[index].clone();
+    for (other, info) in windows.iter_mut().enumerate() {
+        if other != index && !same_bucket(info, &stale) {
+            continue;
+        }
+        info.span.used = 100.0 - newest.left;
+        info.span.remaining = newest.left;
+        info.span.resets_at = newest.resets_at.clone();
+        info.reset_after = None;
+    }
+}
+
+fn same_bucket(info: &WindowInfo, pool: &WindowInfo) -> bool {
+    info.scope_model.is_some()
+        && pool.scope_model.is_none()
+        && !pool.span.pool.is_empty()
+        && info.span.pool == pool.span.pool
+        && info.span.used == pool.span.used
+        && window_span(info) == window_span(pool)
+        && info.span.resets_at.as_ref().and_then(parse_quota_time)
+            == pool.span.resets_at.as_ref().and_then(parse_quota_time)
 }
 
 fn add_point(mut points: Vec<QuotaPoint>, next: QuotaPoint) -> Vec<QuotaPoint> {
@@ -2060,6 +2183,175 @@ mod tests {
         let before = point(0, 20.0, Some(reset));
         assert!(new_cycle(&before, &point(100, 20.0, Some(reset))));
         assert!(!new_cycle(&before, &point(99, 20.0, Some(reset))));
+    }
+
+    fn d256_windows(used: f64, reset: SystemTime) -> Vec<WindowInfo> {
+        let week = Duration::from_secs(7 * 24 * 3600);
+        let mut pool = info("7 days", used, Some(reset))
+            .with_blocking(false)
+            .with_window_span(week)
+            .with_stale_replica_quota(true);
+        pool.span.pool = "pool-a".to_owned();
+        let mut model = info("model quota", used, Some(reset))
+            .with_scope_model("model-a")
+            .with_window_span(week)
+            .with_stale_replica_quota(true);
+        model.span.pool = "pool-a".to_owned();
+        vec![pool, model]
+    }
+
+    #[test]
+    fn d256_stale_replica_after_reset_keeps_the_running_window_on_cards_and_history() {
+        let store = QuotaStore::in_memory();
+        let base = at(1_900_000_000);
+        let week = Duration::from_secs(7 * 24 * 3600);
+        let old_reset = base + week;
+        for (offset, left, reset_offset) in [
+            (0, 7.32, 0),
+            (1_000, 100.0, 1_000),
+            (1_010, 100.0, 1_010),
+            (1_100, 5.05, 0),
+            (2_000, 100.0, 2_000),
+            (2_100, 5.05, 0),
+        ] {
+            store.record_success(
+                quota("p", "a"),
+                d256_windows(
+                    100.0 - left,
+                    base + week + Duration::from_secs(reset_offset),
+                ),
+                base + Duration::from_secs(offset),
+            );
+        }
+
+        let histories = store.histories(None, None, None, base + Duration::from_secs(2_200));
+        assert_eq!(histories.len(), 1);
+        assert_eq!(histories[0].lines.len(), 1);
+        let points = &histories[0].lines[0].points;
+        assert!(points[1..].iter().all(|point| {
+            point.resets_at.as_ref().and_then(parse_quota_time) != Some(old_reset)
+        }));
+        assert_eq!(points.last().map(|point| point.left), Some(100.0));
+
+        let report = store.report(&[]);
+        assert_eq!(report[0].windows.len(), 2);
+        for window in &report[0].windows {
+            assert_eq!(window.used, 0.0);
+            assert_eq!(window.remaining, 100.0);
+            assert_eq!(
+                window.resets_at.as_ref().and_then(parse_quota_time),
+                Some(base + week + Duration::from_secs(2_000))
+            );
+        }
+    }
+
+    #[test]
+    fn d256_stale_points_saved_before_the_fix_are_dropped_only_for_opted_in_windows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = at(1_900_000_000);
+        let week = Duration::from_secs(7 * 24 * 3600);
+        let old_start = base;
+        let old_reset = base + week;
+        let current_start = base + Duration::from_secs(1_000);
+        let current_reset = current_start + week;
+        {
+            let store = QuotaStore::new(dir.path());
+            store.record_success(
+                quota("p", "a"),
+                d256_windows(0.0, current_reset),
+                current_start,
+            );
+            store.record_success(
+                quota("q", "a"),
+                d256_windows(0.0, current_reset)
+                    .into_iter()
+                    .map(|info| info.with_stale_replica_quota(false))
+                    .collect(),
+                current_start,
+            );
+            let mut points = Vec::new();
+            for (offset, left, start, reset) in [
+                (900, 99.67, old_start, old_reset),
+                (950, 98.41, old_start, old_reset),
+                (1_010, 99.91, current_start, current_reset),
+                (1_100, 98.85, current_start, current_reset),
+                (1_200, 98.33, old_start, old_reset),
+                (1_300, 98.79, current_start, current_reset),
+                (1_400, 98.31, old_start, old_reset),
+                (1_500, 98.76, current_start, current_reset),
+            ] {
+                points.push(QuotaPoint {
+                    at: quota_time(base + Duration::from_secs(offset)),
+                    left,
+                    start: Some(quota_time(start)),
+                    resets_at: Some(quota_time(reset)),
+                });
+            }
+            let mut state = store.state.lock().expect("state");
+            for record in &mut state.records {
+                for info in &mut record.windows {
+                    info.stale_replica_quota = false;
+                }
+            }
+            for provider in ["p", "q"] {
+                state.history.insert(
+                    format!("{provider}|a"),
+                    BTreeMap::from([("7 days".to_owned(), points.clone())]),
+                );
+            }
+            save_state(dir.path(), &state);
+        }
+
+        let store = QuotaStore::new(dir.path());
+        store.set_stale_replica_quota_providers(&BTreeSet::from(["p".to_owned()]));
+        let histories = store.histories(None, None, None, base + Duration::from_secs(1_600));
+        let protected = &histories[0].lines[0].points;
+        let ordinary = &histories[1].lines[0].points;
+        assert_eq!(histories[0].provider, "p");
+        assert_eq!(protected.len(), 6);
+        assert!(protected[2..].iter().all(|point| {
+            point.start.as_ref().and_then(parse_quota_time) == Some(current_start)
+        }));
+        assert_eq!(ordinary.len(), 8);
+    }
+
+    #[test]
+    fn d256_stale_filter_preserves_unmarked_readings_and_rolling_window_startup() {
+        let store = QuotaStore::in_memory();
+        let base = at(1_900_000_000);
+        let week = Duration::from_secs(7 * 24 * 3600);
+        store.record_success(
+            quota("p", "a"),
+            d256_windows(0.0, base + week)
+                .into_iter()
+                .map(|info| info.with_stale_replica_quota(false))
+                .collect(),
+            base,
+        );
+        store.record_success(
+            quota("p", "a"),
+            d256_windows(95.0, base + Duration::from_secs(3 * 24 * 3600))
+                .into_iter()
+                .map(|info| info.with_stale_replica_quota(false))
+                .collect(),
+            base + Duration::from_secs(600),
+        );
+        assert_eq!(store.report(&[])[0].windows[0].used, 95.0);
+
+        for (offset, used, reset_offset) in [(0, 0.0, 0), (1_200, 0.0, 1_200), (2_400, 2.0, 1_800)]
+        {
+            store.record_success(
+                quota("q", "a"),
+                d256_windows(used, base + week + Duration::from_secs(reset_offset)),
+                base + Duration::from_secs(offset),
+            );
+        }
+        let report = store.report(&[]);
+        let rolling = report
+            .iter()
+            .find(|quota| quota.provider == "q")
+            .expect("q");
+        assert_eq!(rolling.windows[0].used, 2.0);
     }
 
     #[test]

@@ -36,7 +36,8 @@ static SPEC: SubscriptionSpec = SubscriptionSpec::from_static(
     PluginId::from_static("agy-cli"),
     "agy CLI",
     SignInFlowKind::Bridge,
-);
+)
+.with_stale_replica_quota(true);
 
 /// Writes an account home secret for matrix tests. The refresh stays in the secret.
 #[cfg(any(test, feature = "test-fixtures"))]
@@ -315,3 +316,13 @@ async fn load(host: &HostContext, account: &AccountId) -> Result<Loaded, PluginE
 
 #[cfg(test)]
 mod d222_tests;
+
+#[cfg(test)]
+mod d256_tests {
+    use super::SPEC;
+
+    #[test]
+    fn d256_stale_replica_quota_is_opted_in() {
+        assert!(SPEC.stale_replica_quota());
+    }
+}

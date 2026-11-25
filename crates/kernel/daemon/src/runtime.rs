@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -357,6 +357,15 @@ impl Runtime {
         self.ask.lock().expect("ask backend").clone()
     }
 
+    fn apply_quota_policy(&self, subscriptions: &Subscriptions) {
+        let providers: BTreeSet<String> = subscriptions
+            .values()
+            .filter(|state| state.stale_replica_quota())
+            .map(|state| state.config.id.clone())
+            .collect();
+        self.quotas.set_stale_replica_quota_providers(&providers);
+    }
+
     pub(crate) fn initial_snapshot(
         &self,
         config: &Config,
@@ -370,6 +379,7 @@ impl Runtime {
             None,
             self.current_ask(),
         )?;
+        self.apply_quota_policy(&subscriptions);
         let RouterParts {
             snapshot,
             table,
@@ -612,6 +622,7 @@ impl Runtime {
         };
         let mut published = self.plan.lock().expect("published plan");
         self.apply(&plan)?;
+        self.apply_quota_policy(&plan.subscriptions);
         let subscription_members = subscriptions::member_ids(&plan.subscriptions);
         *published = plan;
         drop(published);
