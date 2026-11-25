@@ -367,6 +367,11 @@ pub struct StartOptions {
     /// runs whenever local control is enabled and this is `false`.
     #[doc(hidden)]
     pub skip_config_watch: bool,
+    /// Replaces the operating-system watcher event stream, for deterministic tests.
+    #[cfg(feature = "test-util")]
+    #[doc(hidden)]
+    pub config_watch_events:
+        Option<tokio::sync::mpsc::UnboundedReceiver<notify::Result<notify::Event>>>,
     /// The `HOFUND_ADDR` value to use instead of the process environment, for
     /// tests. `None` reads the environment.
     #[doc(hidden)]
@@ -699,7 +704,16 @@ async fn start_inner(
             },
         ));
         if !options.skip_config_watch {
-            running = running.with_task(watch::spawn(Arc::clone(&ops), path.to_path_buf()));
+            #[cfg(feature = "test-util")]
+            let task = match options.config_watch_events.take() {
+                Some(events) => {
+                    watch::spawn_with_events(Arc::clone(&ops), path.to_path_buf(), events)
+                }
+                None => watch::spawn(Arc::clone(&ops), path.to_path_buf()),
+            };
+            #[cfg(not(feature = "test-util"))]
+            let task = watch::spawn(Arc::clone(&ops), path.to_path_buf());
+            running = running.with_task(task);
         }
         let status_serves = options
             .hofund_serves
