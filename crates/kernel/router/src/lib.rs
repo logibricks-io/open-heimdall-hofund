@@ -9,6 +9,7 @@
 //! The daemon adapts each member into a service and wraps that service in the
 //! kernel layers.
 
+pub mod account_pin;
 pub mod affinity;
 mod affinity_reply;
 mod api_fitness;
@@ -337,6 +338,8 @@ pub struct Router {
     member_skip: Option<MemberSkipFn>,
     spend_cap_exhausted: Option<SpendCapExhaustedFn>,
     group_walk_budget: Duration,
+    /// Accounts and keys a request may list or pin. Empty until the daemon publishes them.
+    accounts: Vec<account_pin::AccountFace>,
 }
 
 /// A counted input.
@@ -467,7 +470,21 @@ impl Router {
             member_skip: None,
             spend_cap_exhausted: None,
             group_walk_budget: GROUP_WALK_BUDGET,
+            accounts: Vec::new(),
         }
+    }
+
+    /// Accounts and keys published with this route table.
+    #[must_use]
+    pub fn with_accounts(mut self, accounts: Vec<account_pin::AccountFace>) -> Self {
+        self.accounts = accounts;
+        self
+    }
+
+    /// Accounts and keys a caller can list or pin. The values hold no secrets.
+    #[must_use]
+    pub fn accounts(&self) -> &[account_pin::AccountFace] {
+        &self.accounts
     }
 
     /// Overrides the serial walk budget used when a route has several members.
@@ -546,6 +563,56 @@ impl Router {
     pub fn with_spend_cap_exhausted(mut self, exhausted: SpendCapExhaustedFn) -> Self {
         self.spend_cap_exhausted = Some(exhausted);
         self
+    }
+
+    fn pinned_hops(
+        &self,
+        raw: &str,
+        asked: &str,
+        resolved: &Resolved,
+        hops: &[Hop],
+        scope: Option<&RouteScope>,
+    ) -> Result<Vec<Hop>, RouterError> {
+        let planned = hops
+            .iter()
+            .filter_map(|hop| {
+                let provider = hop.member.scope_provider();
+                let wire = hop.wire_model.as_deref().unwrap_or(&resolved.bare);
+                let key_id = hop.member.provider_key_id();
+                let skipped = self
+                    .member_skip
+                    .as_ref()
+                    .is_some_and(|skip| skip(&resolved.route, asked, provider, wire, key_id));
+                let capped = skipped
+                    && self.spend_cap_exhausted.as_ref().is_some_and(|exhausted| {
+                        exhausted(&[SpendCapCandidate {
+                            provider: provider.to_owned(),
+                            key_id: key_id.to_owned(),
+                        }])
+                        .is_some()
+                    });
+                if skipped && !capped {
+                    return None;
+                }
+                let resting = self.cooldowns.as_ref().and_then(|cooldowns| {
+                    cooldowns
+                        .cooling_for_model(hop.member.id(), wire)
+                        .map(|state| state.cause().as_str().to_owned())
+                });
+                Some(account_pin::PinHop {
+                    hop,
+                    allowed: scope.is_none_or(|scope| scope.allows_member(hop.member.as_ref())),
+                    capped,
+                    resting,
+                })
+            })
+            .collect::<Vec<_>>();
+        match account_pin::select(raw, asked, &planned, &self.accounts) {
+            account_pin::PinChoice::Ask(hops) => Ok(hops),
+            account_pin::PinChoice::Refuse { status, message } => {
+                Err(RouterError::Pinned { status, message })
+            }
+        }
     }
 
     fn without_skipped_hops(&self, asked: &str, resolved: &Resolved) -> Vec<Hop> {
@@ -785,8 +852,17 @@ impl Router {
         inbound_protocol: &str,
         hook: Option<Arc<dyn AttemptHook>>,
     ) -> Result<Routed, RouterError> {
-        self.dispatch_inner(request, inbound_protocol, None, None, hook, None, None)
-            .await
+        self.dispatch_inner(
+            request,
+            inbound_protocol,
+            None,
+            None,
+            hook,
+            None,
+            None,
+            None,
+        )
+        .await
     }
 
     /// Dispatches with conversation identity and optional attempt callbacks.
@@ -809,6 +885,7 @@ impl Router {
             hook,
             None,
             None,
+            None,
         )
         .await
     }
@@ -826,8 +903,17 @@ impl Router {
         scope: Option<&RouteScope>,
         hook: Option<Arc<dyn AttemptHook>>,
     ) -> Result<Routed, RouterError> {
-        self.dispatch_inner(request, inbound_protocol, scope, None, hook, None, None)
-            .await
+        self.dispatch_inner(
+            request,
+            inbound_protocol,
+            scope,
+            None,
+            hook,
+            None,
+            None,
+            None,
+        )
+        .await
     }
 
     /// Dispatches with attempt callbacks and a notification before patience waits.
@@ -842,8 +928,17 @@ impl Router {
         hook: Option<Arc<dyn AttemptHook>>,
         wait: Option<Arc<dyn WaitHook>>,
     ) -> Result<Routed, RouterError> {
-        self.dispatch_inner(request, inbound_protocol, None, None, hook, wait, None)
-            .await
+        self.dispatch_inner(
+            request,
+            inbound_protocol,
+            None,
+            None,
+            hook,
+            wait,
+            None,
+            None,
+        )
+        .await
     }
 
     /// Dispatches with per-caller scope filtering, attempt callbacks, and a
@@ -860,8 +955,17 @@ impl Router {
         hook: Option<Arc<dyn AttemptHook>>,
         wait: Option<Arc<dyn WaitHook>>,
     ) -> Result<Routed, RouterError> {
-        self.dispatch_inner(request, inbound_protocol, scope, None, hook, wait, None)
-            .await
+        self.dispatch_inner(
+            request,
+            inbound_protocol,
+            scope,
+            None,
+            hook,
+            wait,
+            None,
+            None,
+        )
+        .await
     }
 
     /// Dispatches with per-caller scope filtering, conversation identity,
@@ -887,6 +991,7 @@ impl Router {
             hook,
             wait,
             None,
+            None,
         )
         .await
     }
@@ -904,6 +1009,68 @@ impl Router {
         wait: Option<Arc<dyn WaitHook>>,
         trace: RouteTraceHandle,
     ) -> Result<Routed, RouterError> {
+        self.dispatch_scoped_conversation_with_wait_traced_for_account(
+            request,
+            inbound_protocol,
+            scope,
+            conversation,
+            hook,
+            wait,
+            trace,
+            None,
+        )
+        .await
+    }
+
+    /// Like [`Self::dispatch_scoped_conversation_with_wait`], pinning `account`
+    /// when it is set. A pin is not routed onward and is not failed over.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RouterError::Pinned`] when the named account cannot be asked,
+    /// and the same errors as [`Self::dispatch_scoped`] otherwise.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn dispatch_scoped_conversation_with_wait_for_account(
+        &self,
+        request: &Request,
+        inbound_protocol: &str,
+        scope: Option<&RouteScope>,
+        conversation: Option<&affinity::Conversation>,
+        hook: Option<Arc<dyn AttemptHook>>,
+        wait: Option<Arc<dyn WaitHook>>,
+        account: Option<&str>,
+    ) -> Result<Routed, RouterError> {
+        self.dispatch_inner(
+            request,
+            inbound_protocol,
+            scope,
+            conversation,
+            hook,
+            wait,
+            None,
+            account,
+        )
+        .await
+    }
+
+    /// Like [`Self::dispatch_scoped_conversation_with_wait_for_account`], and
+    /// records the routing decision in `trace`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::dispatch_scoped_conversation_with_wait_for_account`].
+    #[allow(clippy::too_many_arguments)]
+    pub async fn dispatch_scoped_conversation_with_wait_traced_for_account(
+        &self,
+        request: &Request,
+        inbound_protocol: &str,
+        scope: Option<&RouteScope>,
+        conversation: Option<&affinity::Conversation>,
+        hook: Option<Arc<dyn AttemptHook>>,
+        wait: Option<Arc<dyn WaitHook>>,
+        trace: RouteTraceHandle,
+        account: Option<&str>,
+    ) -> Result<Routed, RouterError> {
         self.dispatch_inner(
             request,
             inbound_protocol,
@@ -912,6 +1079,33 @@ impl Router {
             hook,
             wait,
             Some(trace),
+            account,
+        )
+        .await
+    }
+
+    /// Dispatches with per-caller scope and an optional account pin.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RouterError::Pinned`] when the pin cannot be asked, and the
+    /// same errors as [`Self::dispatch_scoped`] otherwise.
+    pub async fn dispatch_scoped_for_account(
+        &self,
+        request: &Request,
+        inbound_protocol: &str,
+        scope: Option<&RouteScope>,
+        account: Option<&str>,
+    ) -> Result<Routed, RouterError> {
+        self.dispatch_inner(
+            request,
+            inbound_protocol,
+            scope,
+            None,
+            None,
+            None,
+            None,
+            account,
         )
         .await
     }
@@ -926,25 +1120,33 @@ impl Router {
         hook: Option<Arc<dyn AttemptHook>>,
         wait_hook: Option<Arc<dyn WaitHook>>,
         mut trace: Option<RouteTraceHandle>,
+        account: Option<&str>,
     ) -> Result<Routed, RouterError> {
         let asked = request.model.clone();
         let mut resolved = self.resolve(&asked)?;
-        resolved.hops = scoped_hops(&asked, &resolved, scope)?;
-        let before_skip = resolved.hops.clone();
-        resolved.hops = self.without_skipped_hops(&asked, &resolved);
-        if resolved.hops.is_empty()
-            && !before_skip.is_empty()
-            && let Some(exhausted) = &self.spend_cap_exhausted
-        {
-            let candidates: Vec<SpendCapCandidate> = before_skip
-                .iter()
-                .map(|hop| SpendCapCandidate {
-                    provider: hop.member.scope_provider().to_owned(),
-                    key_id: hop.member.provider_key_id().to_owned(),
-                })
-                .collect();
-            if let Some(retry_after) = exhausted(&candidates) {
-                return Err(RouterError::SpendCapReached { retry_after });
+        let model_hops = model_scoped_hops(&asked, &resolved, scope)?;
+        let account = account.map(str::trim).filter(|value| !value.is_empty());
+        let pinned = account.is_some();
+        if let Some(raw) = account {
+            resolved.hops = self.pinned_hops(raw, &asked, &resolved, &model_hops, scope)?;
+        } else {
+            resolved.hops = account_scoped_hops(&asked, model_hops, scope)?;
+            let before_skip = resolved.hops.clone();
+            resolved.hops = self.without_skipped_hops(&asked, &resolved);
+            if resolved.hops.is_empty()
+                && !before_skip.is_empty()
+                && let Some(exhausted) = &self.spend_cap_exhausted
+            {
+                let candidates: Vec<SpendCapCandidate> = before_skip
+                    .iter()
+                    .map(|hop| SpendCapCandidate {
+                        provider: hop.member.scope_provider().to_owned(),
+                        key_id: hop.member.provider_key_id().to_owned(),
+                    })
+                    .collect();
+                if let Some(retry_after) = exhausted(&candidates) {
+                    return Err(RouterError::SpendCapReached { retry_after });
+                }
             }
         }
         self.refresh_free(&mut resolved).await;
@@ -1072,6 +1274,7 @@ impl Router {
                 .map_or_else(Instant::now, |hook| hook.now()),
             group_walk_budget: self.group_walk_budget,
             tier_sent: String::new(),
+            pinned,
         }
         .run(0)
         .await;
@@ -1992,6 +2195,15 @@ fn scoped_hops(
     resolved: &Resolved,
     scope: Option<&RouteScope>,
 ) -> Result<Vec<Hop>, RouterError> {
+    let hops = model_scoped_hops(asked, resolved, scope)?;
+    account_scoped_hops(asked, hops, scope)
+}
+
+fn model_scoped_hops(
+    asked: &str,
+    resolved: &Resolved,
+    scope: Option<&RouteScope>,
+) -> Result<Vec<Hop>, RouterError> {
     let Some(scope) = scope else {
         return Ok(resolved.hops.clone());
     };
@@ -2007,7 +2219,18 @@ fn scoped_hops(
             patterns: scope.models.clone(),
         });
     }
-    let account_hops: Vec<Hop> = model_hops
+    Ok(model_hops)
+}
+
+fn account_scoped_hops(
+    asked: &str,
+    hops: Vec<Hop>,
+    scope: Option<&RouteScope>,
+) -> Result<Vec<Hop>, RouterError> {
+    let Some(scope) = scope else {
+        return Ok(hops);
+    };
+    let account_hops: Vec<Hop> = hops
         .into_iter()
         .filter(|hop| scope.allows_member(hop.member.as_ref()))
         .collect();
@@ -2064,6 +2287,8 @@ struct DispatchState {
     tier_sent: String,
     /// Drop placeholder `auto` and `default` served words for this hop's host.
     clear_placeholder_served: bool,
+    /// The request named one account. Its failure is the reply.
+    pinned: bool,
 }
 
 /// One member's answer within a dispatch round.
@@ -2854,6 +3079,18 @@ impl DispatchState {
                     }));
                 }
                 Err(error) => {
+                    if self.pinned {
+                        let upstream_id = hop.member.route_id().to_owned();
+                        self.note_try(
+                            index,
+                            &hop,
+                            &upstream_model,
+                            true,
+                            try_status(&error),
+                            fail_text(&error),
+                        );
+                        return Err(RouterError::Upstream { upstream_id, error });
+                    }
                     let upstream_id = hop.member.route_id().to_owned();
                     let record_overflow = decision::context_overflow_memory(&error);
                     let inferred = decision::too_long_unsaid(
@@ -3431,6 +3668,14 @@ pub enum RouterError {
     SpendCapReached {
         /// Seconds until the next period reset, when known.
         retry_after: Option<u64>,
+    },
+    /// The request named an account that is not asked, and no other account is tried.
+    #[error("{message}")]
+    Pinned {
+        /// HTTP status for the caller.
+        status: u16,
+        /// Refusal text. It names no secret.
+        message: String,
     },
 }
 

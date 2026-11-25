@@ -46,14 +46,14 @@ and hofund paths to the hofund repository. `ref.md:N` means magpie's
 | Status | Rows |
 | --- | --- |
 | Done | 46 |
-| Partial | 51 |
+| Partial | 52 |
 | Missing | 64 |
-| Total counted | 161 |
+| Total counted | 162 |
 | Not planned (not counted) | 1 |
 
 | Stage | Counted rows |
 | --- | --- |
-| core | 83 |
+| core | 84 |
 | auxiliary | 78 |
 
 
@@ -267,6 +267,7 @@ Subscription-by-subscription status is in [docs/coverage/subscriptions.md](cover
 | 4.14 | Concurrency and RPM limits | `internal/gateway/concurrency.go`, `rpm.go` | auxiliary | Missing | none | A token bucket per member and per key, built on `tower` layers. |
 | 4.15 | Decision models at `/v1/systemone` | `internal/gateway/decide.go`; `ref.md:1494` | auxiliary | Missing | none | Low priority. |
 | 4.16 | List only the group's models to clients (`listed=no`) | `ref.md:1486` | auxiliary | Missing | none | A `listed` flag per route. |
+| 4.17 | Account list and per-request account pin | `internal/gateway/accounts_list.go` | core | Partial | `crates/kernel/router/src/account_pin.rs`; `crates/kernel/gateway/src/accounts.rs` (`GET /v1/hofund/accounts`); `crates/kernel/daemon/src/account_catalog.rs`. Tests: `d243_account_pin.rs`, `d243_accounts.rs`, `d243_faces_list_keys_without_the_secret`. Verified with mocks only. | The list and `X-Hofund-Account` pin are in. A routing-group member syntax is not. Live accounts were not tried. |
 
 ### 5. Agent wiring
 

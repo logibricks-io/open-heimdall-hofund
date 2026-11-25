@@ -5,6 +5,7 @@
 //! names do not belong in this crate. Generative Language paths are matched
 //! in `endpoints`.
 
+mod accounts;
 mod advisor;
 mod allow;
 mod bridge_effort;
@@ -1199,7 +1200,9 @@ fn request_router(app: &Arc<Inner>) -> axum::Router {
 }
 
 fn request_routes(app: &Arc<Inner>) -> readonly::RouteSet {
-    let mut routes = oidc_keys::routes(issue_keys::routes(me::routes(codec_routes(app))));
+    let mut routes = accounts::routes(oidc_keys::routes(issue_keys::routes(me::routes(
+        codec_routes(app),
+    ))));
     if app.quota_source.is_some() {
         routes = quotas::routes(routes);
     }
@@ -1435,6 +1438,9 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
                     }
                     RouterError::SpendCapReached { retry_after } => {
                         (String::new(), spend_cap_plugin_error(retry_after))
+                    }
+                    RouterError::Pinned { status, message } => {
+                        (String::new(), PluginError::status_error(status, message))
                     }
                     RouterError::Upstream { upstream_id, error }
                         if error.kind() == PluginErrorKind::Unsupported =>
@@ -2265,6 +2271,12 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
         trace.set_subagent(note);
     }
     drop(unrouted_hold.take());
+    let pinned = headers
+        .get(hofund_router::account_pin::ACCOUNT_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
     let (wait, notice) = GatewayWait::channel();
     let mut dispatch: DispatchFuture = Box::pin({
         let request = dispatch_request.clone();
@@ -2273,7 +2285,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
         async move {
             if let Some(trace) = trace {
                 router
-                    .dispatch_scoped_conversation_with_wait_traced(
+                    .dispatch_scoped_conversation_with_wait_traced_for_account(
                         &request,
                         &protocol,
                         Some(&scope),
@@ -2281,17 +2293,19 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
                         attempt,
                         Some(wait),
                         trace,
+                        pinned.as_deref(),
                     )
                     .await
             } else {
                 router
-                    .dispatch_scoped_conversation_with_wait(
+                    .dispatch_scoped_conversation_with_wait_for_account(
                         &request,
                         &protocol,
                         Some(&scope),
                         Some(&conversation),
                         attempt,
                         Some(wait),
+                        pinned.as_deref(),
                     )
                     .await
             }
@@ -2553,6 +2567,10 @@ fn stream_error(error: &RouterError) -> (StatusCode, String) {
             StatusCode::TOO_MANY_REQUESTS,
             "spend cap reached".to_owned(),
         ),
+        RouterError::Pinned { status, message } => (
+            StatusCode::from_u16(*status).unwrap_or(StatusCode::BAD_REQUEST),
+            message.clone(),
+        ),
         RouterError::Upstream { error, .. } => {
             let status = status_of(error);
             let message = if error.kind() == PluginErrorKind::Timeout {
@@ -2656,6 +2674,11 @@ async fn count_tokens(
                 RouterError::SpendCapReached { retry_after } => {
                     return spend_cap_response(codec.as_ref(), *retry_after);
                 }
+                RouterError::Pinned { status, message } => (
+                    StatusCode::from_u16(*status).unwrap_or(StatusCode::BAD_REQUEST),
+                    message.clone(),
+                    None,
+                ),
                 RouterError::Upstream { error, .. } => (
                     status_of(error),
                     error.message().to_owned(),
@@ -3358,6 +3381,12 @@ fn failure(
         RouterError::SpendCapReached { retry_after } => {
             return with_named_session(spend_cap_response(codec, *retry_after), &ledger.session_id);
         }
+        RouterError::Pinned { status, message } => (
+            StatusCode::from_u16(*status).unwrap_or(StatusCode::BAD_REQUEST),
+            String::new(),
+            message.clone(),
+            None,
+        ),
         RouterError::Upstream { upstream_id, error } => (
             status_of(error),
             upstream_id.clone(),

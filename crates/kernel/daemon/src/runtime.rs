@@ -687,6 +687,10 @@ impl Runtime {
         let (built, routes) =
             subscriptions::expand(&plan.built, &plan.routes, &plan.subscriptions)?;
         let table = self.table.get().expect("initial snapshot").clone();
+        if let Some(config) = self.config.get() {
+            let config = config.borrow();
+            table.set_accounts(crate::account_catalog::faces(&config, &plan.subscriptions));
+        }
         table.replace(&built, routes, plan.policy.clone())
     }
 

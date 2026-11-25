@@ -32,6 +32,7 @@ use hofund_router::{Cooldowns, FailoverPolicy, Snapshot, Unit};
 use hofund_secrets::{KeyStore, TokenFile};
 use hofund_usage::Ledger;
 
+mod account_catalog;
 mod account_discovery;
 mod adapt;
 mod agent_login;
@@ -1054,6 +1055,8 @@ fn router(
         Some(shared.2),
         Some(shared.3),
     )?;
+    table.set_accounts(account_catalog::faces(config, subscriptions));
+    table.publish();
     Ok(RouterParts {
         snapshot,
         table,
