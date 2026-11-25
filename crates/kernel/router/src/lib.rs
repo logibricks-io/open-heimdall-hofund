@@ -11,6 +11,7 @@
 
 pub mod affinity;
 mod affinity_reply;
+mod api_fitness;
 pub mod at_once;
 mod attempt;
 mod cooldown;
@@ -43,6 +44,7 @@ use hofund_ir::{StreamEvent, estimate_input_tokens};
 use hofund_plugin_api::{BodyStream, CountOutcome, Forward, PluginErrorKind, RawAnswer};
 use tracing::Instrument;
 
+pub use api_fitness::ApiFitness;
 pub use attempt::{Attempt, AttemptError, AttemptHook, MemberAttempt};
 use cooldown::HandOnRest;
 pub use cooldown::{CooldownCause, CooldownPolicy, Cooldowns, Cooling, PersistedRest};
@@ -330,6 +332,7 @@ pub struct Router {
     affinity: affinity::AffinityState,
     sealed: affinity::sealed::SealedState,
     overflow: OverflowMemory,
+    api_fitness: ApiFitness,
     measurements: Option<Arc<dyn strategy::Measurements>>,
     member_skip: Option<MemberSkipFn>,
     spend_cap_exhausted: Option<SpendCapExhaustedFn>,
@@ -384,6 +387,8 @@ impl Resolved {
 
 struct Ordered {
     hops: Vec<Hop>,
+    /// Other APIs of a member, asked only after that member's API is refused.
+    protocol_alternates: Vec<Hop>,
     hand_on: Vec<Hop>,
     reserves: BTreeMap<String, usize>,
     affinity: Option<ReplyRoute>,
@@ -456,6 +461,7 @@ impl Router {
             affinity: affinity::AffinityState::in_memory(),
             sealed: affinity::sealed::SealedState::default(),
             overflow: OverflowMemory::in_memory(),
+            api_fitness: ApiFitness::default(),
             measurements: None,
             member_skip: None,
             spend_cap_exhausted: None,
@@ -496,6 +502,13 @@ impl Router {
     #[must_use]
     pub fn with_overflow_memory(mut self, overflow: OverflowMemory) -> Self {
         self.overflow = overflow;
+        self
+    }
+
+    /// Shares API-wide provider refusal memory with later snapshots.
+    #[must_use]
+    pub fn with_api_fitness(mut self, fitness: ApiFitness) -> Self {
+        self.api_fitness = fitness;
         self
     }
 
@@ -970,7 +983,8 @@ impl Router {
         } else {
             (resolved.hops, hand_on, Vec::new())
         };
-        resolved.hops = fitting;
+        let protocol_alternates = ordered.protocol_alternates;
+        resolved.hops = splice_protocol_alternates(fitting, &protocol_alternates);
         resolved.spent = self.spent(&resolved);
         if let Some(trace) = trace.as_mut() {
             trace.set_routing(&resolved.routing);
@@ -1025,6 +1039,7 @@ impl Router {
             } else {
                 Vec::new()
             },
+            protocol_alternates,
             resolved,
             policy: self.policy.clone(),
             input_tokens,
@@ -1042,6 +1057,7 @@ impl Router {
             affinity: ordered.affinity,
             affinity_state: self.affinity.clone(),
             overflow_memory: self.overflow.clone(),
+            api_fitness: self.api_fitness.clone(),
             cooldowns: self.cooldowns.clone(),
             trace,
             strategies: Arc::clone(&self.strategies),
@@ -1146,10 +1162,18 @@ impl Router {
             let stuck = resolved
                 .hops
                 .iter()
-                .filter(|hop| hop.member.id().to_string() == member)
+                .filter(|hop| {
+                    hop.member.id().to_string() == member
+                        || hop.member.stands_in_for() == Some(member.as_str())
+                })
                 .cloned()
                 .collect::<Vec<_>>();
-            if stuck.is_empty() {
+            if stuck.is_empty()
+                || stuck.iter().all(|hop| {
+                    self.api_fitness
+                        .is_refused(hop.member.route_id(), hop.member.protocol())
+                })
+            {
                 return Ok(InputCount {
                     tokens: estimate_input_tokens(request),
                     estimated: true,
@@ -1163,16 +1187,29 @@ impl Router {
         let mut unsupported = false;
         let mut skipped_hold = false;
         for index in 0..resolved.hops.len() {
+            let hop = &resolved.hops[index];
+            if self
+                .api_fitness
+                .is_refused(hop.member.route_id(), hop.member.protocol())
+                || protocol_alternate_idle(&resolved.hops, &self.api_fitness, hop)
+            {
+                continue;
+            }
             if self.vendor_timed_quota_at(&resolved, index) {
-                let later_open = (index + 1..resolved.hops.len())
-                    .any(|later| !self.vendor_timed_quota_at(&resolved, later));
+                let later_open = (index + 1..resolved.hops.len()).any(|later| {
+                    let hop = &resolved.hops[later];
+                    !self.vendor_timed_quota_at(&resolved, later)
+                        && !self
+                            .api_fitness
+                            .is_refused(hop.member.route_id(), hop.member.protocol())
+                        && !protocol_alternate_idle(&resolved.hops, &self.api_fitness, hop)
+                });
                 if later_open {
                     continue;
                 }
                 skipped_hold = true;
                 break;
             }
-            let hop = &resolved.hops[index];
             let mut attempt = request.clone();
             apply_wire(&mut attempt, hop, &resolved.bare, &self.served_models());
             let span = member_span(hop, index, inbound_protocol);
@@ -1195,14 +1232,16 @@ impl Router {
                 // wildcard is required because [`CountOutcome`] is
                 // `#[non_exhaustive]`.
                 Ok(_) => unsupported = true,
-                Err(error) if policy.allows(&error) => {
-                    last = Some((hop.member.route_id().to_owned(), error));
-                }
                 Err(error) => {
-                    return Err(RouterError::Upstream {
-                        upstream_id: hop.member.route_id().to_owned(),
-                        error,
-                    });
+                    let api_refused = self.note_api_refusal(hop, &error);
+                    if api_refused || policy.allows(&error) {
+                        last = Some((hop.member.route_id().to_owned(), error));
+                    } else {
+                        return Err(RouterError::Upstream {
+                            upstream_id: hop.member.route_id().to_owned(),
+                            error,
+                        });
+                    }
                 }
             }
         }
@@ -1253,6 +1292,13 @@ impl Router {
         resolved.hops = self.order_hops(&resolved);
         let mut last = None;
         for (index, hop) in resolved.hops.iter().enumerate() {
+            if self
+                .api_fitness
+                .is_refused(hop.member.route_id(), hop.member.protocol())
+                || protocol_alternate_idle(&resolved.hops, &self.api_fitness, hop)
+            {
+                continue;
+            }
             let upstream_model = hop
                 .wire_model
                 .clone()
@@ -1282,10 +1328,14 @@ impl Router {
                         answer,
                     });
                 }
-                Err(error) if not_served(&error) || self.policy.allows(&error) => {
-                    last = Some((upstream_id, error));
+                Err(error) => {
+                    let api_refused = self.note_api_refusal(hop, &error);
+                    if api_refused || not_served(&error) || self.policy.allows(&error) {
+                        last = Some((upstream_id, error));
+                    } else {
+                        return Err(RouterError::Upstream { upstream_id, error });
+                    }
                 }
-                Err(error) => return Err(RouterError::Upstream { upstream_id, error }),
             }
         }
         match last {
@@ -1331,7 +1381,20 @@ impl Router {
     }
 
     fn order_hops(&self, resolved: &Resolved) -> Vec<Hop> {
-        self.order_for(resolved, None).hops
+        let ordered = self.order_for(resolved, None);
+        splice_protocol_alternates(ordered.hops, &ordered.protocol_alternates)
+    }
+
+    fn note_api_refusal(&self, hop: &Hop, error: &PluginError) -> bool {
+        let Some(status) = error
+            .status()
+            .filter(|status| hofund_ir::api_refused(*status, error.message()))
+        else {
+            return false;
+        };
+        self.api_fitness
+            .refuse(hop.member.route_id(), hop.member.protocol(), status);
+        true
     }
 
     fn order_for(
@@ -1340,7 +1403,8 @@ impl Router {
         conversation: Option<&affinity::Conversation>,
     ) -> Ordered {
         let mut moves = PoolMoves::default();
-        let ordered = self.order_level(resolved, 0, resolved.hops.clone(), &mut moves);
+        let (routing_hops, protocol_alternates) = split_protocol_alternates(resolved.hops.clone());
+        let ordered = self.order_level(resolved, 0, routing_hops, &mut moves);
         let (ordered, left) = if let Some(cooldowns) = &self.cooldowns {
             order_hops(ordered, cooldowns, &resolved.bare)
         } else {
@@ -1379,7 +1443,11 @@ impl Router {
         };
         let mut places = BTreeMap::new();
         if resolved.pool_asked {
-            for hop in &resolved.hops {
+            for hop in resolved
+                .hops
+                .iter()
+                .filter(|hop| hop.member.stands_in_for().is_none())
+            {
                 let next = places.len() + 1;
                 places.entry(group_member(hop)).or_insert(next);
             }
@@ -1492,6 +1560,7 @@ impl Router {
         self.reorder_last_on_credits(&mut hops, resolved);
         Ordered {
             hops,
+            protocol_alternates,
             hand_on,
             reserves,
             affinity: conversation
@@ -1952,6 +2021,7 @@ struct DispatchState {
     hook: Option<Arc<dyn AttemptHook>>,
     rest_left: bool,
     hand_on: Vec<Hop>,
+    protocol_alternates: Vec<Hop>,
     resolved: Resolved,
     policy: FailoverPolicy,
     input_tokens: u64,
@@ -1977,6 +2047,7 @@ struct DispatchState {
     affinity: Option<ReplyRoute>,
     affinity_state: affinity::AffinityState,
     overflow_memory: OverflowMemory,
+    api_fitness: ApiFitness,
     cooldowns: Option<Arc<Cooldowns>>,
     trace: Option<RouteTraceHandle>,
     strategies: Arc<strategy::StrategyState>,
@@ -2158,6 +2229,61 @@ fn split_over_window(
     (fitting, left_fitting, over_window)
 }
 
+/// Separates ordinary route members from APIs that stand in after a refusal.
+fn split_protocol_alternates(hops: Vec<Hop>) -> (Vec<Hop>, Vec<Hop>) {
+    let mut routing = Vec::with_capacity(hops.len());
+    let mut alternates = Vec::new();
+    for hop in hops {
+        if hop.member.stands_in_for().is_some() {
+            alternates.push(hop);
+        } else {
+            routing.push(hop);
+        }
+    }
+    (routing, alternates)
+}
+
+/// Route member an answer should be charged to. A protocol alternate charges
+/// the primary it stands in for.
+fn routing_member_label(hop: &Hop) -> String {
+    hop.member
+        .stands_in_for()
+        .map(str::to_owned)
+        .unwrap_or_else(|| hop.member.id().to_string())
+}
+
+/// Places each alternate immediately after the member it stands in for.
+fn splice_protocol_alternates(hops: Vec<Hop>, alternates: &[Hop]) -> Vec<Hop> {
+    if alternates.is_empty() {
+        return hops;
+    }
+    let mut out = Vec::with_capacity(hops.len() + alternates.len());
+    for hop in hops {
+        let id = hop.member.id().to_string();
+        out.push(hop);
+        for alternate in alternates {
+            if alternate.member.stands_in_for() == Some(id.as_str()) {
+                out.push(alternate.clone());
+            }
+        }
+    }
+    out
+}
+
+fn protocol_alternate_idle(hops: &[Hop], fitness: &ApiFitness, hop: &Hop) -> bool {
+    let Some(primary) = hop.member.stands_in_for() else {
+        return false;
+    };
+    let Some(protocol) = hops
+        .iter()
+        .find(|candidate| candidate.member.id().to_string() == primary)
+        .map(|candidate| candidate.member.protocol())
+    else {
+        return true;
+    };
+    !fitness.is_refused(hop.member.route_id(), protocol)
+}
+
 /// Quota or credit, and not a refusal, a passing retry, or an overflow.
 fn allowance_failure(error: &PluginError) -> bool {
     if decision::outgrown(error)
@@ -2198,7 +2324,10 @@ impl DispatchState {
         for hop in self.resolved.hops.iter().skip(index + 1) {
             let upstream_model = hop.wire_model.as_deref().unwrap_or(&self.resolved.bare);
             let plugin_id = hop.member.plugin_id();
-            if self.refused_providers.contains(hop.member.route_id()) {
+            if self.refused_providers.contains(hop.member.route_id())
+                || self.api_refused_for(hop)
+                || self.protocol_alternate_idle(hop)
+            {
                 continue;
             }
             if !plugin_id.is_empty() && self.skipped_plugins.contains(plugin_id) {
@@ -2225,6 +2354,16 @@ impl DispatchState {
         false
     }
 
+    fn api_refused_for(&self, hop: &Hop) -> bool {
+        self.api_fitness
+            .is_refused(hop.member.route_id(), hop.member.protocol())
+    }
+
+    /// Whether `hop` is another API of a member that has not refused its own.
+    fn protocol_alternate_idle(&self, hop: &Hop) -> bool {
+        protocol_alternate_idle(&self.resolved.hops, &self.api_fitness, hop)
+    }
+
     fn region_closed_for(&self, hop: &Hop) -> bool {
         let model = hop.wire_model.as_deref().unwrap_or(&self.resolved.bare);
         let key = region_key(hop.member.scope_provider(), model);
@@ -2244,7 +2383,13 @@ impl DispatchState {
     }
 
     fn group_budget_exhausted(&self) -> Option<PluginError> {
-        if self.resolved.hops.len() <= 1 {
+        let routing_hops = self
+            .resolved
+            .hops
+            .iter()
+            .filter(|hop| hop.member.stands_in_for().is_none())
+            .count();
+        if routing_hops <= 1 {
             return None;
         }
         let elapsed = self.now().duration_since(self.walk_started);
@@ -2263,7 +2408,22 @@ impl DispatchState {
         )
     }
 
-    fn take_hand_on(&mut self) -> Option<usize> {
+    fn push_primary_with_alternates(&mut self, primary: Hop) -> Vec<usize> {
+        let primary_id = primary.member.id().to_string();
+        let alternates = self
+            .protocol_alternates
+            .iter()
+            .filter(|hop| hop.member.stands_in_for() == Some(primary_id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let start = self.resolved.hops.len();
+        self.resolved.hops.push(primary);
+        self.resolved.hops.extend(alternates);
+        self.resolved.spent.resize(self.resolved.hops.len(), false);
+        (start..self.resolved.hops.len()).collect()
+    }
+
+    fn take_hand_on(&mut self) -> Option<Vec<usize>> {
         let error = &self.last.as_ref()?.1;
         let allows = self.policy.allows(error) || decision::asks_next(error);
         let failure = hand_on_failure(error, allows, self.now())?;
@@ -2272,16 +2432,13 @@ impl DispatchState {
         let tokens = self.input_tokens;
         let apply_window = self.resolved.routing == "fit";
         let position = self.hand_on.iter().position(|hop| {
-            !self.member_skipped(hop)
+            self.askable_left_out(hop)
                 && hand_on_candidate(&cooldowns, hop, &bare, failure, tokens, apply_window, true)
                 && cooldowns
                     .claim_hand_on(hop.member.id(), hop.wire_model.as_deref().unwrap_or(&bare))
         })?;
         let hop = self.hand_on.remove(position);
-        let index = self.resolved.hops.len();
-        self.resolved.spent.push(false);
-        self.resolved.hops.push(hop);
-        Some(index)
+        Some(self.push_primary_with_alternates(hop))
     }
 
     async fn run(mut self, start: usize) -> Result<Routed, RouterError> {
@@ -2294,7 +2451,12 @@ impl DispatchState {
             match self.round(&asking, &mut busy, &mut ending).await {
                 Ok(Some(answered)) => {
                     let next = answered.index + 1;
-                    let has_continuation = next < self.resolved.hops.len();
+                    let has_continuation = self
+                        .resolved
+                        .hops
+                        .iter()
+                        .skip(next)
+                        .any(|hop| !self.protocol_alternate_idle(hop));
                     let affinity_reason = self
                         .affinity
                         .as_ref()
@@ -2331,7 +2493,7 @@ impl DispatchState {
                     }
                     if let Some(trace) = self.trace.take() {
                         let hop = &self.resolved.hops[answered.index];
-                        let member = hop.member.id().to_string();
+                        let member = routing_member_label(hop);
                         trace.finish(
                             Some(&member),
                             Some(hop.member.route_id()),
@@ -2364,7 +2526,7 @@ impl DispatchState {
             if ending != Ending::Answered
                 && let Some(next) = self.take_hand_on()
             {
-                asking = vec![next];
+                asking = next;
                 continue;
             }
             let now = self.now();
@@ -2456,6 +2618,9 @@ impl DispatchState {
     ) -> Result<Option<Answered>, RouterError> {
         for &index in asking {
             let hop = self.resolved.hops[index].clone();
+            if self.protocol_alternate_idle(&hop) {
+                continue;
+            }
             let mut attempt = self.request.clone();
             apply_wire(&mut attempt, &hop, &self.resolved.bare, &self.served);
             self.tier_sent = hofund_codec::service_tier::extension_tier(&attempt.extensions);
@@ -2465,6 +2630,7 @@ impl DispatchState {
             let upstream_model = attempt.model.clone();
             let plugin_id = hop.member.plugin_id();
             if self.refused_providers.contains(hop.member.route_id())
+                || self.api_refused_for(&hop)
                 || (!plugin_id.is_empty() && self.skipped_plugins.contains(plugin_id))
                 || self.region_closed_for(&hop)
                 || self.outgrown.iter().any(|(route, model)| {
@@ -2477,6 +2643,16 @@ impl DispatchState {
             {
                 if self.refused_providers.contains(hop.member.route_id()) {
                     self.note_skip(index as u32, SkipReason::ProviderRefused);
+                } else if self.api_refused_for(&hop) {
+                    self.note_skip(
+                        index as u32,
+                        SkipReason::Failure {
+                            status: self
+                                .api_fitness
+                                .refusal_status(hop.member.route_id(), hop.member.protocol()),
+                            message: "the provider refuses this API for every model".to_owned(),
+                        },
+                    );
                 } else if !plugin_id.is_empty() && self.skipped_plugins.contains(plugin_id) {
                     self.note_skip(
                         index as u32,
@@ -2517,7 +2693,8 @@ impl DispatchState {
             if self.rest_left
                 && let Some(cooldowns) = &self.cooldowns
             {
-                cooldowns.note_asked_while_cooling(hop.member.id(), &upstream_model);
+                let cooling_id = self.routing_cooldown_id(&hop);
+                cooldowns.note_asked_while_cooling(&cooling_id, &upstream_model);
             }
             match self.quota_hold(asking, index) {
                 QuotaHold::Proceed => {}
@@ -2593,11 +2770,11 @@ impl DispatchState {
                     if let Some(hook) = self.hook.as_ref() {
                         hook.answered(&info);
                     }
+                    let affinity_member = routing_member_label(&hop);
                     if let Some(affinity) = &self.affinity {
-                        let member = hop.member.id().to_string();
-                        self.overflow_memory.clear(&affinity.key, &member);
+                        self.overflow_memory.clear(&affinity.key, &affinity_member);
                     }
-                    let member_id = hop.member.id().to_string();
+                    let member_id = routing_member_label(&hop);
                     for pool_move in &self.drain_moves {
                         if let Some((_, key)) = pool_move
                             .choices
@@ -2614,7 +2791,7 @@ impl DispatchState {
                         label_model(completion, self.asked.clone())
                     };
                     let completion = if let Some(affinity) = &self.affinity {
-                        let member = hop.member.id().to_string();
+                        let member = affinity_member;
                         let answerer = affinity.planned.iter().find(|candidate| {
                             candidate.member == member
                                 && candidate.model == upstream_model
@@ -2681,6 +2858,13 @@ impl DispatchState {
                         &upstream_id,
                     );
                     let error = inferred.unwrap_or(error);
+                    if let Some(status) = error
+                        .status()
+                        .filter(|status| hofund_ir::api_refused(*status, error.message()))
+                    {
+                        self.api_fitness
+                            .refuse(&upstream_id, hop.member.protocol(), status);
+                    }
                     if decision::region_refused(&error) {
                         hop.member.close_idle_connections();
                         let key = region_key(hop.member.scope_provider(), &upstream_model);
@@ -2712,7 +2896,7 @@ impl DispatchState {
                         if record_overflow && let Some(affinity) = &self.affinity {
                             self.overflow_memory.record(
                                 &affinity.key,
-                                &hop.member.id().to_string(),
+                                &routing_member_label(&hop),
                                 self.input_tokens,
                             );
                         }
@@ -2903,6 +3087,8 @@ impl DispatchState {
         };
         let region_model = wire.as_deref().unwrap_or(&self.resolved.bare);
         self.refused_providers.contains(&route)
+            || self.api_refused_for(&self.resolved.hops[index])
+            || self.protocol_alternate_idle(&self.resolved.hops[index])
             || (!plugin.is_empty() && self.skipped_plugins.contains(&plugin))
             || self
                 .region_closed
@@ -2930,7 +3116,7 @@ impl DispatchState {
         };
         trace.push_try(
             RouteTry::new(
-                hop.member.id().to_string(),
+                routing_member_label(hop),
                 hop.member.route_id(),
                 upstream_model,
                 done,
@@ -2957,7 +3143,7 @@ impl DispatchState {
         let extra: Vec<Hop> = std::mem::take(&mut self.over_window)
             .into_iter()
             .filter(|hop| {
-                !self.member_skipped(hop)
+                self.askable_left_out(hop)
                     && self.cooldowns.as_ref().is_none_or(|cooldowns| {
                         hand_on_candidate(
                             cooldowns,
@@ -2974,9 +3160,11 @@ impl DispatchState {
         if extra.is_empty() {
             return None;
         }
-        let start = self.resolved.hops.len();
-        self.resolved.hops.extend(extra);
-        Some((start..self.resolved.hops.len()).collect())
+        let mut asking = Vec::new();
+        for primary in extra {
+            asking.extend(self.push_primary_with_alternates(primary));
+        }
+        Some(asking)
     }
 
     /// A non-allowance failure counts as earlier only when another fitting
@@ -3000,7 +3188,7 @@ impl DispatchState {
             self.resolved
                 .hops
                 .get(*later)
-                .is_some_and(|hop| !self.member_skipped(hop))
+                .is_some_and(|hop| self.askable_left_out(hop))
         }) {
             return true;
         }
@@ -3012,7 +3200,7 @@ impl DispatchState {
             return false;
         };
         self.hand_on.iter().any(|hop| {
-            !self.member_skipped(hop)
+            self.askable_left_out(hop)
                 && hand_on_candidate(
                     cooldowns,
                     hop,
@@ -3033,7 +3221,7 @@ impl DispatchState {
             return false;
         };
         self.hand_on.iter().any(|hop| {
-            !self.member_skipped(hop)
+            self.askable_left_out(hop)
                 && hand_on_candidate(
                     cooldowns,
                     hop,
@@ -3046,10 +3234,40 @@ impl DispatchState {
         })
     }
 
-    fn member_skipped(&self, hop: &Hop) -> bool {
+    /// Admits a left-out primary whose only skip is an API refusal when that
+    /// primary still has another API. The alternate itself stays off these
+    /// lists; [`Self::round`] skips the refused hop and calls the alternate.
+    fn askable_left_out(&self, hop: &Hop) -> bool {
+        !self.member_skipped_for(hop, self.has_protocol_alternate(hop))
+    }
+
+    fn has_protocol_alternate(&self, hop: &Hop) -> bool {
+        let id = hop.member.id().to_string();
+        self.protocol_alternates
+            .iter()
+            .any(|alternate| alternate.member.stands_in_for() == Some(id.as_str()))
+    }
+
+    /// Cooldown identity of the route member. A protocol alternate's success,
+    /// failure note, and ask-while-cooling belong to the primary.
+    fn routing_cooldown_id(&self, hop: &Hop) -> MemberId {
+        hop.member
+            .stands_in_for()
+            .and_then(|primary| {
+                self.resolved.hops.iter().find_map(|candidate| {
+                    (candidate.member.id().to_string() == primary)
+                        .then(|| candidate.member.id().clone())
+                })
+            })
+            .unwrap_or_else(|| hop.member.id().clone())
+    }
+
+    fn member_skipped_for(&self, hop: &Hop, ignore_api_refusal: bool) -> bool {
         let upstream_model = hop.wire_model.as_deref().unwrap_or(&self.resolved.bare);
         let plugin_id = hop.member.plugin_id();
         self.refused_providers.contains(hop.member.route_id())
+            || (!ignore_api_refusal && self.api_refused_for(hop))
+            || self.protocol_alternate_idle(hop)
             || (!plugin_id.is_empty() && self.skipped_plugins.contains(plugin_id))
             || self.region_closed_for(hop)
             || self

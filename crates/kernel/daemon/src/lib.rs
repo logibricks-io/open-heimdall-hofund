@@ -60,6 +60,8 @@ mod d224_service_tiers;
 mod d226_import;
 #[cfg(test)]
 mod d241_listed;
+#[cfg(test)]
+mod d250_messages_refused;
 mod events;
 mod log_tail;
 mod measurements;
@@ -996,17 +998,8 @@ fn router(
     if let Some(host) = models_host.as_deref_mut() {
         host.install_upstreams(&instances);
     }
-    let fingerprints = built
-        .iter()
-        .map(|(id, provider)| {
-            (
-                provider
-                    .key
-                    .as_ref()
-                    .map_or_else(|| membership::member_id(id), |key| key.member.clone()),
-                provider.fingerprint.clone(),
-            )
-        })
+    let fingerprints = membership::provider_fingerprints(&built)
+        .into_iter()
         .collect();
     let (routes, policy) = route_plan(config, models_host.as_deref(), Some(&built), &limits);
     let (members, expanded) = subscriptions::expand(&built, &routes, subscriptions)?;
@@ -1603,7 +1596,7 @@ fn providers(
                     )?;
                     let upstream = adapter.upstream();
                     Instance {
-                        provider: selected,
+                        provider: selected.clone(),
                         timeouts,
                         plugin_id: plugin_id.clone(),
                         fingerprint: fingerprint.clone(),
@@ -1621,6 +1614,39 @@ fn providers(
                 weight: key.entry.weight,
                 rank,
             });
+            let mut alternates = Vec::new();
+            if let Some(chat_planned) = custom_messages_chat_plan(provider, &planned, &plugin_id) {
+                let chat_plugin = plugin_for(provider, &chat_planned, registry);
+                let chat_endpoint = endpoint_for(&selected, &chat_planned)?;
+                let chat_adapter = build_plugin(
+                    &selected,
+                    &chat_planned,
+                    &chat_endpoint,
+                    path,
+                    limits,
+                    mode,
+                    cooldowns.clone(),
+                    registry,
+                )?;
+                alternates.push(membership::BuiltProvider {
+                    adapter: Arc::new(chat_adapter),
+                    protocol: "openai-chat",
+                    timeout,
+                    kernel: registry.is_kernel_factory(&chat_plugin),
+                    plugin_id: chat_plugin,
+                    preset_id: String::new(),
+                    fingerprint: fingerprint.clone(),
+                    patience: provider.patience.duration(),
+                    base_url: chat_endpoint.base_url.clone(),
+                    key: key_member.clone(),
+                    key_id: key.id.clone(),
+                    http_profile: HttpProfile::direct(),
+                    http_limits: limits,
+                    realtime_url: String::new(),
+                    realtime_authorization: String::new(),
+                    alternates: Vec::new(),
+                });
+            }
             built.insert(
                 instance_id.clone(),
                 membership::BuiltProvider {
@@ -1639,6 +1665,7 @@ fn providers(
                     http_limits: limits,
                     realtime_url: planned.realtime_url.clone(),
                     realtime_authorization: realtime_authorization(&endpoint.api_key),
+                    alternates,
                 },
             );
             instances.insert(instance_id, instance);
@@ -1648,6 +1675,23 @@ fn providers(
         built,
         limits: at_once_limits,
         instances,
+    })
+}
+
+fn custom_messages_chat_plan(
+    provider: &hofund_config::Provider,
+    planned: &Planned,
+    plugin_id: &str,
+) -> Option<Planned> {
+    if provider.preset.is_some() || planned.wire != Wire::Messages || plugin_id != "anthropic" {
+        return None;
+    }
+    Some(Planned {
+        base_url: format!("{}/v1", planned.base_url.trim_end_matches('/')),
+        wire: Wire::Chat,
+        protocol: Some(ProtocolId::OPENAI_CHAT),
+        credential: Credential::Bearer,
+        realtime_url: String::new(),
     })
 }
 

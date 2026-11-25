@@ -25,6 +25,7 @@ pub use anthropic::Anthropic;
 pub use attempt::{AttemptHook, AttemptRoute};
 pub use error::{ProviderError, ProviderErrorKind};
 pub use generative::Generative;
+pub use hofund_ir::api_refused;
 pub use http::{
     ClientRefresh, Credential, Endpoint, PooledClientSlot, pooled_client_slot, pooled_reqwest,
 };

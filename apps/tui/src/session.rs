@@ -1243,22 +1243,51 @@ async fn test_provider(client: &Client, id: String) -> SessionOutcome {
         .await
     {
         Ok(response) => {
-            let failed = response.results.iter().find(|result| !result.ok);
-            let (text, ok) = if let Some(result) = failed {
-                let detail = result
-                    .error
-                    .as_ref()
-                    .map(|error| error.message.clone())
-                    .unwrap_or_else(|| "failed".to_owned());
-                (format!("failed {id}: {}", redact(&detail, None)), false)
-            } else if response.results.is_empty() {
-                (format!("tested {id}"), true)
-            } else {
-                (format!("ok {id}"), true)
-            };
+            let (text, ok) = provider_test_flash(&id, &response);
             finished(text, ok, false, false, None)
         }
         Err(error) => finished(explain(error, None), false, false, false, None),
+    }
+}
+
+fn provider_test_flash(
+    id: &str,
+    response: &hofund_control_client::hofund_control_proto::ProviderTestResponse,
+) -> (String, bool) {
+    let failed = response
+        .results
+        .iter()
+        .find(|result| !result.ok && !result.unserved);
+    if let Some(result) = failed {
+        let detail = result
+            .error
+            .as_ref()
+            .map(|error| error.message.clone())
+            .unwrap_or_else(|| "failed".to_owned());
+        (format!("failed {id}: {}", redact(&detail, None)), false)
+    } else if let Some(result) = response.results.iter().find(|result| result.unserved) {
+        let message = result
+            .error
+            .as_ref()
+            .map(|error| error.message.clone())
+            .unwrap_or_else(|| "probe failed".to_owned());
+        let detail = match result.status {
+            Some(status) => format!("{status} {message}"),
+            None => message,
+        };
+        let detail = redact(&detail, None);
+        if response.results.iter().any(|result| result.ok) {
+            (
+                format!("ok {id}; not served {}: {detail}", result.model),
+                true,
+            )
+        } else {
+            (format!("Not served for this key: {id}: {detail}"), true)
+        }
+    } else if response.results.is_empty() {
+        (format!("tested {id}"), true)
+    } else {
+        (format!("ok {id}"), true)
     }
 }
 
@@ -1494,4 +1523,61 @@ fn finished_profiles(text: impl Into<String>, profiles: Vec<ProfileSummary>) -> 
 
 fn explain(error: ClientError, secret: Option<&str>) -> String {
     redact(&error.to_string(), secret)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn d250_unserved_api_shows_not_served_without_failing_the_test() {
+        let mut response =
+            hofund_control_client::hofund_control_proto::ProviderTestResponse::default();
+        let mut result = hofund_control_client::hofund_control_proto::ProviderTestResult::default();
+        result.unserved = true;
+        result.status = Some(403);
+        result.error = Some(
+            hofund_control_client::hofund_control_proto::ControlError::new(
+                hofund_control_client::hofund_control_proto::ControlErrorKind::Upstream,
+                "This group does not allow /v1/messages dispatch",
+                "request-1",
+            ),
+        );
+        response.results.push(result);
+        assert_eq!(
+            super::provider_test_flash("relay", &response),
+            (
+                "Not served for this key: relay: 403 This group does not allow /v1/messages dispatch".to_owned(),
+                true
+            )
+        );
+    }
+
+    #[test]
+    fn d250_mixed_provider_test_reports_success_and_the_unserved_model() {
+        let mut response =
+            hofund_control_client::hofund_control_proto::ProviderTestResponse::default();
+        let mut ok = hofund_control_client::hofund_control_proto::ProviderTestResult::default();
+        ok.model = "chat-model".to_owned();
+        ok.ok = true;
+        response.results.push(ok);
+        let mut unserved =
+            hofund_control_client::hofund_control_proto::ProviderTestResult::default();
+        unserved.model = "messages-model".to_owned();
+        unserved.unserved = true;
+        unserved.status = Some(422);
+        unserved.error = Some(
+            hofund_control_client::hofund_control_proto::ControlError::new(
+                hofund_control_client::hofund_control_proto::ControlErrorKind::Upstream,
+                "This group does not allow /v1/messages dispatch",
+                "request-1",
+            ),
+        );
+        response.results.push(unserved);
+        assert_eq!(
+            super::provider_test_flash("relay", &response),
+            (
+                "ok relay; not served messages-model: 422 This group does not allow /v1/messages dispatch".to_owned(),
+                true
+            )
+        );
+    }
 }
