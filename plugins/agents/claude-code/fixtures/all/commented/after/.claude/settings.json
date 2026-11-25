@@ -7,7 +7,8 @@
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "commented-model",
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "commented-model",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "commented-model",
-    "ANTHROPIC_SMALL_FAST_MODEL": "commented-model"
+    "ANTHROPIC_SMALL_FAST_MODEL": "commented-model",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "route-a"
   },
   "permissions": {
     "allow": [

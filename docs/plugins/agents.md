@@ -41,7 +41,7 @@ The gateway names the calling agent from the request before it filters the model
 
 Each entry must be one non-empty token without whitespace, and list entries must be unique ignoring case.
 
-Claude Code sets `request_agent_header = "x-claude-code-agent-id"`. Codex sets `client_prefixes` to `codex` and `acp-extension-codex`, and `nested_turn_headers` to `x-codex-window-id` and `x-codex-turn-metadata`.
+Claude Code sets `nested_turn_headers` to `x-claude-code-agent-id`, so a nested turn selects Claude Code before the User-Agent is considered, even when that User-Agent names another product. Codex sets `client_prefixes` to `codex` and `acp-extension-codex`, and `nested_turn_headers` to `x-codex-window-id` and `x-codex-turn-metadata`.
 
 ## File locations and `create`
 

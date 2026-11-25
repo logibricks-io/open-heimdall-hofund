@@ -2,8 +2,9 @@ id = "claude-code"
 display_name = "Claude Code"
 binary = "claude"
 
-# A non-empty value is the calling agent's id or binary.
-request_agent_header = "x-claude-code-agent-id"
+# A subagent's opaque id marks a nested turn. The lead is identified by its
+# User-Agent; the id itself is not an agent name.
+nested_turn_headers = ["x-claude-code-agent-id"]
 
 # The file is ~/.claude/settings.json. On Windows that is
 # %USERPROFILE%\.claude\settings.json. CLAUDE_CONFIG_DIR replaces the .claude
@@ -67,9 +68,17 @@ file = "settings"
 key = "env.ANTHROPIC_SMALL_FAST_MODEL"
 slot = { model_tier = { tier = "fast" } }
 
-# CLAUDE_CODE_SUBAGENT_MODEL stays unset so a subagent that names no model keeps
-# the session model. effortLevel and CLAUDE_CODE_EFFORT_LEVEL stay unset because
-# connect does not pick a level.
+# Connect fills an unset CLAUDE_CODE_SUBAGENT_MODEL when exactly one gateway
+# route exists. An existing value is preserved. Explore and Plan declare model
+# inherit, so the gateway applies this value to their turns when it names a
+# gateway model. effortLevel and CLAUDE_CODE_EFFORT_LEVEL stay unset because
+# connect does not pick a level; a user may append :<effort> to this value.
+[[set]]
+file = "settings"
+key = "env.CLAUDE_CODE_SUBAGENT_MODEL"
+slot = { model_if_unset = {} }
+
+# The main model remains independent of the subagent setting.
 # Checked 2026-10-25: https://code.claude.com/docs/en/model-config,
 # https://code.claude.com/docs/en/env-vars.
 # Sources: https://code.claude.com/docs/en/settings,
