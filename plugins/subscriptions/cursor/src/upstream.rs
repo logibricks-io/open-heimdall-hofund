@@ -642,14 +642,16 @@ fn empty_reply() -> PluginError {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
     use std::path::PathBuf;
+    use std::pin::Pin;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use hofund_kit_subscription::{
         Http1Response, Http1Server, Http2Response, Http2Server, TestHost, advance_time, block_on,
-        block_on_paused, drive_to_completion, drive_until_http2_opening, drive_until_http2_request,
-        yield_times,
+        block_on_paused, drive_to_completion, drive_until_http1_response,
+        drive_until_http2_opening, drive_until_http2_request, yield_times,
     };
     use hofund_plugin_api::{
         AccountId, BlockStart, Completion, ContentBlockStart, ContentBlockStop, Extensions,
@@ -2348,38 +2350,57 @@ mod tests {
     }
 
     async fn advance_until_usage_polls(h1: &Http1Server, want: usize) {
-        let path = "/aiserver.v1.DashboardService/GetFilteredUsageEvents";
-        // Yield so execute can run, then step the paused clock for first-wait
-        // and retry sleeps. Check after each yield so a first poll with a zero
-        // first-wait is visible before further clock jumps.
         for _ in 0..200 {
-            let seen = h1
-                .requests()
-                .iter()
-                .filter(|request| request.path() == path)
-                .count();
+            let seen = usage_poll_count(h1);
             assert!(seen <= want, "usage polls overshot {want}: {seen}");
             if seen == want {
                 return;
             }
             yield_times(2).await;
-            let seen = h1
-                .requests()
-                .iter()
-                .filter(|request| request.path() == path)
-                .count();
+            let seen = usage_poll_count(h1);
             assert!(seen <= want, "usage polls overshot {want}: {seen}");
             if seen == want {
                 return;
             }
             advance_time(Duration::from_millis(50)).await;
         }
-        let seen = h1
-            .requests()
+        panic!(
+            "timed out waiting for {want} usage polls, saw {}",
+            usage_poll_count(h1)
+        );
+    }
+
+    fn usage_poll_count(h1: &Http1Server) -> usize {
+        h1.requests()
             .iter()
-            .filter(|request| request.path() == path)
-            .count();
-        panic!("timed out waiting for {want} usage polls, saw {seen}");
+            .filter(|request| {
+                request.path() == "/aiserver.v1.DashboardService/GetFilteredUsageEvents"
+            })
+            .count()
+    }
+
+    async fn release_usage_sleep_without_io<F>(
+        mut attempt: Pin<&mut F>,
+        h1: &Http1Server,
+        poll_goal: usize,
+        duration: Duration,
+    ) where
+        F: Future<Output = Result<Vec<StreamEvent>, PluginError>> + ?Sized,
+    {
+        loop {
+            if usage_poll_count(h1) == poll_goal {
+                return;
+            }
+            let Race::Right(()) = race(attempt.as_mut(), yield_times(2)).await else {
+                panic!("usage stream finished before the next poll");
+            };
+            if usage_poll_count(h1) == poll_goal {
+                return;
+            }
+            if h1.open_responses() == 0 {
+                advance_time(duration).await;
+            }
+        }
     }
 
     fn last_message_usage(events: &[StreamEvent]) -> Option<&Usage> {
@@ -2409,6 +2430,8 @@ mod tests {
             let account = store_account(&host).await;
             let mut upstream = upstream(&host, &h1, h2.base_url(), account);
             restore_production_usage_limits(&mut upstream);
+            let first_delay = upstream.limits.usage_first_wait;
+            let retry_delay = upstream.limits.usage_interval;
             let attempt = async {
                 let completion = upstream
                     .execute(tool_request(), ProtocolId::OPENAI_CHAT)
@@ -2417,10 +2440,10 @@ mod tests {
             };
             let mut attempt = std::pin::pin!(attempt);
             drive_until_http2_opening(attempt.as_mut(), &h2, 1).await;
-            let events = match race(attempt.as_mut(), advance_until_usage_polls(&h1, 2)).await {
-                Race::Left(result) => result.expect("stream"),
-                Race::Right(()) => drive_to_completion(attempt).await.expect("stream"),
-            };
+            release_usage_sleep_without_io(attempt.as_mut(), &h1, 1, first_delay).await;
+            drive_until_http1_response(attempt.as_mut(), &h1, 2).await;
+            release_usage_sleep_without_io(attempt.as_mut(), &h1, 2, retry_delay).await;
+            let events = drive_to_completion(attempt).await.expect("stream");
             let usage = last_message_usage(&events).expect("usage");
             assert_eq!(
                 usage,
@@ -3034,10 +3057,11 @@ mod tests {
         };
         let mut attempt = std::pin::pin!(attempt);
         drive_until_http2_opening(attempt.as_mut(), h2, http2_opening).await;
-        match race(attempt.as_mut(), advance_until_usage_polls(h1, poll_goal)).await {
-            Race::Left(result) => result.expect("stream"),
-            Race::Right(()) => drive_to_completion(attempt).await.expect("stream"),
-        }
+        release_usage_sleep_without_io(attempt.as_mut(), h1, poll_goal, Duration::from_millis(1))
+            .await;
+        let events = drive_to_completion(attempt).await.expect("stream");
+        assert_eq!(usage_poll_count(h1), poll_goal);
+        events
     }
 
     #[test]

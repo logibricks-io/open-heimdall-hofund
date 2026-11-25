@@ -1,6 +1,7 @@
 //! Loopback-only HTTP servers for subscription plugin tests.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -131,6 +132,8 @@ impl Http1Response {
 pub struct Http1Server {
     base_url: String,
     requests: Arc<Mutex<Vec<RecordedHttp1Request>>>,
+    accepted: Arc<AtomicUsize>,
+    completed: Arc<AtomicUsize>,
     shutdown: watch::Sender<bool>,
     task: Option<JoinHandle<()>>,
 }
@@ -157,6 +160,10 @@ impl Http1Server {
         let address = listener.local_addr().expect("loopback address");
         let requests = Arc::new(Mutex::new(Vec::new()));
         let seen = Arc::clone(&requests);
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let opened = Arc::clone(&accepted);
+        let completed = Arc::new(AtomicUsize::new(0));
+        let finished = Arc::clone(&completed);
         let scripts = Arc::new(Mutex::new(VecDeque::from(responses)));
         let (shutdown, mut stopped) = watch::channel(false);
         let task = tokio::spawn(async move {
@@ -165,11 +172,13 @@ impl Http1Server {
                     _ = stopped.changed() => break,
                     accepted = listener.accept() => {
                         let Ok((stream, _)) = accepted else { break };
+                        opened.fetch_add(1, Ordering::SeqCst);
                         let seen = Arc::clone(&seen);
+                        let finished = Arc::clone(&finished);
                         let scripts = Arc::clone(&scripts);
                         let stopped = stopped.clone();
                         tokio::spawn(async move {
-                            serve_http1(stream, seen, scripts, stopped).await;
+                            serve_http1(stream, seen, finished, scripts, stopped).await;
                         });
                     }
                 }
@@ -182,6 +191,8 @@ impl Http1Server {
         Self {
             base_url: format!("http://{address}"),
             requests,
+            accepted,
+            completed,
             shutdown,
             task: Some(task),
         }
@@ -197,6 +208,20 @@ impl Http1Server {
     #[must_use]
     pub fn requests(&self) -> Vec<RecordedHttp1Request> {
         self.requests.lock().expect("request records").clone()
+    }
+
+    /// Responses whose body and connection shutdown have completed.
+    #[must_use]
+    pub fn completed_responses(&self) -> usize {
+        self.completed.load(Ordering::SeqCst)
+    }
+
+    /// Accepted responses whose body delivery has not completed.
+    #[must_use]
+    pub fn open_responses(&self) -> usize {
+        self.accepted
+            .load(Ordering::SeqCst)
+            .saturating_sub(self.completed_responses())
     }
 
     /// Stops accepting connections and closes held responses.
@@ -220,6 +245,7 @@ impl Drop for Http1Server {
 async fn serve_http1(
     mut stream: TcpStream,
     requests: Arc<Mutex<Vec<RecordedHttp1Request>>>,
+    completed: Arc<AtomicUsize>,
     scripts: Arc<Mutex<VecDeque<Http1Response>>>,
     mut stopped: watch::Receiver<bool>,
 ) {
@@ -292,6 +318,7 @@ async fn serve_http1(
         let _ = stopped.changed().await;
     }
     let _ = stream.shutdown().await;
+    completed.fetch_add(1, Ordering::SeqCst);
 }
 
 async fn read_http1_request(stream: &mut TcpStream) -> Option<RecordedHttp1Request> {

@@ -163,6 +163,41 @@ pub async fn wait_for_http1_request(server: &Http1Server, count: usize) {
     }
 }
 
+/// Waits until the `count`th HTTP/1.1 response has been fully delivered.
+///
+/// The wait always leaves a yield queued, preventing paused-clock auto-advance
+/// while the loopback server is writing the response.
+///
+/// # Panics
+///
+/// Panics if `count` is zero.
+pub async fn wait_for_http1_response(server: &Http1Server, count: usize) {
+    assert!(count > 0, "HTTP/1.1 response counts start at one");
+    while server.completed_responses() < count {
+        tokio::task::yield_now().await;
+    }
+}
+
+/// Drives `future` until the `count`th HTTP/1.1 response has been delivered.
+///
+/// # Panics
+///
+/// Panics if `count` is zero or `future` completes first.
+pub async fn drive_until_http1_response<F, T>(
+    future: Pin<&mut F>,
+    server: &Http1Server,
+    count: usize,
+) where
+    F: Future<Output = T> + ?Sized,
+{
+    if drive_until_output(future, wait_for_http1_response(server, count))
+        .await
+        .is_some()
+    {
+        panic!("future finished early");
+    }
+}
+
 /// Drives `future` until the `count`th HTTP/1.1 request is recorded.
 ///
 /// # Panics
