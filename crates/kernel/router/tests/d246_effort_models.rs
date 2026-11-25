@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use hofund_ir::{Effort, Message, Request, Response, Role};
 use hofund_plugin_api::{CountOutcome, MemberId, MemberKey, PluginError, PresetId};
-use hofund_router::{Completion, EffortModels, FailoverPolicy, Hop, Member, RouteScope, Router};
+use hofund_router::{
+    Completion, EffortModels, FailoverPolicy, Hop, Member, RouteScope, Router, RouterError,
+};
 
 struct Fake {
     id: MemberId,
@@ -28,8 +30,8 @@ impl Member for Fake {
         "test"
     }
 
-    fn effort_models(&self) -> Option<&EffortModels> {
-        Some(&self.family)
+    fn effort_models(&self) -> Option<EffortModels> {
+        Some(self.family.clone())
     }
 
     async fn execute(
@@ -151,8 +153,53 @@ async fn d246_old_ids_pass_model_scopes_and_levels_are_listed() {
         seen.lock().expect("seen").as_slice(),
         ["model-4-alpha-high", "model-4-alpha-high"]
     );
+    let low_only = RouteScope {
+        models: vec!["relay/model-4-alpha-low".to_owned()],
+        accounts: Vec::new(),
+    };
+    for model in [
+        "model-4-alpha",
+        "model-4-alpha-high",
+        "relay/model-4-alpha",
+        "relay/model-4-alpha-high",
+    ] {
+        match router
+            .dispatch_scoped(
+                &ask(model, Some(Effort::Low)),
+                "test",
+                Some(&low_only),
+                None,
+            )
+            .await
+        {
+            Err(error) => assert!(
+                matches!(error, RouterError::ModelScope { .. }),
+                "{model}: {error}"
+            ),
+            Ok(_) => panic!("a low scope admitted {model}"),
+        }
+    }
+    assert_eq!(
+        seen.lock().expect("seen").as_slice(),
+        ["model-4-alpha-high", "model-4-alpha-high"]
+    );
+    let allowed = router
+        .dispatch_scoped(
+            &ask("model-4-alpha-low", Some(Effort::High)),
+            "test",
+            Some(&low_only),
+            None,
+        )
+        .await
+        .expect("the named old id stays allowed");
+    assert_eq!(allowed.upstream_model, "model-4-alpha-low");
     assert_eq!(
         router.effort_levels("model-4-alpha"),
         ["low", "medium", "high"]
     );
+    assert_eq!(
+        router.effort_levels("relay/model-4-alpha"),
+        ["low", "medium", "high"]
+    );
+    assert!(router.effort_levels("other/model-4-alpha").is_empty());
 }

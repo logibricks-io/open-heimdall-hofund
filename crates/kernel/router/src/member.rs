@@ -75,7 +75,7 @@ pub trait Member: Send + Sync {
     }
 
     /// Effort-suffixed ids this member can serve as one model, when listed.
-    fn effort_models(&self) -> Option<&EffortModels> {
+    fn effort_models(&self) -> Option<EffortModels> {
         None
     }
 

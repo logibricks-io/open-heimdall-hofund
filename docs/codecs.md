@@ -46,9 +46,12 @@ and `stream` from that body: the model is a path segment, and `stream` selects
 
 `GenerationParams.effort` is the shared level. A codec reads its own field
 and, on encode, writes that field only when the extension bag does not
-already hold it. A same-protocol request therefore keeps the caller's object,
-including a Messages `thinking.budget_tokens` value, which is not turned into
-a level. Official lists were checked on 2026-10-25.
+already hold it. A same-protocol request therefore keeps the caller's object.
+Messages decode reads `output_config.effort` first. When that field is absent
+and `thinking.type` is `enabled` or `adaptive`, a positive `budget_tokens`
+becomes low through 4096, medium through 12000, high through 24000, and xhigh
+above that. The thinking object stays in the extension bag and is written
+back unchanged. Official lists were checked on 2026-10-25.
 
 | Level | Chat and Responses | Messages | Generative Language |
 | --- | --- | --- | --- |

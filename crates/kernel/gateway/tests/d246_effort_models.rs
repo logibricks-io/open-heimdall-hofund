@@ -32,8 +32,8 @@ impl Member for Listed {
         "test"
     }
 
-    fn effort_models(&self) -> Option<&EffortModels> {
-        Some(&self.family)
+    fn effort_models(&self) -> Option<EffortModels> {
+        Some(self.family.clone())
     }
 
     async fn execute(&self, _: ModelRequest, _: &str) -> Result<Completion, PluginError> {

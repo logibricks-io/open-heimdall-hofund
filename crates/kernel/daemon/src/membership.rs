@@ -124,6 +124,7 @@ struct LiveMember {
     realtime_url: String,
     realtime_authorization: String,
     effort_models: Option<hofund_router::EffortModels>,
+    effort_live: Option<crate::models::EffortLive>,
     failed: Arc<AtomicU64>,
     stack: Cooldown<Guard<ProviderCall>>,
     alternates: Vec<Arc<LiveMember>>,
@@ -405,6 +406,7 @@ fn build_specs(
                     hop.member_id.clone(),
                     subscription,
                     hop.effort_models.clone(),
+                    hop.effort_live.clone(),
                     Arc::clone(&table.cooldowns),
                     Arc::clone(&table.offline),
                     Arc::downgrade(table),
@@ -449,6 +451,8 @@ pub(crate) struct PlannedHop {
     pub rank: usize,
     pub wire_model: Option<String>,
     pub effort_models: Option<hofund_router::EffortModels>,
+    /// Current source-list family, when this hop was planned with a model host.
+    pub effort_live: Option<crate::models::EffortLive>,
     pub max_output_tokens: Option<u64>,
     /// Input context window of the hop's model, from the provider's model
     /// list, when it is known.
@@ -663,6 +667,7 @@ impl LiveMember {
         id: Option<MemberId>,
         subscription: bool,
         effort_models: Option<hofund_router::EffortModels>,
+        effort_live: Option<crate::models::EffortLive>,
         cooldowns: Arc<Cooldowns>,
         offline: Arc<Offline>,
         reload: Weak<Table>,
@@ -680,6 +685,7 @@ impl LiveMember {
                     Some(alternate_id),
                     subscription,
                     effort_models.clone(),
+                    effort_live.clone(),
                     Arc::clone(&cooldowns),
                     Arc::clone(&offline),
                     reload.clone(),
@@ -734,6 +740,7 @@ impl LiveMember {
             realtime_url: built.realtime_url.clone(),
             realtime_authorization: built.realtime_authorization.clone(),
             effort_models,
+            effort_live,
             failed,
             stack,
             alternates,
@@ -794,8 +801,11 @@ impl Member for LiveMember {
         self.stack.inner.inner.provider.learned_catalog_entry(model)
     }
 
-    fn effort_models(&self) -> Option<&hofund_router::EffortModels> {
-        self.effort_models.as_ref()
+    fn effort_models(&self) -> Option<hofund_router::EffortModels> {
+        if let Some(live) = &self.effort_live {
+            return live.current();
+        }
+        self.effort_models.clone()
     }
 
     fn account_refs(&self) -> Vec<String> {
@@ -1711,6 +1721,7 @@ mod tests {
                 rank: 0,
                 wire_model: None,
                 effort_models: None,
+                effort_live: None,
                 max_output_tokens: None,
                 context_window: None,
                 routing: "smart".to_owned(),
@@ -1823,6 +1834,7 @@ mod tests {
                 rank: 0,
                 wire_model: None,
                 effort_models: None,
+                effort_live: None,
                 max_output_tokens: None,
                 context_window: None,
                 routing: "smart".to_owned(),
@@ -1926,6 +1938,7 @@ mod tests {
                 rank: 0,
                 wire_model: None,
                 effort_models: None,
+                effort_live: None,
                 max_output_tokens: None,
                 context_window: None,
                 routing: "smart".to_owned(),
@@ -2028,6 +2041,7 @@ mod tests {
                 rank: 0,
                 wire_model: None,
                 effort_models: None,
+                effort_live: None,
                 max_output_tokens: None,
                 context_window: None,
                 routing: "smart".to_owned(),
@@ -2102,6 +2116,7 @@ mod tests {
                     rank: 0,
                     wire_model: None,
                     effort_models: None,
+                    effort_live: None,
                     max_output_tokens: None,
                     context_window: None,
                     routing: "smart".to_owned(),
@@ -2123,6 +2138,7 @@ mod tests {
                     rank: 0,
                     wire_model: None,
                     effort_models: None,
+                    effort_live: None,
                     max_output_tokens: None,
                     context_window: None,
                     routing: "smart".to_owned(),
@@ -2178,6 +2194,7 @@ mod tests {
                     rank: 0,
                     wire_model: None,
                     effort_models: None,
+                    effort_live: None,
                     max_output_tokens: None,
                     context_window: None,
                     routing: "smart".to_owned(),

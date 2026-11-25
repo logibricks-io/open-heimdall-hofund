@@ -125,7 +125,8 @@ expression: pretty_value!(&request)
     "top_k": 40,
     "stop": [
       "END"
-    ]
+    ],
+    "effort": "low"
   },
   "extensions": {
     "metadata": {

@@ -170,6 +170,50 @@ pub(crate) fn fold(models: &[ModelSpec]) -> (Vec<ModelSpec>, Vec<EffortModels>) 
     (folded, resolvers.into_values().collect())
 }
 
+fn family_display_name(default: &ModelSpec, family: &EffortModels, bare: bool) -> Option<String> {
+    if bare {
+        return default.display_name().map(str::to_owned);
+    }
+    let Some(name) = default.display_name().filter(|name| !name.is_empty()) else {
+        return Some(family.family().to_owned());
+    };
+    if name == default.id() {
+        return Some(family.family().to_owned());
+    }
+    if let Some(stripped) = bracket_name(name, family) {
+        return Some(stripped);
+    }
+    if let Some((head, tail)) = name.rsplit_once(' ')
+        && WORDS.contains(&tail.to_ascii_lowercase().as_str())
+    {
+        let stripped = head.trim();
+        if !stripped.is_empty() {
+            return Some(stripped.to_owned());
+        }
+    }
+    Some(family.family().to_owned())
+}
+
+fn bracket_name(name: &str, family: &EffortModels) -> Option<String> {
+    let open = name.rfind(" (")?;
+    if !name.ends_with(')') {
+        return None;
+    }
+    let level = match name[open + 2..name.len() - 1].to_ascii_lowercase().as_str() {
+        "minimal" | "extra low" => "minimal",
+        "low" => "low",
+        "medium" => "medium",
+        "high" => "high",
+        "extra high" | "xhigh" => "xhigh",
+        _ => return None,
+    };
+    if !family.levels().contains(&level) {
+        return None;
+    }
+    let stripped = name[..open].trim();
+    (!stripped.is_empty()).then(|| stripped.to_owned())
+}
+
 fn family_model(
     default: &ModelSpec,
     family: &EffortModels,
@@ -191,11 +235,7 @@ fn family_model(
             _ => None,
         };
     }
-    let display_name = if by_id.contains_key(family.family()) {
-        default.display_name().map(str::to_owned)
-    } else {
-        Some(family.family().to_owned())
-    };
+    let display_name = family_display_name(default, family, by_id.contains_key(family.family()));
     let (input_price, output_price, cache_read_price) = default.prices();
     let (rate, rate_was) = default.rate_parts();
     let mut model = ModelSpec::new(family.family(), display_name)
@@ -308,6 +348,37 @@ mod tests {
             "model-4-alpha-high"
         );
         assert!(resolver(&source, "model-4-beta-low").is_none());
+    }
+
+    #[test]
+    fn d246_family_display_name_drops_a_trailing_effort_word() {
+        let source = vec![
+            ModelSpec::new("model-4-alpha-low", Some("Alpha Four (Low)".to_owned()))
+                .expect("model"),
+            ModelSpec::new("model-4-alpha-high", Some("Alpha Four High".to_owned()))
+                .expect("model"),
+            ModelSpec::new("model-4-beta", Some("Beta Four".to_owned())).expect("model"),
+            ModelSpec::new("model-4-beta-low", Some("Beta Four Low".to_owned())).expect("model"),
+            ModelSpec::new("model-4-beta-high", Some("Beta Four (High)".to_owned()))
+                .expect("model"),
+            ModelSpec::new("model-9-gamma-low", Some("model-9-gamma-low".to_owned()))
+                .expect("model"),
+            ModelSpec::new("model-9-gamma-high", Some("Gamma Nine Special".to_owned()))
+                .expect("model"),
+        ];
+        let (folded, _) = fold(&source);
+        let names = folded
+            .iter()
+            .map(|model| (model.id(), model.display_name().unwrap_or("").to_owned()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                ("model-4-alpha", "Alpha Four".to_owned()),
+                ("model-4-beta", "Beta Four".to_owned()),
+                ("model-9-gamma", "model-9-gamma".to_owned()),
+            ]
+        );
     }
 
     #[test]

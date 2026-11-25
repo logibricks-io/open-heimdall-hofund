@@ -2,12 +2,14 @@
 
 use std::sync::Arc;
 
+use hofund_codec::{AnthropicMessages, Codec};
 use hofund_plugin_api::{Effort, Request};
 use hofund_router::{CooldownPolicy, Cooldowns, Snapshot};
 use wiremock::matchers::{method, path};
 use wiremock::{Match, Mock, MockServer, Request as WireRequest, ResponseTemplate};
 
 const CHAT_OK: &str = r#"{"id":"c1","model":"m","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}"#;
+const MESSAGES_OK: &str = r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":2}}"#;
 
 struct Model(&'static str);
 
@@ -28,6 +30,29 @@ async fn chat_ok(server: &MockServer, model: &'static str, count: u64) {
         .expect(count)
         .mount(server)
         .await;
+}
+
+async fn messages_ok(server: &MockServer, model: &'static str, count: u64) {
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(Model(model))
+        .respond_with(ResponseTemplate::new(200).set_body_string(MESSAGES_OK))
+        .expect(count)
+        .mount(server)
+        .await;
+}
+
+fn messages_body(model: &str, extra: &str) -> Request {
+    let body = format!(
+        r#"{{"model":"{model}","max_tokens":32000,"messages":[{{"role":"user","content":"hi"}}]{extra}}}"#
+    );
+    AnthropicMessages
+        .decode_request(body.as_bytes())
+        .expect("messages decode")
+}
+
+fn thinking_budget(kind: &str, budget: u64) -> String {
+    format!(r#","thinking":{{"type":"{kind}","budget_tokens":{budget}}}"#)
 }
 
 async fn count_ok(server: &MockServer, model: &'static str, count: u64) {
@@ -221,6 +246,178 @@ async fn d246_messages_count_uses_nearest_and_preserves_old_ids() {
         let body: serde_json::Value = serde_json::from_slice(&last.body).expect("body");
         assert_eq!(body["model"], expected);
     }
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn d246_messages_thinking_budget_selects_the_member_on_execute_and_count() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [
+                {"id": "model-4-alpha-low"},
+                {"id": "model-4-alpha-medium"},
+                {"id": "model-4-alpha-high"}
+            ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    messages_ok(&server, "model-4-alpha-high", 2).await;
+    messages_ok(&server, "model-4-alpha-low", 1).await;
+    count_ok(&server, "model-4-alpha-high", 1).await;
+    let config = hofund_config::load(&format!(
+        "[[providers]]\nid = \"relay\"\nprotocol = \"anthropic-messages\"\nbase_url = \"{}\"\napi_key = \"test-key\"\n[[routes]]\nmodel = \"model-4-alpha\"\nupstreams = [\"relay\"]\n",
+        server.uri()
+    ))
+    .expect("config");
+    let host = super::ModelsHost::new(
+        std::time::Duration::from_secs(2),
+        std::time::Duration::from_secs(2),
+    );
+    let (_dir, snapshot, _) = relay_snapshot(&config, &host).await;
+    let budget = thinking_budget("enabled", 30_000);
+    let decoded = messages_body("model-4-alpha", &budget);
+    assert_eq!(decoded.params.effort, Some(Effort::Xhigh));
+    let routed = snapshot
+        .load()
+        .dispatch(&decoded, "anthropic-messages")
+        .await
+        .expect("dispatch");
+    assert_eq!(routed.upstream_model, "model-4-alpha-high");
+    let adaptive = messages_body("model-4-alpha", &thinking_budget("adaptive", 30_000));
+    let routed = snapshot
+        .load()
+        .dispatch(&adaptive, "anthropic-messages")
+        .await
+        .expect("adaptive dispatch");
+    assert_eq!(routed.upstream_model, "model-4-alpha-high");
+    let preferred = messages_body(
+        "model-4-alpha",
+        &format!(
+            r#"{},"output_config":{{"effort":"low"}}"#,
+            thinking_budget("enabled", 30_000)
+        ),
+    );
+    assert_eq!(preferred.params.effort, Some(Effort::Low));
+    let routed = snapshot
+        .load()
+        .dispatch(&preferred, "anthropic-messages")
+        .await
+        .expect("output_config wins");
+    assert_eq!(routed.upstream_model, "model-4-alpha-low");
+    let counted = snapshot
+        .load()
+        .count(&decoded, "anthropic-messages")
+        .await
+        .expect("count");
+    assert_eq!(counted.tokens, 7);
+    assert!(!counted.estimated);
+    let calls = server.received_requests().await.expect("requests");
+    let posted = calls
+        .iter()
+        .filter(|call| {
+            call.url.path() == "/v1/messages" || call.url.path() == "/v1/messages/count_tokens"
+        })
+        .map(|call| serde_json::from_slice::<serde_json::Value>(&call.body).expect("body"))
+        .collect::<Vec<_>>();
+    assert_eq!(posted.len(), 4);
+    assert_eq!(posted[0]["model"], "model-4-alpha-high");
+    assert_eq!(posted[0]["thinking"]["type"], "enabled");
+    assert_eq!(posted[0]["thinking"]["budget_tokens"], 30_000);
+    assert!(posted[0].get("output_config").is_none());
+    assert_eq!(posted[1]["model"], "model-4-alpha-high");
+    assert_eq!(posted[1]["thinking"]["type"], "adaptive");
+    assert_eq!(posted[1]["thinking"]["budget_tokens"], 30_000);
+    assert_eq!(posted[2]["model"], "model-4-alpha-low");
+    assert_eq!(posted[2]["thinking"]["budget_tokens"], 30_000);
+    assert_eq!(posted[2]["output_config"]["effort"], "low");
+    assert_eq!(posted[3]["model"], "model-4-alpha-high");
+    assert_eq!(posted[3]["thinking"]["type"], "enabled");
+    assert_eq!(posted[3]["thinking"]["budget_tokens"], 30_000);
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn d246_refreshed_source_list_drives_the_next_dispatch_and_count() {
+    let server = MockServer::start().await;
+    let lists = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(move |_request: &WireRequest| {
+            let hit = lists.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let data = if hit == 0 {
+                serde_json::json!({
+                    "data": [{"id": "model-4-alpha-low"}, {"id": "model-4-alpha-medium"}]
+                })
+            } else {
+                serde_json::json!({
+                    "data": [{"id": "model-4-alpha-low"}, {"id": "model-4-alpha-xhigh"}]
+                })
+            };
+            ResponseTemplate::new(200).set_body_json(data)
+        })
+        .mount(&server)
+        .await;
+    messages_ok(&server, "model-4-alpha-medium", 1).await;
+    messages_ok(&server, "model-4-alpha-low", 1).await;
+    count_ok(&server, "model-4-alpha-low", 1).await;
+    let config = hofund_config::load(&format!(
+        "[[providers]]\nid = \"relay\"\nprotocol = \"anthropic-messages\"\nbase_url = \"{}\"\napi_key = \"test-key\"\n[[routes]]\nmodel = \"model-4-alpha\"\nupstreams = [\"relay\"]\n",
+        server.uri()
+    ))
+    .expect("config");
+    let host = super::ModelsHost::new(
+        std::time::Duration::from_secs(2),
+        std::time::Duration::from_secs(2),
+    );
+    let (dir, snapshot, _) = relay_snapshot(&config, &host).await;
+    let plain = messages_body("model-4-alpha", "");
+    let first = snapshot
+        .load()
+        .dispatch(&plain, "anthropic-messages")
+        .await
+        .expect("first dispatch");
+    assert_eq!(first.upstream_model, "model-4-alpha-medium");
+    host.list_models(&config, &dir.path().join("hofund.toml"), "relay")
+        .await
+        .expect("second list");
+    assert_eq!(host.cached("relay").models[0].efforts(), ["low", "xhigh"]);
+    let second = snapshot
+        .load()
+        .dispatch(&plain, "anthropic-messages")
+        .await
+        .expect("dispatch after refresh");
+    assert_eq!(second.upstream_model, "model-4-alpha-low");
+    let counted = snapshot
+        .load()
+        .count(&plain, "anthropic-messages")
+        .await
+        .expect("count after refresh");
+    assert_eq!(counted.tokens, 7);
+    assert!(!counted.estimated);
+    let calls = server.received_requests().await.expect("requests");
+    let posted = calls
+        .iter()
+        .filter(|call| call.method.as_str() == "POST")
+        .map(|call| {
+            serde_json::from_slice::<serde_json::Value>(&call.body)
+                .expect("body")
+                .get("model")
+                .and_then(|model| model.as_str())
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        posted,
+        [
+            "model-4-alpha-medium",
+            "model-4-alpha-low",
+            "model-4-alpha-low"
+        ]
+    );
     server.verify().await;
 }
 

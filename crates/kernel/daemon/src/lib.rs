@@ -1285,6 +1285,7 @@ fn expand_route(
                     rank: 0,
                     wire_model: upstream.model.clone(),
                     effort_models: None,
+                    effort_live: None,
                     max_output_tokens: upstream.max_output_tokens,
                     context_window: None,
                     routing: root.routing.clone(),
@@ -1444,6 +1445,9 @@ fn push_provider(
             rank,
             wire_model: model.clone(),
             effort_models: effort_models.clone(),
+            effort_live: context
+                .models_host
+                .map(|host| host.effort_live(id, model_name)),
             max_output_tokens: max_output_tokens.or(provider_cap),
             context_window: hop_window(listed.as_ref()),
             routing: root.routing.clone(),

@@ -385,13 +385,43 @@ fn messages_effort(object: &Object) -> Option<Effort> {
     {
         return Some(effort);
     }
-    let disabled = object
-        .get("thinking")
-        .and_then(Value::as_object)
+    let thinking = object.get("thinking").and_then(Value::as_object);
+    let kind = thinking
         .and_then(|thinking| thinking.get("type"))
-        .and_then(Value::as_str)
-        == Some("disabled");
-    disabled.then_some(Effort::None)
+        .and_then(Value::as_str);
+    if kind == Some("disabled") {
+        return Some(Effort::None);
+    }
+    // An enabled or adaptive budget selects the member id. The object itself
+    // stays in the extension bag, so encode writes it back unchanged.
+    if matches!(kind, Some("enabled" | "adaptive")) {
+        let budget = thinking
+            .and_then(|thinking| thinking.get("budget_tokens"))
+            .and_then(json_i64)
+            .unwrap_or(0);
+        return effort_of_budget(budget);
+    }
+    None
+}
+
+fn json_i64(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|number| i64::try_from(number).ok()))
+}
+
+/// Maps a Messages thinking budget to a level.
+///
+/// The cuts are 4096, 12000, and 24000. Zero or a missing budget does not
+/// request a level. A negative budget is not a level either.
+fn effort_of_budget(budget: i64) -> Option<Effort> {
+    match budget {
+        ..=0 => None,
+        1..=4096 => Some(Effort::Low),
+        4097..=12000 => Some(Effort::Medium),
+        12001..=24000 => Some(Effort::High),
+        _ => Some(Effort::Xhigh),
+    }
 }
 
 fn write_messages_effort(object: &mut Object, request: &Request) {
