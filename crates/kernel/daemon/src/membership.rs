@@ -80,6 +80,7 @@ pub(crate) struct Table {
     affinity: hofund_router::affinity::AffinityState,
     overflow: hofund_router::OverflowMemory,
     api_fitness: hofund_router::ApiFitness,
+    void_rooms: hofund_router::VoidRooms,
     measurements: Mutex<Option<Arc<dyn Measurements>>>,
     model_catalog: Mutex<Option<Arc<hofund_model_catalog::ModelCatalog>>>,
     spend_cap_gate: Mutex<Option<Arc<crate::spend_caps::SpendCapGate>>>,
@@ -93,6 +94,7 @@ struct HopSpec {
     rank: usize,
     wire_model: Option<String>,
     max_output_tokens: Option<u64>,
+    catalog_output_tokens: Option<u64>,
     context_window: Option<u64>,
     routing: String,
     sink: bool,
@@ -314,11 +316,13 @@ fn build_table(
 ) -> Result<Arc<Table>, DaemonError> {
     let strategies = Arc::new(StrategyState::with_builtins());
     let api_fitness = hofund_router::ApiFitness::default();
+    let void_rooms = hofund_router::VoidRooms::default();
     let snapshot = Router::from_hops(BTreeMap::new(), policy.clone())
         .with_strategies(Arc::clone(&strategies))
         .with_cooldowns(Arc::clone(&cooldowns))
         .with_affinity(affinity.clone())
-        .with_api_fitness(api_fitness.clone());
+        .with_api_fitness(api_fitness.clone())
+        .with_void_rooms(void_rooms.clone());
     let snapshot = Snapshot::new(match (&quotas, &credits_modes) {
         (Some(quotas), Some(modes)) => snapshot
             .with_quotas(Arc::clone(quotas))
@@ -338,6 +342,7 @@ fn build_table(
         affinity,
         overflow: hofund_router::OverflowMemory::in_memory(),
         api_fitness,
+        void_rooms,
         measurements: Mutex::new(None),
         model_catalog: Mutex::new(None),
         spend_cap_gate: Mutex::new(None),
@@ -416,6 +421,7 @@ fn build_specs(
                 rank: hop.rank,
                 wire_model: hop.wire_model,
                 max_output_tokens: hop.max_output_tokens,
+                catalog_output_tokens: hop.catalog_output_tokens,
                 context_window: hop.context_window,
                 routing: hop.routing,
                 sink: hop.sink,
@@ -454,6 +460,7 @@ pub(crate) struct PlannedHop {
     /// Current source-list family, when this hop was planned with a model host.
     pub effort_live: Option<crate::models::EffortLive>,
     pub max_output_tokens: Option<u64>,
+    pub catalog_output_tokens: Option<u64>,
     /// Input context window of the hop's model, from the provider's model
     /// list, when it is known.
     pub context_window: Option<u64>,
@@ -524,6 +531,7 @@ impl Table {
                                 member: member.clone() as Arc<dyn Member>,
                                 wire_model: spec.wire_model.clone(),
                                 max_output_tokens: spec.max_output_tokens,
+                                catalog_output_tokens: spec.catalog_output_tokens,
                                 context_window: spec.context_window,
                                 patience: member.patience,
                                 weight: spec.weight,
@@ -576,7 +584,8 @@ impl Table {
             .with_cooldowns(Arc::clone(&self.cooldowns))
             .with_affinity(self.affinity.clone())
             .with_overflow_memory(self.overflow.clone())
-            .with_api_fitness(self.api_fitness.clone());
+            .with_api_fitness(self.api_fitness.clone())
+            .with_void_rooms(self.void_rooms.clone());
         if let Some(quotas) = &self.quotas {
             router = router.with_quotas(Arc::clone(quotas));
         }
@@ -1723,6 +1732,7 @@ mod tests {
                 effort_models: None,
                 effort_live: None,
                 max_output_tokens: None,
+                catalog_output_tokens: None,
                 context_window: None,
                 routing: "smart".to_owned(),
                 sink: false,
@@ -1836,6 +1846,7 @@ mod tests {
                 effort_models: None,
                 effort_live: None,
                 max_output_tokens: None,
+                catalog_output_tokens: None,
                 context_window: None,
                 routing: "smart".to_owned(),
                 sink: false,
@@ -1940,6 +1951,7 @@ mod tests {
                 effort_models: None,
                 effort_live: None,
                 max_output_tokens: None,
+                catalog_output_tokens: None,
                 context_window: None,
                 routing: "smart".to_owned(),
                 sink: false,
@@ -2043,6 +2055,7 @@ mod tests {
                 effort_models: None,
                 effort_live: None,
                 max_output_tokens: None,
+                catalog_output_tokens: None,
                 context_window: None,
                 routing: "smart".to_owned(),
                 sink: false,
@@ -2118,6 +2131,7 @@ mod tests {
                     effort_models: None,
                     effort_live: None,
                     max_output_tokens: None,
+                    catalog_output_tokens: None,
                     context_window: None,
                     routing: "smart".to_owned(),
                     sink: false,
@@ -2140,6 +2154,7 @@ mod tests {
                     effort_models: None,
                     effort_live: None,
                     max_output_tokens: None,
+                    catalog_output_tokens: None,
                     context_window: None,
                     routing: "smart".to_owned(),
                     sink: false,
@@ -2196,6 +2211,7 @@ mod tests {
                     effort_models: None,
                     effort_live: None,
                     max_output_tokens: None,
+                    catalog_output_tokens: None,
                     context_window: None,
                     routing: "smart".to_owned(),
                     sink: false,

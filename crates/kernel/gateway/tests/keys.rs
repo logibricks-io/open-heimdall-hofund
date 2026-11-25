@@ -187,6 +187,7 @@ fn fixture() -> Fixture {
         member: member(id, account),
         wire_model: Some("wire".to_owned()),
         max_output_tokens: None,
+        catalog_output_tokens: None,
         context_window: None,
         patience: None,
         weight: 1,

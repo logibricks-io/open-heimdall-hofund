@@ -451,6 +451,7 @@ pub(crate) fn expand(
                     effort_models: None,
                     effort_live: None,
                     max_output_tokens: hop.max_output_tokens,
+                    catalog_output_tokens: hop.catalog_output_tokens,
                     context_window: hop.context_window,
                     routing: hop.routing.clone(),
                     sink: hop.sink,
