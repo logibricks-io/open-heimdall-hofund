@@ -576,6 +576,18 @@ async fn d247_failed_stream_is_502_and_the_next_call_is_not_pinned() {
     unfinished_does_not_pin(FAILED_STREAM, "FAILSEAL").await;
 }
 
+const MALFORMED_AFTER_VALID: &[u8] = concat!(
+    "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"compaction\",\"encrypted_content\":\"LATESEAL\"}}\n\n",
+    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"output\":[{\"type\":\"compaction\",\"encrypted_content\":\"LATESEAL\"}]}}\n\n",
+    "data: {\"type\":\"response.completed\",\"response\":null}\n\n",
+)
+.as_bytes();
+
+#[tokio::test]
+async fn d247_a_later_malformed_terminal_is_502_and_the_next_call_is_not_pinned() {
+    unfinished_does_not_pin(MALFORMED_AFTER_VALID, "LATESEAL").await;
+}
+
 async fn unfinished_does_not_pin(upstream: &'static [u8], seal: &str) {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let preferred = member(
