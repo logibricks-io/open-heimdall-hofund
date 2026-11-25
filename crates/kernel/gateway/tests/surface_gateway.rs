@@ -384,3 +384,49 @@ async fn d84_dropping_a_marked_in_process_call_records_stopped_waiting() {
     assert_eq!(rows[0].status, "504");
     assert_eq!(rows[0].outcome, hofund_usage::OUTCOME_STOPPED_WAITING);
 }
+
+#[tokio::test(start_paused = true)]
+async fn d253_dropping_an_in_flight_call_records_client_closed() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
+    let hits = Arc::new(AtomicUsize::new(0));
+    let member: Arc<dyn Member> = Arc::new(Pending {
+        member_id: MemberId::from_preset(
+            PresetId::try_from("pending").expect("preset"),
+            MemberKey::from_static("row"),
+        ),
+        hits: Arc::clone(&hits),
+    });
+    let routes = BTreeMap::from([("demo".to_owned(), vec![member])]);
+    let codecs = HashMap::from([(
+        "/v1/chat/completions".to_owned(),
+        Arc::new(OpenAiChat) as Arc<dyn Codec>,
+    )]);
+    let app = Gateway::new(
+        Snapshot::new(Router::new(routes, FailoverPolicy::default())),
+        "secret".to_owned(),
+        codecs,
+        Arc::clone(&usage),
+    )
+    .into_router();
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("authorization", "Bearer secret")
+        .header("content-type", "application/json")
+        .body(Body::from(CHAT))
+        .expect("request");
+    let mut call = Box::pin(app.oneshot(request));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut call)
+            .await
+            .is_err()
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    drop(call);
+
+    let rows = usage.rows().expect("usage rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].model, "demo");
+    assert_eq!(rows[0].status, "499");
+}

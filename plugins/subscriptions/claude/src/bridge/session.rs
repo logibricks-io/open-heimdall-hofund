@@ -8,12 +8,16 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 use hofund_plugin_api::{AccountId, ContentPart, Message, Request, Role};
 use regex::Regex;
-use ring::digest::{Context, SHA256};
+use ring::digest::{Context as DigestContext, SHA256};
 
 use super::park::Bridge;
 
@@ -49,10 +53,13 @@ pub(crate) struct SavedSession {
     pub key: String,
     /// When the run first went idle.
     pub at: Instant,
+    /// The shelf entry is a transcript copy this bridge wrote.
+    pub copy: bool,
 }
 
 /// Per-run resume/idle bookkeeping, keyed by the same id as a parked run.
 #[derive(Debug, Default)]
+#[allow(clippy::struct_excessive_bools)]
 struct RunMeta {
     owner: String,
     idle_key: Option<String>,
@@ -74,6 +81,172 @@ struct RunMeta {
     room: Option<super::room::RoomGuard>,
     /// Sign-in version captured when the run started.
     login_version: Option<u64>,
+    /// Id of the last reply that reached `end_turn`.
+    last_msg: Option<String>,
+    /// Turn key the run was waiting at when it took the current turn.
+    back_key: Option<String>,
+    /// Reply id the current turn is cut back to.
+    back_msg: Option<String>,
+    /// Length of the saved session this run was started from.
+    from_len: u64,
+    /// Key of that saved session.
+    from_key: Option<String>,
+    /// The request asked for the client's own cache marks.
+    client_marks: bool,
+    /// The account was handed to another run.
+    handed: bool,
+    /// The run records a session file. WSL runs do not.
+    persists: bool,
+    /// A turn is in flight and the run is not waiting idle.
+    answering: bool,
+}
+
+/// A run that ended while it was still answering a turn.
+#[derive(Debug, Clone)]
+struct EndedRun {
+    owner: String,
+    conv_key: Option<String>,
+    told: String,
+    session_id: String,
+    session_paths: Vec<PathBuf>,
+    back_key: Option<String>,
+    back_msg: Option<String>,
+    client_marks: bool,
+    persists: bool,
+}
+
+#[derive(Debug)]
+struct CancelSlot {
+    id: u64,
+    key: String,
+    gone: Arc<AtomicBool>,
+    finished: bool,
+}
+
+/// Wakes tasks waiting on a cancellation that is still cutting.
+#[derive(Debug, Default)]
+struct TurnWake {
+    generation: AtomicU64,
+    wakers: Mutex<Vec<Waker>>,
+}
+
+impl TurnWake {
+    fn notify(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        let wakers = std::mem::take(
+            &mut *self
+                .wakers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        for waker in wakers {
+            waker.wake();
+        }
+    }
+
+    fn wait(&self) -> TurnWait<'_> {
+        TurnWait {
+            wake: self,
+            seen: self.generation.load(Ordering::Acquire),
+        }
+    }
+}
+
+struct TurnWait<'a> {
+    wake: &'a TurnWake,
+    seen: u64,
+}
+
+impl std::future::Future for TurnWait<'_> {
+    type Output = ();
+
+    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if self.wake.generation.load(Ordering::Acquire) != self.seen {
+            return Poll::Ready(());
+        }
+        self.wake
+            .wakers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(cx.waker().clone());
+        if self.wake.generation.load(Ordering::Acquire) != self.seen {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+/// Registration of one in-flight turn, released when the turn finishes.
+#[derive(Debug)]
+pub(crate) struct CancelTicket {
+    id: u64,
+}
+
+/// Pauses a cut so a test can observe a cancellation still in progress.
+#[derive(Debug)]
+pub(crate) struct CutGate {
+    entered: Mutex<bool>,
+    entered_cv: Condvar,
+    release: Mutex<bool>,
+    release_cv: Condvar,
+}
+
+impl CutGate {
+    /// A gate that has not been entered.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn new() -> Self {
+        Self {
+            entered: Mutex::new(false),
+            entered_cv: Condvar::new(),
+            release: Mutex::new(false),
+            release_cv: Condvar::new(),
+        }
+    }
+
+    fn pause(&self) {
+        *self
+            .entered
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        self.entered_cv.notify_all();
+        let mut release = self
+            .release
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while !*release {
+            release = self
+                .release_cv
+                .wait(release)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+
+    /// Blocks until a cut reaches the gate.
+    #[cfg(test)]
+    pub(crate) fn wait_entered(&self) {
+        let mut entered = self
+            .entered
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while !*entered {
+            entered = self
+                .entered_cv
+                .wait(entered)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+
+    /// Lets the paused cut finish.
+    #[cfg(test)]
+    pub(crate) fn release(&self) {
+        *self
+            .release
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        self.release_cv.notify_all();
+    }
 }
 
 /// Idle map, shelf, and claim state for one [`Bridge`].
@@ -82,6 +255,21 @@ pub(crate) struct Sessions {
     idle: Mutex<HashMap<String, u64>>,
     shelf: Mutex<HashMap<String, SavedSession>>,
     meta: Mutex<HashMap<u64, RunMeta>>,
+    cancels: Mutex<Vec<CancelSlot>>,
+    cancel_cv: Condvar,
+    wake: TurnWake,
+    #[cfg(test)]
+    waiters: AtomicUsize,
+    #[cfg(test)]
+    waiter_cv: Condvar,
+    #[cfg(test)]
+    waiter_lock: Mutex<()>,
+    next_cancel: AtomicU64,
+    stopping: AtomicBool,
+    ended: Mutex<Vec<EndedRun>>,
+    cut_gate: Mutex<Option<Arc<CutGate>>>,
+    #[cfg(test)]
+    watch_gate: Mutex<Option<Arc<CutGate>>>,
 }
 
 impl Sessions {
@@ -103,6 +291,42 @@ impl Sessions {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    fn lock_cancels(&self) -> std::sync::MutexGuard<'_, Vec<CancelSlot>> {
+        self.cancels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn lock_ended(&self) -> std::sync::MutexGuard<'_, Vec<EndedRun>> {
+        self.ended
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn wake_cancels(&self) {
+        {
+            let _slots = self.lock_cancels();
+            self.cancel_cv.notify_all();
+        }
+        self.wake.notify();
+    }
+
+    fn insert_cancel(
+        &self,
+        key: &str,
+        gone: &Arc<AtomicBool>,
+        slots: &mut Vec<CancelSlot>,
+    ) -> CancelTicket {
+        let id = self.next_cancel.fetch_add(1, Ordering::AcqRel) + 1;
+        slots.push(CancelSlot {
+            id,
+            key: key.to_owned(),
+            gone: Arc::clone(gone),
+            finished: false,
+        });
+        CancelTicket { id }
+    }
+
     fn expire(&self, now: Instant) {
         let stale: Vec<(String, u64)> = self
             .lock_idle()
@@ -121,8 +345,16 @@ impl Sessions {
                 meta.room = None;
             }
         }
-        self.lock_shelf()
-            .retain(|_, saved| now.duration_since(saved.at) <= IDLE_LONGEST);
+        let stale_copies: Vec<SavedSession> = self
+            .lock_shelf()
+            .extract_if(|_, saved| now.duration_since(saved.at) > IDLE_LONGEST)
+            .map(|(_, saved)| saved)
+            .collect();
+        for saved in stale_copies {
+            if saved.copy {
+                super::cut::delete_copy(&saved.sessions, &saved.session);
+            }
+        }
     }
 }
 
@@ -138,6 +370,7 @@ impl Bridge {
         meta.entry(run_id).or_insert_with(|| RunMeta {
             owner: owner.as_str().to_owned(),
             tools: tool_names,
+            persists: true,
             ..RunMeta::default()
         });
     }
@@ -188,7 +421,9 @@ impl Bridge {
     pub(crate) fn set_session(&self, run_id: u64, session: impl Into<String>, paths: Vec<PathBuf>) {
         if let Some(meta) = self.sessions.lock_meta().get_mut(&run_id) {
             meta.session_id = Some(session.into());
-            meta.session_paths = paths;
+            if !paths.is_empty() || meta.session_paths.is_empty() {
+                meta.session_paths = paths;
+            }
         }
     }
 
@@ -239,28 +474,18 @@ impl Bridge {
     }
 
     /// Looks up an idle run for this request's next turn (stage C).
+    ///
+    /// An exact key is tried first. On a miss, a local `No response requested.`
+    /// reply is passed over when a run waits at the upstream's last reply.
     pub(crate) fn resume(&self, request: &Request, owner: &AccountId) -> Option<Resume> {
         self.sessions.expire(Instant::now());
-        let (key, since) = next_turn(owner.as_str(), request)?;
-        let run_id = {
-            let mut idle = self.sessions.lock_idle();
-            idle.remove(&key)
-        }?;
+        if let Some((key, since)) = next_turn(owner.as_str(), request)
+            && let Some(found) = self.take_idle(owner, &key, since)
         {
-            let mut meta = self.sessions.lock_meta();
-            let run = meta.get_mut(&run_id)?;
-            if run.closed || run.owner != owner.as_str() {
-                return None;
-            }
-            run.idle_key = None;
-            run.idle_at = None;
-            run.segment = true;
-            run.resuming = true;
+            return Some(found);
         }
-        Some(Resume {
-            run_id,
-            since: since.to_vec(),
-        })
+        let (key, since) = self.waiting_prefix(owner.as_str(), request)?;
+        self.take_idle(owner, &key, since)
     }
 
     /// Marks a turn finished: park on tools, abort one-offs and failures,
@@ -303,6 +528,10 @@ impl Bridge {
         let key = turn_key(owner.as_str(), request, &msgs);
         let keys = conversation_keys(owner.as_str(), &msgs);
         let conv = keys.last().cloned().unwrap_or_default();
+        if self.is_handed(run_id) {
+            self.abort_session(run_id);
+            return;
+        }
         self.keep_idle(run_id, owner, key, conv);
     }
 
@@ -327,19 +556,22 @@ impl Bridge {
     }
 
     /// Takes a shelved session for this request's next turn, if one exists.
+    ///
+    /// An exact key is tried first. On a miss, a local reply is passed over
+    /// when a session is shelved at the upstream's last reply.
     pub(crate) fn unshelve(
         &self,
         request: &Request,
         owner: &AccountId,
     ) -> Option<(SavedSession, Vec<Message>)> {
         self.sessions.expire(Instant::now());
-        let (key, since) = next_turn(owner.as_str(), request)?;
-        let saved = self.sessions.lock_shelf().remove(&key)?;
-        if saved.owner != owner.as_str() {
-            self.sessions.lock_shelf().insert(key, saved);
-            return None;
+        if let Some((key, since)) = next_turn(owner.as_str(), request)
+            && let Some(found) = self.take_shelf(owner, &key, since)
+        {
+            return Some(found);
         }
-        Some((saved, since.to_vec()))
+        let (key, since) = self.waiting_prefix(owner.as_str(), request)?;
+        self.take_shelf(owner, &key, since)
     }
 
     /// Lets go of idle runs and shelved sessions at an earlier point of this
@@ -379,9 +611,19 @@ impl Bridge {
                 drop_ids.push(id);
             }
         }
-        self.sessions.lock_shelf().retain(|_, saved| {
-            !(saved.owner == owner.as_str() && keys.iter().any(|k| k == &saved.conv))
-        });
+        let dropped: Vec<SavedSession> = self
+            .sessions
+            .lock_shelf()
+            .extract_if(|_, saved| {
+                saved.owner == owner.as_str() && keys.iter().any(|key| key == &saved.conv)
+            })
+            .map(|(_, saved)| saved)
+            .collect();
+        for saved in dropped {
+            if saved.copy {
+                super::cut::delete_copy(&saved.sessions, &saved.session);
+            }
+        }
         for id in drop_ids {
             self.abort_session(id);
         }
@@ -440,6 +682,7 @@ impl Bridge {
                 run.idle_at = Some(Instant::now());
                 run.segment = false;
                 run.resuming = false;
+                run.answering = false;
                 if !conv.is_empty() {
                     run.conv_key = Some(conv);
                 }
@@ -481,19 +724,7 @@ impl Bridge {
         let Some(saved) = self.saved_from_run(run_id) else {
             return;
         };
-        let mut shelf = self.sessions.lock_shelf();
-        shelf.insert(saved.key.clone(), saved);
-        while shelf.len() > SHELF_MOST {
-            if let Some(old_key) = shelf
-                .iter()
-                .min_by_key(|(_, s)| s.at)
-                .map(|(k, _)| k.clone())
-            {
-                shelf.remove(&old_key);
-            } else {
-                break;
-            }
-        }
+        self.insert_shelf(saved);
     }
 
     fn saved_from_run(&self, run_id: u64) -> Option<SavedSession> {
@@ -510,12 +741,17 @@ impl Bridge {
             conv: run.conv_key.clone().unwrap_or_default(),
             key,
             at: run.idle_at.unwrap_or_else(Instant::now),
+            copy: false,
         })
     }
 
     fn abort_session(&self, run_id: u64) {
         if let Some(mut run) = self.sessions.lock_meta().remove(&run_id) {
+            if run.answering && run.persists && !run.client_marks {
+                self.remember_ended(&run);
+            }
             run.closed = true;
+            run.answering = false;
             if let Some(key) = run.idle_key.take() {
                 self.sessions.lock_idle().remove(&key);
             }
@@ -523,6 +759,705 @@ impl Bridge {
         }
         self.abort(run_id);
     }
+
+    fn take_idle(&self, owner: &AccountId, key: &str, since: &[Message]) -> Option<Resume> {
+        let run_id = self.sessions.lock_idle().remove(key)?;
+        let mut meta = self.sessions.lock_meta();
+        let run = meta.get_mut(&run_id)?;
+        if run.closed || run.owner != owner.as_str() {
+            return None;
+        }
+        run.idle_key = None;
+        run.idle_at = None;
+        run.segment = true;
+        run.resuming = true;
+        run.answering = true;
+        run.back_key = Some(key.to_owned());
+        run.back_msg = run.last_msg.clone();
+        run.from_len = 0;
+        run.from_key = None;
+        Some(Resume {
+            run_id,
+            since: since.to_vec(),
+        })
+    }
+
+    fn take_shelf(
+        &self,
+        owner: &AccountId,
+        key: &str,
+        since: &[Message],
+    ) -> Option<(SavedSession, Vec<Message>)> {
+        let saved = self.sessions.lock_shelf().remove(key)?;
+        if saved.owner != owner.as_str() {
+            self.sessions.lock_shelf().insert(key.to_owned(), saved);
+            return None;
+        }
+        Some((saved, since.to_vec()))
+    }
+
+    fn waiting_prefix<'a>(
+        &self,
+        owner: &str,
+        request: &'a Request,
+    ) -> Option<(String, &'a [Message])> {
+        let (key, since) = super::cut::past_local_reply(owner, request)?;
+        let waiting = self.sessions.lock_idle().contains_key(&key)
+            || self.sessions.lock_shelf().contains_key(&key);
+        waiting.then_some((key, since))
+    }
+
+    /// Records the id of a reply that reached `end_turn`.
+    pub(crate) fn note_completed_reply(&self, run_id: u64, message_id: &str) {
+        if message_id.is_empty() {
+            return;
+        }
+        if let Some(run) = self.sessions.lock_meta().get_mut(&run_id) {
+            run.last_msg = Some(message_id.to_owned());
+        }
+    }
+
+    /// Marks the turn in flight and whether this request carries client cache marks.
+    pub(crate) fn begin_turn(&self, run_id: u64, request: &Request, persists: Option<bool>) {
+        if let Some(run) = self.sessions.lock_meta().get_mut(&run_id) {
+            run.answering = true;
+            run.client_marks = super::cut::client_cache_marks(request);
+            if let Some(persists) = persists {
+                run.persists = persists;
+            }
+        }
+    }
+
+    /// Marks every run on an account moved into the agent's own sign-in.
+    pub(crate) fn account_handed_over(&self, owner: &AccountId) {
+        let mut idle = Vec::new();
+        {
+            let mut meta = self.sessions.lock_meta();
+            for (id, run) in meta.iter_mut() {
+                if run.owner != owner.as_str() {
+                    continue;
+                }
+                run.handed = true;
+                if let Some(key) = run.idle_key.take() {
+                    idle.push((key, *id));
+                }
+            }
+        }
+        for (key, run_id) in idle {
+            self.sessions.lock_idle().remove(&key);
+            self.abort_session(run_id);
+        }
+    }
+
+    fn is_handed(&self, run_id: u64) -> bool {
+        self.sessions
+            .lock_meta()
+            .get(&run_id)
+            .is_some_and(|run| run.handed)
+    }
+
+    /// The gateway is stopping. A cancel still cutting keeps no session.
+    pub(crate) fn mark_stopping(&self) {
+        self.sessions.stopping.store(true, Ordering::Release);
+    }
+
+    /// Records that this run was started from `saved` and is serving `since_len` messages.
+    pub(crate) fn note_started_from(
+        &self,
+        run_id: u64,
+        saved: &SavedSession,
+        request: &Request,
+        since_len: usize,
+    ) {
+        let len = super::cut::session_len(&saved.sessions, &saved.session);
+        let back = next_turn(saved.owner.as_str(), request)
+            .filter(|(_, since)| since.len() == since_len)
+            .map(|(key, _)| key);
+        if let Some(run) = self.sessions.lock_meta().get_mut(&run_id) {
+            run.from_len = len;
+            run.from_key = Some(saved.key.clone());
+            run.back_key = back;
+            run.session_id = Some(saved.session.clone());
+            run.session_paths = saved.sessions.clone();
+            run.persists = true;
+            run.answering = true;
+        }
+    }
+
+    /// Holds a cut at [`CutGate`] when a test installed one.
+    #[cfg(test)]
+    pub(crate) fn install_cut_gate(&self, gate: Arc<CutGate>) {
+        *self
+            .sessions
+            .cut_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(gate);
+    }
+
+    /// Holds an async watch between its pending check and its first poll.
+    #[cfg(test)]
+    pub(crate) fn install_watch_gate(&self, gate: Arc<CutGate>) {
+        *self
+            .sessions
+            .watch_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(gate);
+    }
+
+    /// Wakes tasks and threads waiting on a cancellation.
+    #[cfg(test)]
+    pub(crate) fn wake_cancels(&self) {
+        self.sessions.wake_cancels();
+    }
+
+    /// The generation advanced by each cancel wake.
+    #[cfg(test)]
+    pub(crate) fn cancel_generation(&self) -> u64 {
+        self.sessions.wake.generation.load(Ordering::Acquire)
+    }
+
+    /// How many same-key watchers are blocked on a cancel.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn cancel_waiters(&self) -> usize {
+        self.sessions.waiters.load(Ordering::Acquire)
+    }
+
+    /// Blocks until at least one watcher is inside the cancel wait.
+    #[cfg(test)]
+    pub(crate) fn wait_for_cancel_waiter(&self) {
+        let mut guard = self
+            .sessions
+            .waiter_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while self.sessions.waiters.load(Ordering::Acquire) == 0 {
+            guard = self
+                .sessions
+                .waiter_cv
+                .wait(guard)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+
+    /// Registers `key` unless a same-key cancel is still cutting.
+    ///
+    /// An empty key is not registered. A client that has already gone is
+    /// [`super::cut::client_closed`].
+    pub(crate) async fn watch_cancel(
+        &self,
+        key: &str,
+        gone: Arc<AtomicBool>,
+    ) -> Result<Option<CancelTicket>, hofund_plugin_api::PluginError> {
+        if key.is_empty() {
+            return if gone.load(Ordering::Acquire) {
+                Err(super::cut::client_closed())
+            } else {
+                Ok(None)
+            };
+        }
+        loop {
+            if gone.load(Ordering::Acquire) {
+                return Err(super::cut::client_closed());
+            }
+            let wait = {
+                let mut slots = self.sessions.lock_cancels();
+                if Self::cancel_pending(&slots, key) {
+                    self.sessions.wake.wait()
+                } else {
+                    return Ok(Some(self.sessions.insert_cancel(key, &gone, &mut slots)));
+                }
+            };
+            #[cfg(test)]
+            self.pause_watch();
+            wait.await;
+        }
+    }
+
+    /// [`Self::watch_cancel`] for a thread that cannot await.
+    #[cfg(test)]
+    pub(crate) fn watch_cancel_blocking(
+        &self,
+        key: &str,
+        gone: Arc<AtomicBool>,
+    ) -> Result<Option<CancelTicket>, hofund_plugin_api::PluginError> {
+        if key.is_empty() {
+            return if gone.load(Ordering::Acquire) {
+                Err(super::cut::client_closed())
+            } else {
+                Ok(None)
+            };
+        }
+        loop {
+            if gone.load(Ordering::Acquire) {
+                return Err(super::cut::client_closed());
+            }
+            let mut slots = self.sessions.lock_cancels();
+            if Self::cancel_pending(&slots, key) {
+                self.sessions.waiters.fetch_add(1, Ordering::AcqRel);
+                self.sessions.waiter_cv.notify_all();
+                slots = self
+                    .sessions
+                    .cancel_cv
+                    .wait(slots)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                self.sessions.waiters.fetch_sub(1, Ordering::AcqRel);
+                drop(slots);
+                continue;
+            }
+            return Ok(Some(self.sessions.insert_cancel(key, &gone, &mut slots)));
+        }
+    }
+
+    /// Drops a registration so a same-key request can proceed.
+    pub(crate) fn finish_cancel(&self, ticket: CancelTicket) {
+        {
+            let mut slots = self.sessions.lock_cancels();
+            if let Some(slot) = slots.iter_mut().find(|slot| slot.id == ticket.id) {
+                slot.finished = true;
+            }
+            slots.retain(|slot| !slot.finished);
+        }
+        self.sessions.wake_cancels();
+    }
+
+    /// The client went away. Shelve a cut when the end is known, then let the run go.
+    pub(crate) fn client_cancelled(&self, run_id: u64, request: &Request, owner: &AccountId) {
+        let key = next_turn(owner.as_str(), request).map(|(key, _)| key);
+        self.keep_before_turn(run_id, request, owner, key.as_deref());
+        self.abort_session(run_id);
+    }
+
+    /// A limit refusal shelves the session cut before the turn the run took.
+    pub(crate) fn keep_for_reset(&self, run_id: u64, request: &Request, owner: &AccountId) {
+        self.keep_before_turn(run_id, request, owner, None);
+    }
+
+    /// A turn sent again while its run is busy answering it.
+    ///
+    /// The copy is cut before that turn. The messages are the turn the run
+    /// took, including a cancelled user message that sits before a local reply.
+    pub(crate) fn retry_branch(
+        &self,
+        request: &Request,
+        owner: &AccountId,
+    ) -> Option<(SavedSession, Vec<Message>)> {
+        if super::cut::client_cache_marks(request) {
+            return None;
+        }
+        let (_, _) = next_turn(owner.as_str(), request)?;
+        let want = history_key(&request.messages);
+        let keys = conversation_keys(owner.as_str(), &request.messages);
+        let mut best: Option<RetryCandidate> = None;
+        {
+            let meta = self.sessions.lock_meta();
+            for (id, run) in meta.iter() {
+                if !busy_for_retry(run, owner.as_str(), &keys, &want) {
+                    continue;
+                }
+                let Some(session) = run.session_id.clone().filter(|id| !id.is_empty()) else {
+                    continue;
+                };
+                if best.as_ref().is_none_or(|prev| *id >= prev.rank) {
+                    best = Some(RetryCandidate {
+                        rank: *id,
+                        session,
+                        paths: run.session_paths.clone(),
+                        back_key: run.back_key.clone(),
+                        back_msg: run.back_msg.clone(),
+                    });
+                }
+            }
+        }
+        if best.is_none() {
+            let ended = self.sessions.lock_ended();
+            for (index, run) in ended.iter().enumerate() {
+                if run.owner != owner.as_str()
+                    || run.client_marks
+                    || !run.persists
+                    || run.told != want
+                    || run
+                        .conv_key
+                        .as_ref()
+                        .is_none_or(|conv| !keys.iter().any(|key| key == conv))
+                    || run.back_msg.is_none()
+                {
+                    continue;
+                }
+                let rank = u64::try_from(index).unwrap_or(0);
+                if best.as_ref().is_none_or(|prev| rank >= prev.rank) {
+                    best = Some(RetryCandidate {
+                        rank,
+                        session: run.session_id.clone(),
+                        paths: run.session_paths.clone(),
+                        back_key: run.back_key.clone(),
+                        back_msg: run.back_msg.clone(),
+                    });
+                }
+            }
+        }
+        let RetryCandidate {
+            session,
+            paths,
+            back_key,
+            back_msg,
+            ..
+        } = best?;
+        let back_msg = back_msg?;
+        let bytes = super::cut::read_session(&paths, &session)?;
+        let end = super::cut::cut_after_reply(&bytes, &back_msg, false)?;
+        let cut = super::cut::write_cut(&paths, &session, end, &bytes)?;
+        let (key, since) =
+            super::cut::turn_from(owner.as_str(), request, back_key.as_deref().unwrap_or(""))?;
+        let conv = conversation_keys(
+            owner.as_str(),
+            &request.messages[..request.messages.len() - since.len()],
+        )
+        .pop()
+        .unwrap_or_default();
+        Some((
+            SavedSession {
+                session: cut,
+                sessions: paths,
+                owner: owner.as_str().to_owned(),
+                conv,
+                key,
+                at: Instant::now(),
+                copy: true,
+            },
+            since.to_vec(),
+        ))
+    }
+
+    fn keep_before_turn(
+        &self,
+        run_id: u64,
+        request: &Request,
+        owner: &AccountId,
+        cancelled_key: Option<&str>,
+    ) {
+        let Some((next_key, _)) = next_turn(owner.as_str(), request) else {
+            return;
+        };
+        if let Some(cancelled) = cancelled_key
+            && cancelled != next_key
+        {
+            return;
+        }
+        let snapshot = {
+            let meta = self.sessions.lock_meta();
+            let Some(run) = meta.get(&run_id) else {
+                return;
+            };
+            if run.closed
+                || run.client_marks
+                || !run.persists
+                || run.owner != owner.as_str()
+                || cancelled_key.is_some() && run.back_key.as_deref() != cancelled_key
+            {
+                return;
+            }
+            let session = run.session_id.clone().filter(|id| !id.is_empty());
+            TurnCut {
+                session,
+                paths: run.session_paths.clone(),
+                from_len: run.from_len,
+                from_key: run.from_key.clone(),
+                back_key: run.back_key.clone(),
+                back_msg: run.back_msg.clone(),
+            }
+        };
+        let Some(session) = snapshot.session else {
+            return;
+        };
+        if snapshot.paths.is_empty() {
+            return;
+        }
+        let bytes = super::cut::read_session(&snapshot.paths, &session);
+        let Some(bytes) = bytes else {
+            return;
+        };
+        let (end, took) = if snapshot.from_len > 0 {
+            let Some(end) = super::cut::cut_at_len(&bytes, snapshot.from_len) else {
+                return;
+            };
+            (end, snapshot.from_key.unwrap_or_default())
+        } else if cancelled_key.is_some() {
+            let Some(msg) = snapshot.back_msg.as_deref() else {
+                return;
+            };
+            let Some(end) = super::cut::cut_after_reply(&bytes, msg, true) else {
+                return;
+            };
+            (end, snapshot.back_key.unwrap_or_default())
+        } else if let Some(msg) = snapshot.back_msg.as_deref() {
+            let Some(end) = super::cut::cut_after_reply(&bytes, msg, false) else {
+                return;
+            };
+            (end, snapshot.back_key.unwrap_or_default())
+        } else {
+            return;
+        };
+        let Some(cut) = super::cut::write_cut(&snapshot.paths, &session, end, &bytes) else {
+            return;
+        };
+        self.pause_cut();
+        if cancelled_key.is_some()
+            && (self.is_handed(run_id) || self.sessions.stopping.load(Ordering::Acquire))
+        {
+            super::cut::delete_copy(&snapshot.paths, &cut);
+            return;
+        }
+        let Some((key, since)) = super::cut::turn_from(owner.as_str(), request, &took) else {
+            super::cut::delete_copy(&snapshot.paths, &cut);
+            return;
+        };
+        let conv = conversation_keys(
+            owner.as_str(),
+            &request.messages[..request.messages.len().saturating_sub(since.len())],
+        )
+        .pop()
+        .unwrap_or_default();
+        self.insert_shelf(SavedSession {
+            session: cut,
+            sessions: snapshot.paths,
+            owner: owner.as_str().to_owned(),
+            conv,
+            key,
+            at: Instant::now(),
+            copy: true,
+        });
+    }
+
+    fn pause_cut(&self) {
+        let gate = self
+            .sessions
+            .cut_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(gate) = gate {
+            gate.pause();
+        }
+    }
+
+    #[cfg(test)]
+    fn pause_watch(&self) {
+        let gate = self
+            .sessions
+            .watch_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(gate) = gate {
+            gate.pause();
+        }
+    }
+
+    fn insert_shelf(&self, saved: SavedSession) {
+        let mut shelf = self.sessions.lock_shelf();
+        if let Some(old) = shelf.insert(saved.key.clone(), saved)
+            && old.copy
+        {
+            super::cut::delete_copy(&old.sessions, &old.session);
+        }
+        while shelf.len() > SHELF_MOST {
+            let Some(old_key) = shelf
+                .iter()
+                .min_by_key(|(_, item)| item.at)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            if let Some(old) = shelf.remove(&old_key)
+                && old.copy
+            {
+                super::cut::delete_copy(&old.sessions, &old.session);
+            }
+        }
+    }
+
+    fn remember_ended(&self, run: &RunMeta) {
+        let Some(session_id) = run.session_id.clone().filter(|id| !id.is_empty()) else {
+            return;
+        };
+        if run.back_msg.is_none() && run.from_len == 0 {
+            return;
+        }
+        let mut ended = self.sessions.lock_ended();
+        ended.push(EndedRun {
+            owner: run.owner.clone(),
+            conv_key: run.conv_key.clone(),
+            told: run.told.clone(),
+            session_id,
+            session_paths: run.session_paths.clone(),
+            back_key: run.back_key.clone(),
+            back_msg: run.back_msg.clone(),
+            client_marks: run.client_marks,
+            persists: run.persists,
+        });
+        let overflow = ended.len().saturating_sub(16);
+        if overflow > 0 {
+            ended.drain(0..overflow);
+        }
+    }
+
+    fn cancel_pending(slots: &[CancelSlot], key: &str) -> bool {
+        slots
+            .iter()
+            .any(|slot| !slot.finished && slot.gone.load(Ordering::Acquire) && slot.key == key)
+    }
+}
+
+struct TurnCut {
+    session: Option<String>,
+    paths: Vec<PathBuf>,
+    from_len: u64,
+    from_key: Option<String>,
+    back_key: Option<String>,
+    back_msg: Option<String>,
+}
+
+/// Drops the in-flight turn when the client goes away before the reply is finished.
+pub(crate) struct CancelGuard {
+    bridge: Bridge,
+    request: Mutex<Request>,
+    owner: AccountId,
+    run_id: Mutex<Option<u64>>,
+    ticket: Mutex<Option<CancelTicket>>,
+    gone: Arc<AtomicBool>,
+    defused: AtomicBool,
+}
+
+impl CancelGuard {
+    /// Arms a guard for `request`. `ticket` is the registration from [`Bridge::watch_cancel`].
+    #[must_use]
+    pub(crate) fn arm(
+        bridge: Bridge,
+        request: Request,
+        owner: AccountId,
+        ticket: Option<CancelTicket>,
+        gone: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            bridge,
+            request: Mutex::new(request),
+            owner,
+            run_id: Mutex::new(None),
+            ticket: Mutex::new(ticket),
+            gone,
+            defused: AtomicBool::new(false),
+        }
+    }
+
+    /// Uses the request the run actually took and registers its current key.
+    pub(crate) async fn rewatch(
+        &self,
+        request: Request,
+    ) -> Result<(), hofund_plugin_api::PluginError> {
+        if let Some(ticket) = self
+            .ticket
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            self.bridge.finish_cancel(ticket);
+        }
+        *self
+            .request
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = request.clone();
+        if super::cut::client_cache_marks(&request) {
+            return Ok(());
+        }
+        let key = next_turn(self.owner.as_str(), &request)
+            .map(|(key, _)| key)
+            .unwrap_or_default();
+        let ticket = self
+            .bridge
+            .watch_cancel(&key, Arc::clone(&self.gone))
+            .await?;
+        *self
+            .ticket
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = ticket;
+        Ok(())
+    }
+
+    /// The run this request is now using.
+    pub(crate) fn bind(&self, run_id: u64) {
+        *self
+            .run_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(run_id);
+    }
+
+    /// The turn finished. A later drop does not shelve a cancel.
+    pub(crate) fn defuse(&self) {
+        self.defused.store(true, Ordering::Release);
+        if let Some(ticket) = self
+            .ticket
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            self.bridge.finish_cancel(ticket);
+        }
+    }
+}
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        if self.defused.load(Ordering::Acquire) {
+            return;
+        }
+        self.gone.store(true, Ordering::Release);
+        self.bridge.sessions.wake_cancels();
+        if let Some(run_id) = *self
+            .run_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            let request = self
+                .request
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            self.bridge.client_cancelled(run_id, &request, &self.owner);
+        }
+        if let Some(ticket) = self
+            .ticket
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            self.bridge.finish_cancel(ticket);
+        }
+    }
+}
+
+struct RetryCandidate {
+    rank: u64,
+    session: String,
+    paths: Vec<PathBuf>,
+    back_key: Option<String>,
+    back_msg: Option<String>,
+}
+
+fn busy_for_retry(run: &RunMeta, owner: &str, keys: &[String], want: &str) -> bool {
+    run.owner == owner
+        && !run.closed
+        && run.answering
+        && run.idle_key.is_none()
+        && run.persists
+        && !run.client_marks
+        && !run.handed
+        && run.told == want
+        && run.back_msg.is_some()
+        && run
+            .conv_key
+            .as_ref()
+            .is_some_and(|conv| keys.iter().any(|key| key == conv))
 }
 
 /// How a turn ended, for [`Bridge::ended`].
@@ -588,19 +1523,8 @@ pub(crate) fn next_turn<'a>(owner: &str, request: &'a Request) -> Option<(String
         j -= 1;
         if msgs[j].role == Role::Assistant && !calls_tool(&msgs[j]) {
             let since = &msgs[j + 1..];
-            let mut calls = std::collections::HashSet::new();
-            for message in since {
-                for part in &message.content {
-                    match part {
-                        ContentPart::ToolCall(call) => {
-                            calls.insert(call.id.clone());
-                        }
-                        ContentPart::ToolResult(result) if !calls.contains(&result.id) => {
-                            return None;
-                        }
-                        _ => {}
-                    }
-                }
+            if !super::cut::self_contained(since) {
+                return None;
             }
             return Some((turn_key(owner, request, &msgs[..=j]), since));
         }
@@ -830,13 +1754,13 @@ fn message_parts(msgs: &[Message]) -> Vec<Vec<WordPart>> {
 }
 
 struct Hasher {
-    context: Context,
+    context: DigestContext,
 }
 
 impl Hasher {
     fn new() -> Self {
         Self {
-            context: Context::new(&SHA256),
+            context: DigestContext::new(&SHA256),
         }
     }
 
@@ -1125,7 +2049,12 @@ mod tests {
             conv: "c".into(),
             key: "k".into(),
             at: std::time::Instant::now(),
+            copy: false,
         };
         assert!(format!("{saved:?}").contains("s"));
     }
 }
+
+#[cfg(test)]
+#[path = "d253_tests.rs"]
+mod d253_tests;

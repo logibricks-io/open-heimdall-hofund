@@ -605,4 +605,24 @@ mod tests {
         running.shutdown().await;
         assert_eq!(called.load(Ordering::SeqCst), 1);
     }
+
+    #[tokio::test]
+    async fn d253_before_drain_hook_runs_before_the_after_drain_hook() {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let before = Arc::clone(&calls);
+        let after = Arc::clone(&calls);
+        let running = serve(loopback(0))
+            .await
+            .with_before_drain(move || {
+                before.lock().expect("calls").push("before");
+            })
+            .with_after_drain(move || {
+                let after = Arc::clone(&after);
+                async move {
+                    after.lock().expect("calls").push("after");
+                }
+            });
+        running.shutdown().await;
+        assert_eq!(*calls.lock().expect("calls"), vec!["before", "after"]);
+    }
 }

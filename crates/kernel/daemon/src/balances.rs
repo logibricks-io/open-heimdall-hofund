@@ -501,6 +501,7 @@ fn window_info(window: &PlanWindow) -> WindowInfo {
             ..QuotaSpan::default()
         },
         blocking: window.blocking(),
+        trial_credits: false,
         scope_model: None,
         models: Vec::new(),
         excluded_models: Vec::new(),
@@ -533,6 +534,7 @@ fn wallet_info(wallet: &BalanceWallet) -> WindowInfo {
     WindowInfo {
         span,
         blocking: true,
+        trial_credits: false,
         scope_model: None,
         models: Vec::new(),
         excluded_models: Vec::new(),

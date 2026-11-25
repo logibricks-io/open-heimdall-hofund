@@ -107,14 +107,10 @@ pub(crate) fn usage_of(body: &[u8], now: SystemTime) -> Result<QuotaPoll, Plugin
             if status == "ACTIVE" && limit > 0.0 {
                 let used = num(t, "currentUsageWithPrecision");
                 let reset = num(t, "freeTrialExpiry");
-                out.push(credit_window(
-                    "Free trial",
-                    used,
-                    limit,
-                    secs_to_time(reset),
-                    false,
-                    None,
-                )?);
+                out.push(
+                    credit_window("Free trial", used, limit, secs_to_time(reset), false, None)?
+                        .with_trial_credits(used < limit),
+                );
             }
         }
         let mut bonuses = Vec::new();
@@ -213,7 +209,8 @@ fn bonus_window(
     let mut window = QuotaWindow::new(name, percent_of(used, limit), Some(PERCENT), None)?
         .with_display(count(used, limit))
         .with_provider_count(used, limit, CREDITS)
-        .with_blocking(false);
+        .with_blocking(false)
+        .with_trial_credits(left > 0.0);
     if expires > 0.0 && left > 0.0 {
         window = window.with_runs_out(secs_to_time(expires), Some(left));
     }
@@ -342,6 +339,26 @@ mod tests {
         assert_eq!(carried.len(), 2);
         assert!(!carried[0].blocking());
         assert!(!carried[1].blocking());
+    }
+
+    #[test]
+    fn d255_trial_and_bonus_marks_require_credits_left() {
+        let body = br#"{"usageBreakdownList":[{"currentUsageWithPrecision":100,"usageLimitWithPrecision":100,"freeTrialInfo":{"freeTrialStatus":"ACTIVE","currentUsageWithPrecision":100,"usageLimitWithPrecision":500},"bonuses":[{"displayName":"Trial credits","currentUsage":10.0,"expiresAt":4100000000.5,"status":"ACTIVE","usageLimit":500.0}]}]}"#;
+        let windows = usage_of(body, at(1_800_000_000))
+            .expect("poll")
+            .windows()
+            .to_vec();
+        assert!(windows[0].trial_credits());
+        assert_eq!(windows[1].used(), 100);
+        assert!(!windows[1].trial_credits());
+        assert!(windows[2].trial_credits());
+
+        let spent = br#"{"usageBreakdownList":[{"currentUsageWithPrecision":100,"usageLimitWithPrecision":100,"bonuses":[{"displayName":"Bonus credits","currentUsage":100,"status":"ACTIVE","usageLimit":100}]}]}"#;
+        let windows = usage_of(spent, at(1_800_000_000))
+            .expect("poll")
+            .windows()
+            .to_vec();
+        assert!(!windows[1].trial_credits());
     }
 
     #[test]
