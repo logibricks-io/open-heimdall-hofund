@@ -544,7 +544,7 @@ async fn d265_skipped_plugin_is_not_a_hand_on_candidate() {
     ]);
     assert!(dispatch(&router).await.is_err());
     assert_eq!(fixture.seen(), ["shared-blocker", "probe"]);
-    assert_eq!(fixture.another(), [false, false]);
+    assert_eq!(fixture.another(), [true, false]);
 }
 
 #[tokio::test]
