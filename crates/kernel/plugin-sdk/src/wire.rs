@@ -61,6 +61,7 @@ use hofund_codec::{
     AnthropicMessages, Codec, CodecError, Converse, GenerativeLanguage, OpenAiChat,
     OpenAiResponses, StreamDecoder, UNMAPPED_TOOLS, refusal_error,
 };
+use hofund_ir::FreeObjectPaths;
 use hofund_plugin_api::{
     BilledUsage, BodyStream, Completion, ContentPart, CountOutcome, CredentialStyle, HttpHandle,
     PluginError, PluginErrorKind, ProtocolId, RawAnswer, RawBody, Request, Role, SecretString,
@@ -414,6 +415,7 @@ pub struct Sent {
     allocation_quota_rate: bool,
     /// Configured Messages base, so an in-band error can be host-scoped.
     messages_base: Option<String>,
+    free_objects: Option<FreeObjectPaths>,
 }
 
 impl fmt::Debug for Sent {
@@ -429,6 +431,7 @@ impl fmt::Debug for Sent {
             .field("observe", &self.observe.is_some())
             .field("allocation_quota_rate", &self.allocation_quota_rate)
             .field("messages_base", &self.messages_base)
+            .field("free_objects", &self.free_objects.is_some())
             .finish()
     }
 }
@@ -444,11 +447,28 @@ impl Sent {
         let (codec, cross_protocol, streaming) = (self.codec, self.cross_protocol, self.streaming);
         let allocation_quota_rate = self.allocation_quota_rate;
         let messages_base = self.messages_base.clone();
+        let free_objects = self.free_objects.clone();
         let body = self.into_body();
         if cross_protocol {
-            decoded(body, codec, streaming, allocation_quota_rate, messages_base).await
+            decoded(
+                body,
+                codec,
+                streaming,
+                allocation_quota_rate,
+                messages_base,
+                free_objects,
+            )
+            .await
         } else {
-            raw(body, codec, streaming, allocation_quota_rate, messages_base).await
+            raw(
+                body,
+                codec,
+                streaming,
+                allocation_quota_rate,
+                messages_base,
+                free_objects,
+            )
+            .await
         }
     }
 
@@ -482,6 +502,7 @@ impl Sent {
         }
         let codec = self.codec;
         let messages_base = self.messages_base.clone();
+        let free_objects = self.free_objects.clone();
         let mut decoder = codec.stream_decoder();
         let mut body = self.into_body();
         let mut events = Vec::new();
@@ -494,6 +515,9 @@ impl Sent {
         }
         let mut response = hofund_ir::assemble(&events);
         hofund_codec::service_tier::stamp_last_served_tier(&events, &mut response);
+        if let Some(paths) = free_objects {
+            paths.restore_response(&mut response);
+        }
         Ok(tag_codec(codec, Completion::Unary(Box::new(response))))
     }
 
@@ -669,6 +693,8 @@ pub async fn send(
     let (codec, prepare, path) = route(target.protocol)?;
     let cross_protocol = codec.id() != inbound.as_str();
     let streaming = request.stream;
+    let free_objects =
+        hofund_quirks::gemini_free_object_paths(codec.id(), &request.model, &request.tools);
     let method = if streaming {
         Method::Stream
     } else {
@@ -749,6 +775,7 @@ pub async fn send(
         allocation_quota_rate: target.allocation_quota_rate,
         messages_base: (target.protocol == ProtocolId::ANTHROPIC_MESSAGES)
             .then(|| target.base_url.clone()),
+        free_objects,
     })
 }
 
@@ -1586,6 +1613,7 @@ async fn decoded(
     streaming: bool,
     allocation_quota_rate: bool,
     messages_base: Option<String>,
+    free_objects: Option<FreeObjectPaths>,
 ) -> Result<Completion, PluginError> {
     if streaming {
         let events = Events {
@@ -1597,13 +1625,16 @@ async fn decoded(
             billed: BilledUsage::default(),
             messages_base,
         };
-        return Ok(tag_codec(
-            codec,
-            Completion::Stream(Box::pin(futures_util::stream::unfold(
-                events,
-                |mut events| async move { events.next().await.map(|item| (item, events)) },
-            ))),
+        let stream = Box::pin(futures_util::stream::unfold(
+            events,
+            |mut events| async move { events.next().await.map(|item| (item, events)) },
         ));
+        let stream = if let Some(paths) = free_objects {
+            crate::free_objects::events(stream, paths)
+        } else {
+            stream
+        };
+        return Ok(tag_codec(codec, Completion::Stream(stream)));
     }
     let bytes = collect(body).await?;
     if let Some(error) = carried_error(&bytes, allocation_quota_rate) {
@@ -1613,16 +1644,25 @@ async fn decoded(
         .decode_response(&bytes)
         .map_err(|error| PluginError::decode(error.to_string()))?;
     hofund_codec::service_tier::retain_response_tier(&mut response);
+    if let Some(paths) = free_objects {
+        paths.restore_response(&mut response);
+    }
     Ok(tag_codec(codec, Completion::Unary(Box::new(response))))
 }
 
 async fn raw(
-    mut body: BodyStream,
+    body: BodyStream,
     codec: &dyn Codec,
     streaming: bool,
     allocation_quota_rate: bool,
     messages_base: Option<String>,
+    free_objects: Option<FreeObjectPaths>,
 ) -> Result<Completion, PluginError> {
+    let mut body = if let Some(paths) = free_objects {
+        crate::free_objects::raw(body, codec.id(), streaming, paths)
+    } else {
+        body
+    };
     if !streaming {
         let bytes = collect(body).await?;
         if let Some(error) = carried_error(&bytes, allocation_quota_rate) {
@@ -2024,6 +2064,35 @@ pub async fn decode_upstream_response(
     inbound: ProtocolId,
     client_stream: bool,
 ) -> Result<Completion, PluginError> {
+    decode_with_free_objects(response, outbound, inbound, client_stream, None).await
+}
+
+/// Decodes an upstream response with tool-schema adjustments derived from `request`.
+///
+/// # Errors
+///
+/// Returns [`PluginError`] when the protocol has no SDK transport or the body
+/// cannot be read or decoded.
+pub async fn decode_upstream_response_for_request(
+    response: HttpResponse,
+    outbound: ProtocolId,
+    inbound: ProtocolId,
+    client_stream: bool,
+    request: &Request,
+) -> Result<Completion, PluginError> {
+    let (codec, _, _) = route(outbound)?;
+    let free_objects =
+        hofund_quirks::gemini_free_object_paths(codec.id(), &request.model, &request.tools);
+    decode_with_free_objects(response, outbound, inbound, client_stream, free_objects).await
+}
+
+async fn decode_with_free_objects(
+    response: HttpResponse,
+    outbound: ProtocolId,
+    inbound: ProtocolId,
+    client_stream: bool,
+    free_objects: Option<FreeObjectPaths>,
+) -> Result<Completion, PluginError> {
     let (codec, _, _) = route(outbound)?;
     let cross_protocol = codec.id() != inbound.as_str();
     let sent = Sent {
@@ -2036,6 +2105,7 @@ pub async fn decode_upstream_response(
         observe: None,
         allocation_quota_rate: false,
         messages_base: None,
+        free_objects,
     };
     if client_stream {
         sent.complete().await
@@ -2962,6 +3032,7 @@ mod tests {
                 observe: None,
                 allocation_quota_rate: false,
                 messages_base: None,
+                free_objects: None,
             }
         }
 
@@ -3122,6 +3193,7 @@ mod tests {
                 })),
                 allocation_quota_rate: false,
                 messages_base: None,
+                free_objects: None,
             }
             .complete()
             .await

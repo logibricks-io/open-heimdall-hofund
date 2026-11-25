@@ -2,7 +2,7 @@
 
 use futures_util::StreamExt;
 use hofund_codec::{Codec, CodecError, UNMAPPED_TOOLS};
-use hofund_ir::Request;
+use hofund_ir::{FreeObjectPaths, Request};
 use hofund_plugin_sdk::transport::{
     parse_reset_after_headers, parse_retry_after, parse_retry_after_headers,
 };
@@ -645,6 +645,7 @@ pub(crate) struct Sent<'a> {
     cross_protocol: bool,
     codec: &'a dyn Codec,
     allocation_quota_rate: bool,
+    free_objects: Option<FreeObjectPaths>,
 }
 
 impl Sent<'_> {
@@ -656,6 +657,7 @@ impl Sent<'_> {
                 self.streaming,
                 self.codec,
                 self.allocation_quota_rate,
+                self.free_objects,
             )
             .await;
         }
@@ -668,7 +670,12 @@ impl Sent<'_> {
                 codec.stream_decoder(),
                 self.cross_protocol,
             );
-            Ok(tag_codec(codec, Completion::Stream(Box::pin(events))))
+            let events = if let Some(paths) = self.free_objects {
+                crate::free_objects::events(Box::pin(events), paths)
+            } else {
+                Box::pin(events)
+            };
+            Ok(tag_codec(codec, Completion::Stream(events)))
         } else {
             let bytes = self.response.bytes().await.map_err(map_body)?;
             if let Some(error) =
@@ -681,6 +688,9 @@ impl Sent<'_> {
                 .decode_response(&bytes)
                 .map_err(|error| ProviderError::decode(error.to_string()))?;
             hofund_codec::service_tier::retain_response_tier(&mut decoded);
+            if let Some(paths) = self.free_objects {
+                paths.restore_response(&mut decoded);
+            }
             Ok(tag_codec(self.codec, Completion::Unary(Box::new(decoded))))
         }
     }
@@ -733,6 +743,7 @@ async fn send<'a>(
     let cross_protocol = codec.id() != inbound_protocol;
     let streaming = request.stream;
     let model = request.model.clone();
+    let free_objects = hofund_quirks::gemini_free_object_paths(codec.id(), &model, &request.tools);
     let outbound = outbound_headers(upstream, &request);
     let whole = prepare_body(upstream, codec, request, prepare, inbound_protocol)?;
     let shortened = hook.and_then(|hook| hook.prepare(route, &whole));
@@ -847,6 +858,7 @@ async fn send<'a>(
         cross_protocol,
         codec,
         allocation_quota_rate: upstream.allocation_quota_rate,
+        free_objects,
     })
 }
 
@@ -901,21 +913,41 @@ pub(crate) async fn raw_completion(
     streaming: bool,
     codec: &dyn Codec,
     allocation_quota_rate: bool,
+    free_objects: Option<FreeObjectPaths>,
 ) -> Result<Completion, ProviderError> {
-    if streaming {
-        return raw_stream(response, codec).await;
-    }
-    let bytes = response.bytes().await.map_err(map_body)?;
-    if let Some(error) = hofund_plugin_sdk::transport::carried_error(&bytes, allocation_quota_rate)
-    {
-        return Err(ProviderError::from_plugin(error));
-    }
-    Ok(tag_codec(
-        codec,
-        Completion::Raw(Box::pin(futures_util::stream::once(
-            async move { Ok(bytes) },
-        ))),
-    ))
+    let completion = if streaming {
+        raw_stream(response, codec).await?
+    } else {
+        let bytes = response.bytes().await.map_err(map_body)?;
+        if let Some(error) =
+            hofund_plugin_sdk::transport::carried_error(&bytes, allocation_quota_rate)
+        {
+            return Err(ProviderError::from_plugin(error));
+        }
+        tag_codec(
+            codec,
+            Completion::Raw(Box::pin(futures_util::stream::once(
+                async move { Ok(bytes) },
+            ))),
+        )
+    };
+    let Some(paths) = free_objects else {
+        return Ok(completion);
+    };
+    let (produced, completion) = completion.split_produced();
+    let completion = match completion {
+        Completion::Raw(stream) => Completion::Raw(crate::free_objects::raw(
+            stream,
+            codec.id(),
+            streaming,
+            paths,
+        )),
+        other => other,
+    };
+    Ok(match produced {
+        Some(codec) => completion.produced(codec),
+        None => completion,
+    })
 }
 
 async fn raw_stream(

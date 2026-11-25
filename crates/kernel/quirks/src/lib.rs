@@ -15,7 +15,10 @@ mod state;
 mod thinking_back;
 
 pub use betas::{apply_learned_betas, named_refused_betas, retry_without_refused_betas};
-pub use encoded::{EncodedContext, apply_before_encode, apply_encoded, apply_encoded_with_state};
+pub use encoded::{
+    EncodedContext, apply_before_encode, apply_encoded, apply_encoded_with_state,
+    gemini_free_object_paths,
+};
 pub use foreign_thinking::without_foreign_thinking;
 pub use passthrough::{refused_passthrough, without_passthrough};
 pub use state::{

@@ -404,6 +404,7 @@ wire::Unwrap
 wire::Watch
 wire::async fn count_input (http : & HttpHandle , target : & Target , secret : Option < & SecretString > , mut request : Request , inbound : ProtocolId ,) -> Result < CountOutcome , PluginError >
 wire::async fn decode_upstream_response (response : HttpResponse , outbound : ProtocolId , inbound : ProtocolId , client_stream : bool ,) -> Result < Completion , PluginError >
+wire::async fn decode_upstream_response_for_request (response : HttpResponse , outbound : ProtocolId , inbound : ProtocolId , client_stream : bool , request : & Request ,) -> Result < Completion , PluginError >
 wire::async fn execute (http : & HttpHandle , target : & Target , secret : Option < & SecretString > , request : Request , inbound : ProtocolId ,) -> Result < Completion , PluginError >
 wire::async fn forward (http : & HttpHandle , target : & Target , secret : Option < & SecretString > , path : & str , body : RawBody ,) -> Result < RawAnswer , PluginError >
 wire::async fn send (http : & HttpHandle , target : & Target , secret : Option < & SecretString > , request : Request , inbound : ProtocolId ,) -> Result < Sent , PluginError >
