@@ -80,6 +80,7 @@ fn fixture() -> Fixture {
             member,
             wire_model: None,
             max_output_tokens: None,
+            catalog_output_tokens: None,
             context_window: None,
             patience: None,
             weight: 1,

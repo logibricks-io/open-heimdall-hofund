@@ -449,6 +449,7 @@ pub(crate) fn expand(
                     rank,
                     wire_model: hop.wire_model.clone(),
                     max_output_tokens: hop.max_output_tokens,
+                    catalog_output_tokens: hop.catalog_output_tokens,
                     context_window: hop.context_window,
                     routing: hop.routing.clone(),
                     sink: hop.sink,

@@ -182,6 +182,7 @@ fn fixture(answers: Vec<Result<Completion, PluginError>>) -> Fixture {
         member,
         wire_model: None,
         max_output_tokens: None,
+        catalog_output_tokens: None,
         context_window: None,
         patience: Some(Duration::from_secs(60)),
         weight: 1,
