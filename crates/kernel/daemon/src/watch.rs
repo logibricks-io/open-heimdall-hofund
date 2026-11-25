@@ -118,18 +118,22 @@ pub(crate) fn spawn_with_events(
     ops: Arc<ConfigOps>,
     path: PathBuf,
     events: Events,
+    check_starts: Option<mpsc::UnboundedSender<Instant>>,
 ) -> JoinHandle<()> {
     let targets = Targets::resolve(&path).expect("test configuration watch targets");
+    let reload = config_check(ops);
+    let check: Check = Arc::new(move || {
+        let reload = Arc::clone(&reload);
+        let check_starts = check_starts.clone();
+        Box::pin(async move {
+            if let Some(check_starts) = check_starts {
+                let _ = check_starts.send(Instant::now());
+            }
+            reload().await
+        })
+    });
     tokio::spawn(async move {
-        follow(
-            &path,
-            WatchTiming::default(),
-            &config_check(ops),
-            targets,
-            events,
-            None,
-        )
-        .await;
+        follow(&path, WatchTiming::default(), &check, targets, events, None).await;
     })
 }
 
