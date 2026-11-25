@@ -361,6 +361,7 @@ impl SubscriptionState {
                 http_limits: self.limits,
                 realtime_url: String::new(),
                 realtime_authorization: String::new(),
+                alternates: Vec::new(),
             },
             id,
             upstream,

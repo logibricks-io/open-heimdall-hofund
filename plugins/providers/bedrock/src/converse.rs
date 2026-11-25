@@ -1,4 +1,4 @@
-//! Converse settings: the runtime root, the signing region, and the key pair.
+//! Signing settings: the runtime root, host scope, region, and key pair.
 //!
 //! These checks run at build, after the host resolved `env:` references, so
 //! a bad value fails `hofund check` instead of the first call.
@@ -54,29 +54,51 @@ pub(crate) fn runtime_root(url: &str) -> String {
     trimmed.trim_end_matches('/').to_owned()
 }
 
-/// The signing region: the `region` option, else the region in a
-/// `bedrock-runtime.<region>.amazonaws.com` host.
+/// The signing region: the runtime host, else the `region` option, else the
+/// reference default.
 pub(crate) fn signing_region(explicit: &str, base_url: &str) -> Result<String, BuildError> {
+    let host = hofund_plugin_sdk::url::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .unwrap_or_default();
+    if let Some((region, "bedrock")) = host_scope(&host) {
+        check_region(&region)?;
+        return Ok(region);
+    }
     let explicit = explicit.trim().to_ascii_lowercase();
     if !explicit.is_empty() {
         check_region(&explicit)?;
         return Ok(explicit);
     }
-    let host = hofund_plugin_sdk::url::Url::parse(base_url)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
-        .unwrap_or_default();
-    let Some(region) = host
-        .strip_prefix("bedrock-runtime.")
-        .and_then(|rest| rest.strip_suffix(".amazonaws.com"))
-        .filter(|region| !region.is_empty())
-    else {
-        return Err(BuildError::new(
-            "Converse needs a region, or a bedrock-runtime.<region>.amazonaws.com host",
-        ));
-    };
-    check_region(region)?;
-    Ok(region.to_owned())
+    Ok("us-east-1".to_owned())
+}
+
+/// The region for a compatibility request.
+pub(crate) fn compatibility_region(explicit: &str, base_url: &str) -> Result<String, BuildError> {
+    signing_region(explicit, base_url)
+}
+
+/// The region and signing service named by a runtime or Mantle host.
+pub(crate) fn host_scope(host: &str) -> Option<(String, &'static str)> {
+    let host = host
+        .rsplit_once(':')
+        .filter(|(_, port)| port.chars().all(|c| c.is_ascii_digit()))
+        .map_or(host, |(name, _)| name)
+        .to_ascii_lowercase();
+    let labels = host.split('.').collect::<Vec<_>>();
+    if labels.len() < 4 || labels[1].is_empty() {
+        return None;
+    }
+    let rest = labels[2..].join(".");
+    match labels[0] {
+        "bedrock-runtime" | "bedrock-runtime-fips"
+            if matches!(rest.as_str(), "amazonaws.com" | "amazonaws.com.cn") =>
+        {
+            Some((labels[1].to_owned(), "bedrock"))
+        }
+        "bedrock-mantle" if rest == "api.aws" => Some((labels[1].to_owned(), "bedrock-mantle")),
+        _ => None,
+    }
 }
 
 /// A region id is at most 32 lowercase letters, digits, and hyphens. It goes

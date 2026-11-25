@@ -367,8 +367,7 @@ impl Call {
         self
     }
 
-    /// Headers in order as `(name, value, sensitive)`, for unit tests.
-    #[cfg(test)]
+    /// Headers in order as `(name, value, sensitive)`, for signing and unit tests.
     pub(crate) fn header_triples(&self) -> Vec<(&str, &str, bool)> {
         self.headers
             .iter()
@@ -380,6 +379,11 @@ impl Call {
                 )
             })
             .collect()
+    }
+
+    /// The method, URI, and body, for signing and unit tests.
+    pub(crate) fn request_parts(&self) -> (&str, &str, &[u8]) {
+        (self.method, &self.uri, &self.body)
     }
 
     /// The URI and body, for unit tests.

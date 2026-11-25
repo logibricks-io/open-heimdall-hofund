@@ -120,6 +120,9 @@ pub struct ProviderTestResult {
     pub model: String,
     /// Whether the probe succeeded.
     pub ok: bool,
+    /// Whether the provider serves this key nothing on the tested API.
+    #[serde(default)]
+    pub unserved: bool,
     /// Upstream HTTP status when available.
     pub status: Option<u16>,
     /// Unsigned elapsed milliseconds.

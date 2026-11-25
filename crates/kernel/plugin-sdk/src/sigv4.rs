@@ -355,13 +355,14 @@ fn hex_encode(bytes: &[u8]) -> String {
     out
 }
 
-/// The AWS credentials and region that sign a Bedrock Runtime call.
+/// The AWS credentials, region, and service that sign a call.
 ///
-/// [`Debug`] shows the region and whether a session token is set, never a
-/// credential. The service name is always `bedrock`.
+/// [`Debug`] shows the region, service, and whether a session token is set,
+/// never a credential.
 #[derive(Clone)]
 pub struct AwsSigner {
     region: String,
+    service: String,
     access_key_id: String,
     secret_access_key: secrecy::SecretString,
     session_token: Option<secrecy::SecretString>,
@@ -378,11 +379,19 @@ impl AwsSigner {
     ) -> Self {
         Self {
             region: region.into(),
+            service: "bedrock".to_owned(),
             access_key_id: access_key_id.into(),
             secret_access_key,
             session_token: None,
             fixed: None,
         }
+    }
+
+    /// Signs for `service` instead of the runtime default.
+    #[must_use]
+    pub fn service(mut self, service: impl Into<String>) -> Self {
+        self.service = service.into();
+        self
     }
 
     /// The session token of temporary credentials, sent and signed as
@@ -410,6 +419,10 @@ impl AwsSigner {
         &self.region
     }
 
+    pub(crate) fn service_name(&self) -> &str {
+        &self.service
+    }
+
     pub(crate) fn access_key_id(&self) -> &str {
         &self.access_key_id
     }
@@ -435,6 +448,7 @@ impl fmt::Debug for AwsSigner {
         formatter
             .debug_struct("AwsSigner")
             .field("region", &self.region)
+            .field("service", &self.service)
             .field("session_token", &self.session_token.is_some())
             .finish_non_exhaustive()
     }

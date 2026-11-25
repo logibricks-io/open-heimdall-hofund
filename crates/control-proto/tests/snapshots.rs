@@ -277,6 +277,7 @@ fn json_snapshots_round_trip() {
     provider_test.results.push(dto!(ProviderTestResult,
         model: "model-a".to_owned(),
         ok: false,
+        unserved: false,
         status: Some(429),
         latency_ms: Some(12),
         error: Some(ControlError::new(

@@ -31,11 +31,10 @@
 //! - A Bedrock Converse call names the model in the path:
 //!   `{base}/model/{model}/converse`, or `/converse-stream` for a stream, with
 //!   `SigV4` percent-encoding. It is signed with the target's [`AwsSigner`]
-//!   (service `bedrock`), never an API key. The signed headers are the
-//!   configured headers, lowercased, then `content-type`, `host`,
-//!   `x-amz-content-sha256`, `x-amz-date`, `accept` for a stream, and
-//!   `x-amz-security-token` for temporary credentials; a signed header
-//!   replaces a configured one of the same name. An empty model is status 400.
+//!   (service `bedrock`), never an API key. Only `host` and `x-amz-*` headers
+//!   are signed. A signed header replaces a configured one of the same name.
+//!   An empty model is status 400. Other protocols with a signer use it only
+//!   when the stored API key is empty.
 //! - The call is a JSON `POST`. Only a connect failure is retried, once, so a
 //!   body that may have been written is never replayed.
 //! - A status outside 2xx keeps its status and `Retry-After`. Its message is the
@@ -258,8 +257,8 @@ impl Target {
         self
     }
 
-    /// The AWS credentials a Bedrock Converse call is signed with. Other
-    /// protocols ignore them.
+    /// The AWS credentials a call is signed with when no API key is stored.
+    /// Converse always requires them and rejects an API key.
     #[must_use]
     pub fn signer(mut self, signer: AwsSigner) -> Self {
         self.signer = Some(signer);
@@ -722,7 +721,8 @@ pub async fn send(
             body = crate::inflate::compress(&body)?;
             call = call.replace_header("content-encoding", "gzip", false);
         }
-        call.header("content-type", "application/json").bytes(body)
+        let call = call.header("content-type", "application/json").bytes(body);
+        maybe_sign(call, target, secret)?
     };
     let response = call.open_raw(http, ATTEMPTS).await?;
     if !response.status().is_success() {
@@ -892,9 +892,10 @@ pub async fn count_input(
     if field == "input_tokens" {
         body = omit_max_tokens(body);
     }
-    let mut response = call(target, codec, secret, url)?
+    let call = call(target, codec, secret, url)?
         .header("content-type", "application/json")
-        .bytes(body)
+        .bytes(body);
+    let mut response = maybe_sign(call, target, secret)?
         .open_raw(http, ATTEMPTS)
         .await?;
     let status = response.status().as_u16();
@@ -986,6 +987,63 @@ fn method_url(base: &str, root: &str, method: Method) -> String {
     }
 }
 
+/// Signs a buffered call with `signer`. Only `host` and `x-amz-*` headers
+/// enter the signature; the canonical path is escaped a second time.
+///
+/// # Errors
+///
+/// Returns a config error for an invalid absolute URL, or a decode error when
+/// the signing inputs are incomplete.
+pub fn signed_call(mut call: Call, signer: &AwsSigner) -> Result<Call, PluginError> {
+    let (method, uri, body) = call.request_parts();
+    let parsed = url::Url::parse(uri)
+        .map_err(|error| PluginError::config(format!("provider URL is invalid: {error}")))?;
+    let (secs, host) = match signer.fixed_clock() {
+        Some((secs, host)) => (*secs, host.clone()),
+        None => (unix_now(), host_header(&parsed)),
+    };
+    let amz_date = sigv4::amz_date(secs);
+    let canonical_path = sigv4::canonical_uri(parsed.path(), sigv4::UriEncoding::Double);
+    let mut query = parsed
+        .query_pairs()
+        .map(|(name, value)| format!("{}={}", sigv4::uri_encode(&name), sigv4::uri_encode(&value)))
+        .collect::<Vec<_>>();
+    query.sort();
+    let canonical_query = query.join("&");
+    let mut pairs = std::collections::BTreeMap::new();
+    pairs.insert("host".to_owned(), host);
+    for (name, value, _) in call.header_triples() {
+        let name = name.to_ascii_lowercase();
+        if name.starts_with("x-amz-") {
+            pairs.insert(name, value.to_owned());
+        }
+    }
+    pairs.insert("x-amz-date".to_owned(), amz_date.clone());
+    if let Some(token) = signer.session_token_text() {
+        pairs.insert("x-amz-security-token".to_owned(), token.to_owned());
+    }
+    let borrowed = pairs
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    let input = sigv4::SignInput::new()
+        .method(method)
+        .canonical_uri(&canonical_path)
+        .canonical_query(&canonical_query)
+        .amz_date(&amz_date)
+        .scope(signer.region(), signer.service_name())
+        .credentials(signer.access_key_id(), signer.secret_access_key())
+        .payload(body)
+        .headers(&borrowed);
+    let sealed = sigv4::sign(&input)
+        .map_err(|error| PluginError::decode(format!("request signing: {error}")))?;
+    call = call.replace_header("x-amz-date", amz_date, false);
+    if let Some(token) = signer.session_token_text() {
+        call = call.replace_header("x-amz-security-token", token, true);
+    }
+    Ok(call.replace_header("authorization", sealed.authorization(), true))
+}
+
 /// A signed Bedrock Converse `POST` of `body` for `model`, and its URL.
 ///
 /// The URL is `{base}/model/{model}/converse`, or `/converse-stream` when
@@ -1012,64 +1070,37 @@ pub fn converse_call(
         .as_ref()
         .ok_or_else(|| PluginError::config("Converse needs AWS credentials"))?;
     let path = sigv4::model_wire_uri(model, stream);
-    let canonical_path = sigv4::canonical_uri(&path, sigv4::UriEncoding::Double);
     let url = format!("{}{path}", target.base_url.trim_end_matches('/'));
-    let parsed = url::Url::parse(&url)
-        .map_err(|error| PluginError::config(format!("provider URL is invalid: {error}")))?;
-    let (secs, host) = match signer.fixed_clock() {
-        Some((secs, host)) => (*secs, host.clone()),
-        None => (unix_now(), host_header(&parsed)),
-    };
-    let amz_date = sigv4::amz_date(secs);
-    let mut ours = vec![
-        ("content-type", "application/json".to_owned()),
-        ("host", host),
-        ("x-amz-content-sha256", sigv4::payload_hash(&body)),
-        ("x-amz-date", amz_date.clone()),
-    ];
+    let mut ours = vec![("content-type", "application/json".to_owned())];
     if stream {
         ours.push(("accept", "application/vnd.amazon.eventstream".to_owned()));
     }
-    if let Some(token) = signer.session_token_text() {
-        ours.push(("x-amz-security-token", token.to_owned()));
-    }
-    // Name to (value, sensitive). Configured values are sensitive; ours
-    // replace a configured header of the same name.
     let mut pairs = std::collections::BTreeMap::new();
     for (name, value) in &target.headers {
         pairs.insert(name.to_ascii_lowercase(), (value.clone(), true));
     }
     for (name, value) in ours {
-        pairs.insert(name.to_owned(), (value, name == "x-amz-security-token"));
+        pairs.insert(name.to_owned(), (value, false));
     }
-    let borrowed: Vec<(&str, &str)> = pairs
-        .iter()
-        .map(|(name, (value, _))| (name.as_str(), value.as_str()))
-        .collect();
-    let input = sigv4::SignInput::new()
-        .method("POST")
-        .canonical_uri(&canonical_path)
-        .amz_date(&amz_date)
-        .scope(signer.region(), "bedrock")
-        .credentials(signer.access_key_id(), signer.secret_access_key())
-        .payload(&body)
-        .headers(&borrowed);
-    let sealed = sigv4::sign(&input)
-        .map_err(|error| PluginError::decode(format!("Converse signing: {error}")))?;
     let mut call = Call::post(url.as_str());
     for (name, (value, sensitive)) in pairs {
-        if name == "host" {
-            continue;
-        }
         call = if sensitive {
             call.sensitive_header(name, value)
         } else {
             call.header(name, value)
         };
     }
-    let call = call
-        .sensitive_header("authorization", sealed.authorization())
-        .bytes(body);
+    let call = signed_call(call.bytes(body), signer).map_err(|error| {
+        if error.kind() == PluginErrorKind::Decode {
+            PluginError::decode(
+                error
+                    .message()
+                    .replace("request signing", "Converse signing"),
+            )
+        } else {
+            error
+        }
+    })?;
     Ok((url, call))
 }
 
@@ -1169,6 +1200,22 @@ fn call(
         call = call.replace_header(name, value.clone(), true);
     }
     Ok(call)
+}
+
+fn maybe_sign(
+    call: Call,
+    target: &Target,
+    secret: Option<&SecretString>,
+) -> Result<Call, PluginError> {
+    match target.signer.as_ref() {
+        Some(signer)
+            if target.protocol != ProtocolId::BEDROCK_CONVERSE
+                && secret.is_none_or(|secret| secret.expose_secret().is_empty()) =>
+        {
+            signed_call(call, signer)
+        }
+        _ => Ok(call),
+    }
 }
 
 fn prepare_body(
@@ -2009,7 +2056,7 @@ mod tests {
     use super::{
         AwsSigner, Events, Method, Path, Rewrite, Target, classify_count, consume_fields,
         converse_call, encode_outbound, endpoint_unsupported, failure_of, host_header,
-        message_from, model_segment, omit_max_tokens, path_segment, rewritten, route, sigv4,
+        message_from, model_segment, omit_max_tokens, path_segment, rewritten, route,
         strip_billing_header, url_for,
     };
     use hofund_plugin_api::CountOutcome;
@@ -2402,7 +2449,7 @@ mod tests {
         assert_eq!(
             header(&triples, "authorization"),
             Some((
-                "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/bedrock/aws4_request, SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date;x-amz-security-token, Signature=9acaa85e4b0b79f684cb81d4050d66206f71f74d9b7145bfbaa74b72a2c04655",
+                "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/bedrock/aws4_request, SignedHeaders=host;x-amz-date;x-amz-security-token, Signature=985964b48252a0ce1b314e458024fd50863c20bee56c182ba9abe876e259e953",
                 true
             ))
         );
@@ -2418,11 +2465,7 @@ mod tests {
             header(&triples, "content-type"),
             Some(("application/json", false))
         );
-        let hash = sigv4::payload_hash(VECTOR_BODY);
-        assert_eq!(
-            header(&triples, "x-amz-content-sha256"),
-            Some((hash.as_str(), false))
-        );
+        assert_eq!(header(&triples, "x-amz-content-sha256"), None);
         assert_eq!(header(&triples, "host"), None);
         assert_eq!(header(&triples, "accept"), None);
         let names: Vec<&str> = triples.iter().map(|(name, _, _)| *name).collect();
@@ -2430,7 +2473,6 @@ mod tests {
             names,
             [
                 "content-type",
-                "x-amz-content-sha256",
                 "x-amz-date",
                 "x-amz-security-token",
                 "authorization"
@@ -2439,7 +2481,7 @@ mod tests {
     }
 
     #[test]
-    fn a_converse_stream_accepts_the_event_stream_and_signs_configured_headers() {
+    fn a_converse_stream_accepts_the_event_stream_and_signs_only_amz_headers() {
         let target = vector_target().headers(vec![
             ("X-Tenant".to_owned(), "blue".to_owned()),
             ("Content-Type".to_owned(), "text/plain".to_owned()),
@@ -2460,9 +2502,7 @@ mod tests {
             Some(("application/json", false))
         );
         let authorization = header(&triples, "authorization").expect("authorization").0;
-        assert!(authorization.contains(
-            "SignedHeaders=accept;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-security-token;x-tenant,"
-        ));
+        assert!(authorization.contains("SignedHeaders=host;x-amz-date;x-amz-security-token,"));
     }
 
     #[test]

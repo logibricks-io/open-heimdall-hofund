@@ -65,6 +65,8 @@ pub(crate) struct BuiltProvider {
     /// `Bearer` value for the realtime dial. Empty when there is no key.
     /// Never log this.
     pub realtime_authorization: String,
+    /// Other APIs of the same provider and key, tried after an API-wide refusal.
+    pub alternates: Vec<BuiltProvider>,
 }
 
 pub(crate) struct Table {
@@ -77,6 +79,7 @@ pub(crate) struct Table {
     strategies: Arc<StrategyState>,
     affinity: hofund_router::affinity::AffinityState,
     overflow: hofund_router::OverflowMemory,
+    api_fitness: hofund_router::ApiFitness,
     measurements: Mutex<Option<Arc<dyn Measurements>>>,
     model_catalog: Mutex<Option<Arc<hofund_model_catalog::ModelCatalog>>>,
     spend_cap_gate: Mutex<Option<Arc<crate::spend_caps::SpendCapGate>>>,
@@ -122,6 +125,9 @@ struct LiveMember {
     realtime_authorization: String,
     failed: Arc<AtomicU64>,
     stack: Cooldown<Guard<ProviderCall>>,
+    alternates: Vec<Arc<LiveMember>>,
+    /// Primary member id when this member is that member's other API.
+    stands_in_for: Option<String>,
 }
 
 #[derive(Clone)]
@@ -305,10 +311,12 @@ fn build_table(
     credits_modes: Option<Arc<hofund_router::credits_mode::CreditsModeStore>>,
 ) -> Result<Arc<Table>, DaemonError> {
     let strategies = Arc::new(StrategyState::with_builtins());
+    let api_fitness = hofund_router::ApiFitness::default();
     let snapshot = Router::from_hops(BTreeMap::new(), policy.clone())
         .with_strategies(Arc::clone(&strategies))
         .with_cooldowns(Arc::clone(&cooldowns))
-        .with_affinity(affinity.clone());
+        .with_affinity(affinity.clone())
+        .with_api_fitness(api_fitness.clone());
     let snapshot = Snapshot::new(match (&quotas, &credits_modes) {
         (Some(quotas), Some(modes)) => snapshot
             .with_quotas(Arc::clone(quotas))
@@ -327,6 +335,7 @@ fn build_table(
         strategies,
         affinity,
         overflow: hofund_router::OverflowMemory::in_memory(),
+        api_fitness,
         measurements: Mutex::new(None),
         model_catalog: Mutex::new(None),
         spend_cap_gate: Mutex::new(None),
@@ -459,9 +468,11 @@ impl Table {
         let hops = self.hops.lock().expect("membership");
         let mut members = BTreeMap::new();
         for spec in hops.values().flatten() {
-            members
-                .entry(spec.member.id.to_string())
-                .or_insert_with(|| Arc::clone(&spec.member) as Arc<dyn Member>);
+            for member in spec.member.all() {
+                members
+                    .entry(member.id.to_string())
+                    .or_insert_with(|| member as Arc<dyn Member>);
+            }
         }
         members.into_values().collect()
     }
@@ -497,20 +508,26 @@ impl Table {
                 let list = specs
                     .iter()
                     .filter(|spec| !spec.member.failed())
-                    .map(|spec| Hop {
-                        member: Arc::clone(&spec.member) as Arc<dyn Member>,
-                        wire_model: spec.wire_model.clone(),
-                        max_output_tokens: spec.max_output_tokens,
-                        context_window: spec.context_window,
-                        patience: spec.member.patience,
-                        weight: spec.weight,
-                        free: spec.free,
-                        nearly_spent: false,
-                        fallback: spec.units.iter().any(|unit| unit.fallback),
-                        effort: String::new(),
-                        service_tier: spec.service_tier.clone(),
-                        cold_after: spec.cold_after,
-                        units: spec.units.clone(),
+                    .flat_map(|spec| {
+                        spec.member
+                            .all()
+                            .into_iter()
+                            .filter(|member| !member.failed())
+                            .map(|member| Hop {
+                                member: member.clone() as Arc<dyn Member>,
+                                wire_model: spec.wire_model.clone(),
+                                max_output_tokens: spec.max_output_tokens,
+                                context_window: spec.context_window,
+                                patience: member.patience,
+                                weight: spec.weight,
+                                free: spec.free,
+                                nearly_spent: false,
+                                fallback: spec.units.iter().any(|unit| unit.fallback),
+                                effort: String::new(),
+                                service_tier: spec.service_tier.clone(),
+                                cold_after: spec.cold_after,
+                                units: spec.units.clone(),
+                            })
                     })
                     .collect();
                 let routing = specs.first().map_or("smart", |spec| spec.routing.as_str());
@@ -522,15 +539,17 @@ impl Table {
                     .map_or(Some(Duration::from_secs(60)), |spec| spec.patience);
                 let at_once = specs
                     .iter()
-                    .map(|spec| {
-                        (
-                            spec.member.id.to_string(),
-                            hofund_router::at_once::AtOnceMember {
-                                group: spec.at_once_group.clone(),
-                                limit: usize::try_from(spec.at_once).unwrap_or(usize::MAX),
-                                rank: spec.rank,
-                            },
-                        )
+                    .flat_map(|spec| {
+                        spec.member.all().into_iter().map(|member| {
+                            (
+                                member.id.to_string(),
+                                hofund_router::at_once::AtOnceMember {
+                                    group: spec.at_once_group.clone(),
+                                    limit: usize::try_from(spec.at_once).unwrap_or(usize::MAX),
+                                    rank: spec.rank,
+                                },
+                            )
+                        })
                     })
                     .collect();
                 (
@@ -549,7 +568,8 @@ impl Table {
             .with_strategies(Arc::clone(&self.strategies))
             .with_cooldowns(Arc::clone(&self.cooldowns))
             .with_affinity(self.affinity.clone())
-            .with_overflow_memory(self.overflow.clone());
+            .with_overflow_memory(self.overflow.clone())
+            .with_api_fitness(self.api_fitness.clone());
         if let Some(quotas) = &self.quotas {
             router = router.with_quotas(Arc::clone(quotas));
         }
@@ -643,6 +663,30 @@ impl LiveMember {
         reload: Weak<Table>,
     ) -> Self {
         let id = id.unwrap_or_else(|| member_id(route_id));
+        let primary_id = id.clone();
+        let alternates = built
+            .alternates
+            .iter()
+            .map(|alternate| {
+                let alternate_id = alternate_member_id(&primary_id, alternate.protocol);
+                let mut member = Self::new(
+                    alternate,
+                    route_id,
+                    Some(alternate_id),
+                    subscription,
+                    Arc::clone(&cooldowns),
+                    Arc::clone(&offline),
+                    reload.clone(),
+                );
+                member.stands_in_for = Some(primary_id.to_string());
+                // Success, failure, and panic rests follow the routing member.
+                // The alternate keeps its own id so the route can tell the two
+                // APIs apart.
+                member.stack.id = primary_id.clone();
+                member.stack.inner.id = primary_id.clone();
+                Arc::new(member)
+            })
+            .collect();
         let failed = Arc::new(AtomicU64::new(0));
         let guard = Guard {
             inner: ProviderCall {
@@ -685,7 +729,15 @@ impl LiveMember {
             realtime_authorization: built.realtime_authorization.clone(),
             failed,
             stack,
+            alternates,
+            stands_in_for: None,
         }
+    }
+
+    fn all(self: &Arc<Self>) -> Vec<Arc<Self>> {
+        std::iter::once(Arc::clone(self))
+            .chain(self.alternates.iter().cloned())
+            .collect()
     }
 
     fn failed(&self) -> bool {
@@ -723,6 +775,10 @@ impl Member for LiveMember {
         self.protocol
     }
 
+    fn stands_in_for(&self) -> Option<&str> {
+        self.stands_in_for.as_deref()
+    }
+
     fn learned_preferred(&self, model: &str) -> Option<String> {
         self.stack.inner.inner.provider.learned_preferred(model)
     }
@@ -733,6 +789,9 @@ impl Member for LiveMember {
 
     fn account_refs(&self) -> Vec<String> {
         let mut refs = vec![self.id.to_string(), self.fingerprint.clone()];
+        if let Some(primary) = &self.stands_in_for {
+            refs.push(primary.clone());
+        }
         if let Some(account) = self.id.account() {
             refs.push(account.to_string());
         }
@@ -741,7 +800,7 @@ impl Member for LiveMember {
     }
 
     fn background_probe(&self) -> bool {
-        self.kernel || self.rest_probe
+        self.stands_in_for.is_none() && (self.kernel || self.rest_probe)
     }
 
     fn close_idle_connections(&self) {
@@ -1393,6 +1452,41 @@ pub(crate) fn member_id(provider_id: &str) -> MemberId {
     MemberId::from_preset(preset, MemberKey::from_static("default"))
 }
 
+pub(crate) fn alternate_member_id(id: &MemberId, protocol: &str) -> MemberId {
+    let preset = id.preset().expect("a provider alternate has a preset id");
+    let key = format!(
+        "{}-{}",
+        id.member_key()
+            .expect("a provider alternate has a member key")
+            .as_str(),
+        kebab_of(protocol)
+    );
+    MemberId::from_preset(
+        preset.clone(),
+        MemberKey::try_from(key.as_str()).expect("an alternate protocol is a valid member key"),
+    )
+}
+
+pub(crate) fn provider_fingerprints(
+    built: &BTreeMap<String, BuiltProvider>,
+) -> Vec<(MemberId, String)> {
+    let mut out = Vec::new();
+    for (id, provider) in built {
+        let member = provider
+            .key
+            .as_ref()
+            .map_or_else(|| member_id(id), |key| key.member.clone());
+        out.push((member.clone(), provider.fingerprint.clone()));
+        for alternate in &provider.alternates {
+            out.push((
+                alternate_member_id(&member, alternate.protocol),
+                alternate.fingerprint.clone(),
+            ));
+        }
+    }
+    out
+}
+
 pub(crate) fn key_member_id(provider_id: &str, key_id: &str) -> MemberId {
     try_key_member_id(provider_id, key_id).expect("a key fingerprint is a valid member key")
 }
@@ -1591,6 +1685,7 @@ mod tests {
                 http_limits: hofund_plugin_host::HttpLimits::default(),
                 realtime_url: String::new(),
                 realtime_authorization: String::new(),
+                alternates: Vec::new(),
             },
         );
         let mut routes = BTreeMap::new();
@@ -1701,6 +1796,7 @@ mod tests {
                 http_limits: hofund_plugin_host::HttpLimits::default(),
                 realtime_url: String::new(),
                 realtime_authorization: String::new(),
+                alternates: Vec::new(),
             },
         );
         let mut routes = BTreeMap::new();
@@ -1802,6 +1898,7 @@ mod tests {
                 http_limits: hofund_plugin_host::HttpLimits::default(),
                 realtime_url: String::new(),
                 realtime_authorization: String::new(),
+                alternates: Vec::new(),
             },
         );
         let mut routes = BTreeMap::new();
@@ -1902,6 +1999,7 @@ mod tests {
                 http_limits: hofund_plugin_host::HttpLimits::default(),
                 realtime_url: String::new(),
                 realtime_authorization: String::new(),
+                alternates: Vec::new(),
             },
         );
         let mut routes = BTreeMap::new();
@@ -1972,6 +2070,7 @@ mod tests {
                     http_limits: hofund_plugin_host::HttpLimits::default(),
                     realtime_url: String::new(),
                     realtime_authorization: String::new(),
+                    alternates: Vec::new(),
                 },
             );
         }
@@ -2045,6 +2144,7 @@ mod tests {
             http_limits: hofund_plugin_host::HttpLimits::default(),
             realtime_url: String::new(),
             realtime_authorization: String::new(),
+            alternates: Vec::new(),
         }
     }
 

@@ -62,6 +62,7 @@ pub struct Http1Response {
     chunks: Vec<Vec<u8>>,
     chunked: bool,
     chunk_delay: Duration,
+    write_yields: usize,
     header_gate: Option<watch::Receiver<bool>>,
     hold_open: bool,
 }
@@ -76,6 +77,7 @@ impl Http1Response {
             chunks: Vec::new(),
             chunked: false,
             chunk_delay: Duration::ZERO,
+            write_yields: 0,
             header_gate: None,
             hold_open: false,
         }
@@ -109,6 +111,13 @@ impl Http1Response {
     #[must_use]
     pub fn chunk_delay(mut self, delay: Duration) -> Self {
         self.chunk_delay = delay;
+        self
+    }
+
+    /// Yields the server task `count` times before writing the response.
+    #[must_use]
+    pub fn yield_before_write(mut self, count: usize) -> Self {
+        self.write_yields = count;
         self
     }
 
@@ -199,6 +208,48 @@ impl Http1Server {
         self.requests.lock().expect("request records").clone()
     }
 
+    /// Binds an ephemeral loopback port and builds each response from the request.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the loopback listener cannot be bound.
+    pub async fn start_with<F>(respond: F) -> Self
+    where
+        F: Fn(&RecordedHttp1Request) -> Http1Response + Send + Sync + 'static,
+    {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind loopback HTTP/1.1 test server");
+        let address = listener.local_addr().expect("loopback address");
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&requests);
+        let respond = Arc::new(respond);
+        let (shutdown, mut stopped) = watch::channel(false);
+        let task = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = stopped.changed() => break,
+                    accepted = listener.accept() => {
+                        let Ok((stream, _)) = accepted else { break };
+                        let seen = Arc::clone(&seen);
+                        let respond = Arc::clone(&respond);
+                        let stopped = stopped.clone();
+                        tokio::spawn(async move {
+                            serve_http1_with(stream, seen, respond, stopped).await;
+                        });
+                    }
+                }
+            }
+        });
+        tokio::task::yield_now().await;
+        Self {
+            base_url: format!("http://{address}"),
+            requests,
+            shutdown,
+            task: Some(task),
+        }
+    }
+
     /// Stops accepting connections and closes held responses.
     pub async fn shutdown(mut self) {
         let _ = self.shutdown.send(true);
@@ -221,7 +272,7 @@ async fn serve_http1(
     mut stream: TcpStream,
     requests: Arc<Mutex<Vec<RecordedHttp1Request>>>,
     scripts: Arc<Mutex<VecDeque<Http1Response>>>,
-    mut stopped: watch::Receiver<bool>,
+    stopped: watch::Receiver<bool>,
 ) {
     // Pop the scripted response when this connection is accepted so parallel
     // reads cannot reorder 200/RunSSE slots on slower hosts.
@@ -234,7 +285,29 @@ async fn serve_http1(
         return;
     };
     requests.lock().expect("request records").push(request);
-    if let Some(mut gate) = response.header_gate {
+    write_http1_response(&mut stream, response, stopped).await;
+}
+
+async fn serve_http1_with(
+    mut stream: TcpStream,
+    requests: Arc<Mutex<Vec<RecordedHttp1Request>>>,
+    respond: Arc<dyn Fn(&RecordedHttp1Request) -> Http1Response + Send + Sync>,
+    stopped: watch::Receiver<bool>,
+) {
+    let Some(request) = read_http1_request(&mut stream).await else {
+        return;
+    };
+    let response = respond(&request);
+    requests.lock().expect("request records").push(request);
+    write_http1_response(&mut stream, response, stopped).await;
+}
+
+async fn write_http1_response(
+    stream: &mut TcpStream,
+    mut response: Http1Response,
+    mut stopped: watch::Receiver<bool>,
+) {
+    if let Some(mut gate) = response.header_gate.take() {
         loop {
             if *gate.borrow() {
                 break;
@@ -248,6 +321,9 @@ async fn serve_http1(
                 }
             }
         }
+    }
+    for _ in 0..response.write_yields {
+        tokio::task::yield_now().await;
     }
     let reason = http::StatusCode::from_u16(response.status)
         .ok()

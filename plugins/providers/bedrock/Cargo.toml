@@ -1,6 +1,6 @@
 [package]
 name = "hofund-plugin-bedrock"
-description = "Amazon Bedrock upstream: Chat, Responses, and Messages with a Bedrock API key, and Converse signed with AWS credentials."
+description = "Amazon Bedrock upstream with API-key or SigV4 authentication on Chat, Responses, Messages, and Converse."
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
