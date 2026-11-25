@@ -50,6 +50,9 @@ pub struct WindowInfo {
     /// Whether exhaustion blocks this member.
     #[serde(default = "yes")]
     pub blocking: bool,
+    /// Whether this window is a remaining trial or bonus rather than bought credit.
+    #[serde(default)]
+    pub trial_credits: bool,
     /// The one model this window covers, or all models.
     #[serde(default)]
     pub scope_model: Option<String>,
@@ -74,6 +77,7 @@ impl WindowInfo {
         Self {
             span,
             blocking: true,
+            trial_credits: false,
             scope_model: None,
             models: Vec::new(),
             excluded_models: Vec::new(),
@@ -86,6 +90,13 @@ impl WindowInfo {
     #[must_use]
     pub fn with_blocking(mut self, blocking: bool) -> Self {
         self.blocking = blocking;
+        self
+    }
+
+    /// Marks a remaining trial or bonus credit window.
+    #[must_use]
+    pub fn with_trial_credits(mut self, trial_credits: bool) -> Self {
+        self.trial_credits = trial_credits;
         self
     }
 
@@ -146,6 +157,7 @@ impl WindowInfo {
         Self {
             span,
             blocking: window.blocking(),
+            trial_credits: window.trial_credits(),
             scope_model: window.scope_model().map(str::to_owned),
             models: window.models().to_vec(),
             excluded_models: window.excluded_models().to_vec(),
@@ -580,6 +592,7 @@ impl QuotaStore {
                             limit: info.span.limit,
                             unit: info.span.unit.clone(),
                             blocking: info.blocking,
+                            trial_credits: info.trial_credits,
                             scope_model: info.scope_model.clone(),
                             models: info.models.clone(),
                             excluded_models: info.excluded_models.clone(),
@@ -821,6 +834,17 @@ impl Allowance {
             .any(|window| !window.blocking && window.counts(model))
     }
 
+    /// Whether the account has trial or bonus credits left for `model`.
+    #[must_use]
+    pub fn spends_trial_credits(&self, model: &str) -> bool {
+        self.windows.iter().any(|window| {
+            window.trial_credits
+                && !window.blocking
+                && window.remaining > 0.0
+                && window.counts(model)
+        })
+    }
+
     /// Whether no applicable blocking window is exhausted.
     #[must_use]
     pub fn available(&self, model: &str, now: SystemTime) -> bool {
@@ -854,6 +878,8 @@ pub struct AllowanceWindow {
     pub unit: String,
     /// Whether exhaustion blocks routing.
     pub blocking: bool,
+    /// Whether this window is a remaining trial or bonus rather than bought credit.
+    pub trial_credits: bool,
     /// The model this window covers, or all models.
     pub scope_model: Option<String>,
     /// The models this window covers, or all models when empty.
@@ -2392,6 +2418,7 @@ mod tests {
                     limit: 0.0,
                     unit: String::new(),
                     blocking: true,
+                    trial_credits: false,
                     scope_model: None,
                     models: Vec::new(),
                     excluded_models: Vec::new(),
@@ -2409,6 +2436,7 @@ mod tests {
                     limit: 0.0,
                     unit: String::new(),
                     blocking: true,
+                    trial_credits: false,
                     scope_model: None,
                     models: Vec::new(),
                     excluded_models: Vec::new(),
@@ -2430,6 +2458,25 @@ mod tests {
     }
 
     const H: u64 = 3600;
+
+    #[test]
+    fn d255_trial_credit_mark_survives_allowance_conversion() {
+        let now = at(1_900_000_000);
+        let trial = PluginWindow::new("bonus", 2, Some(100), None)
+            .expect("trial")
+            .with_blocking(false)
+            .with_trial_credits(true);
+        let allowance = allowance_of(vec![WindowInfo::from_plugin(&trial)], now);
+        assert!(allowance.spends_credits("model"));
+        assert!(allowance.spends_trial_credits("model"));
+
+        let bought = PluginWindow::new("credit", 2, Some(100), None)
+            .expect("bought")
+            .with_blocking(false);
+        let allowance = allowance_of(vec![WindowInfo::from_plugin(&bought)], now);
+        assert!(allowance.spends_credits("model"));
+        assert!(!allowance.spends_trial_credits("model"));
+    }
 
     #[test]
     fn r4_72_cap_used_and_week_low_from_allowance_windows() {

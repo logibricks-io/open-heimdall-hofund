@@ -767,7 +767,9 @@ impl Subscription for Claude {
         home: &Path,
         host: &HostContext,
     ) -> Result<(), PluginError> {
-        agent_sign_in::write(account, home, host).await
+        agent_sign_in::write(account, home, host).await?;
+        self.bridge.account_handed_over(account);
+        Ok(())
     }
 
     async fn import_accounts(
