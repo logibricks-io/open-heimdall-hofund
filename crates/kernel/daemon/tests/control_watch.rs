@@ -49,13 +49,14 @@ impl Daemon {
     }
 
     async fn start_cased(text: &str, start_name: &str) -> Self {
-        Self::start_cased_with_events(text, start_name, None).await
+        Self::start_cased_with_events(text, start_name, None, None).await
     }
 
     async fn start_cased_with_events(
         text: &str,
         start_name: &str,
         config_watch_events: Option<tokio::sync::mpsc::UnboundedReceiver<notify::Result<Event>>>,
+        config_watch_check_starts: Option<tokio::sync::mpsc::UnboundedSender<tokio::time::Instant>>,
     ) -> Self {
         let config_dir = tempfile::tempdir().expect("config dir");
         let runtime_dir = tempfile::tempdir().expect("runtime dir");
@@ -70,6 +71,7 @@ impl Daemon {
                 control_runtime: Some(ControlRuntime::new(None, runtime_dir.path().to_path_buf())),
                 agent_session: Some(Session::new(runtime_dir.path().join("home")).with_path("")),
                 config_watch_events,
+                config_watch_check_starts,
                 ..StartOptions::default()
             },
         )
@@ -202,7 +204,15 @@ async fn watcher_invalid_edit_keeps_last_good_and_emits_config_rejected() {
 async fn duplicated_old_events_cannot_starve_a_corrected_edit() {
     let original = config("");
     let (sender, events) = tokio::sync::mpsc::unbounded_channel();
-    let daemon = Daemon::start_cased_with_events(&original, "hofund.toml", Some(events)).await;
+    let (check_start_sender, mut check_starts) =
+        tokio::sync::mpsc::unbounded_channel::<tokio::time::Instant>();
+    let daemon = Daemon::start_cased_with_events(
+        &original,
+        "hofund.toml",
+        Some(events),
+        Some(check_start_sender),
+    )
+    .await;
     let mut stream = daemon.events().await;
     let mut buffer = String::new();
 
@@ -217,6 +227,11 @@ async fn duplicated_old_events_cannot_starve_a_corrected_edit() {
         }
         other => panic!("expected config_rejected, got {other:?}"),
     }
+    assert!(
+        check_starts.try_recv().is_ok(),
+        "rejection check did not start"
+    );
+    while check_starts.try_recv().is_ok() {}
     tokio::time::advance(Duration::from_millis(400)).await;
     tokio::task::yield_now().await;
 
@@ -235,6 +250,19 @@ async fn duplicated_old_events_cannot_starve_a_corrected_edit() {
             }
         }
     });
+    // The 400ms bound is the quiet period before the corrected check starts.
+    // `next_event` waits on a socket. With the paused clock, an idle park
+    // jumps to this task's 100ms interval, so the clock after the frame is
+    // not the debounce edge. The instant is captured on entry to the check.
+    let started = tokio::time::timeout(Duration::from_secs(3), check_starts.recv())
+        .await
+        .expect("corrected check timed out")
+        .expect("corrected check dropped");
+    let debounce = started.saturating_duration_since(corrected_at);
+    assert!(
+        debounce <= Duration::from_millis(400),
+        "duplicates postponed the corrected check to {debounce:?}"
+    );
     let reloaded = next_event(&mut stream, &mut buffer, Duration::from_secs(3)).await;
     duplicates.abort();
     match reloaded {
@@ -244,7 +272,6 @@ async fn duplicated_old_events_cannot_starve_a_corrected_edit() {
         }
         other => panic!("expected config_reloaded, got {other:?}"),
     }
-    assert!(corrected_at.elapsed() <= Duration::from_millis(400));
     drop(stream);
     support::shutdown(daemon.running).await;
 }
