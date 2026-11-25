@@ -59,6 +59,15 @@ impl ChatStreamCheck {
                 line.pop();
             }
             self.line(&line);
+            if self.opaque {
+                return;
+            }
+        }
+        // A chunk that cannot grow into a Chat SSE field is not a Chat
+        // stream. Mark it immediately so a hold does not swallow an active
+        // body while waiting for a newline that will never be a `data:` line.
+        if !self.pending.is_empty() && !sse_line_prefix(&self.pending) {
+            self.opaque = true;
         }
     }
 
@@ -191,6 +200,20 @@ fn map_says(delta: &Map<String, Value>) -> bool {
         })
 }
 
+/// Whether `pending` can still become a Chat SSE field line.
+///
+/// A finished line is classified separately. This keeps a partial comment or
+/// a prefix of `data:`, `event:`, `id:`, or `retry:`.
+fn sse_line_prefix(pending: &[u8]) -> bool {
+    if pending.first() == Some(&b':') {
+        return true;
+    }
+    const FIELDS: [&[u8]; 4] = [b"data:", b"event:", b"id:", b"retry:"];
+    FIELDS
+        .iter()
+        .any(|field| pending.starts_with(field) || field.starts_with(pending))
+}
+
 fn raw_says(value: Option<&Value>) -> bool {
     match value {
         None | Some(Value::Null) => false,
@@ -212,11 +235,16 @@ pub fn decoded_chat_stream_empty(events: &[StreamEvent]) -> Option<Usage> {
             StreamEvent::ToolArgumentsDelta(delta) if !delta.partial_json.is_empty() => {
                 reply = true;
             }
-            StreamEvent::ContentBlockStart(start)
-                if matches!(start.block, hofund_ir::BlockStart::ToolCall { .. }) =>
-            {
-                reply = true;
-            }
+            StreamEvent::SignatureDelta(delta) if !delta.signature.is_empty() => reply = true,
+            StreamEvent::ContentBlockStart(start) => match &start.block {
+                hofund_ir::BlockStart::ToolCall { .. } => reply = true,
+                hofund_ir::BlockStart::Thinking {
+                    data: Some(data), ..
+                } if !data.is_empty() => {
+                    reply = true;
+                }
+                _ => {}
+            },
             StreamEvent::MessageStart(start) => {
                 if let Some(patch) = &start.usage {
                     usage.merge_from(patch);
@@ -560,8 +588,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        ChatStreamCheck, completed_event_empty, decoded_chat_stream_empty, empty_reply_message,
-        relayed_sse_empty_without_content, response_body_empty,
+        ChatStreamCheck, chat_response_empty, completed_event_empty, decoded_chat_stream_empty,
+        empty_reply_message, relayed_sse_empty_without_content, response_body_empty,
     };
     use crate::{Codec, OpenAiChat};
 
@@ -639,12 +667,47 @@ mod tests {
             "{\"reasoning_details\":[{}]}",
             "{\"refusal\":\"no\"}",
             "{\"function_call\":{}}",
+            "{\"signature\":\"sig\"}",
         ] {
-            let stream =
-                format!("data: {{\"choices\":[{{\"delta\":{delta}}}]}}\n\ndata: [DONE]\n\n");
-            let events = OpenAiChat.decode_stream(stream.as_bytes()).expect("decode");
-            assert!(decoded_chat_stream_empty(&events).is_none(), "{delta}");
+            let stream = format!(
+                "data: {{\"id\":\"c\",\"model\":\"m\",\"choices\":[{{\"delta\":{delta}}}]}}\n\ndata: [DONE]\n\n"
+            );
+            let mut events = OpenAiChat.decode_stream(stream.as_bytes()).expect("decode");
+            for event in &mut events {
+                crate::service_tier::retain_served_tier(event);
+            }
+            assert!(
+                decoded_chat_stream_empty(&events).is_none(),
+                "{delta}: {events:?}"
+            );
         }
+
+        for message in [
+            r#"{"role":"assistant","reasoning":"thought"}"#,
+            r#"{"role":"assistant","reasoning_details":[{}]}"#,
+            r#"{"role":"assistant","refusal":"no"}"#,
+            r#"{"role":"assistant","function_call":{}}"#,
+        ] {
+            let body = format!(r#"{{"id":"c","model":"m","choices":[{{"message":{message}}}]}}"#);
+            let mut response = OpenAiChat.decode_response(body.as_bytes()).expect("decode");
+            crate::service_tier::retain_response_tier(&mut response);
+            assert!(!chat_response_empty(&response), "{message}: {response:?}");
+        }
+    }
+
+    #[test]
+    fn d248_non_sse_bytes_are_opaque_before_a_newline() {
+        let mut check = ChatStreamCheck::default();
+        check.observe(b"x");
+        assert!(check.is_opaque());
+        assert!(check.empty_usage().is_none());
+
+        let mut partial = ChatStreamCheck::default();
+        partial.observe(b"dat");
+        assert!(!partial.is_opaque());
+        partial.observe(b"a: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n");
+        assert!(partial.has_reply());
+        assert!(partial.empty_usage().is_none());
     }
 
     #[test]

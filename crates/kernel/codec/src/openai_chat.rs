@@ -10,8 +10,8 @@ use hofund_ir::{
     BlockStart, ContentBlockStart, ContentBlockStop, ContentPart, Effort, Extensions,
     GenerationParams, ImageDetail, ImagePart, ImageSource, Message, MessageDelta, MessageStart,
     MessageStop, Ping, Request, Response, Role, SignatureDelta, Stop, StopReason, StreamEvent,
-    TextDelta, TextPart, ThinkingDelta, Tool, ToolArguments, ToolArgumentsDelta, ToolCallPart,
-    ToolChoice, ToolChoiceMode, ToolResultPart, UnknownEvent, UnknownPart, Usage,
+    TextDelta, TextPart, ThinkingDelta, ThinkingPart, Tool, ToolArguments, ToolArgumentsDelta,
+    ToolCallPart, ToolChoice, ToolChoiceMode, ToolResultPart, UnknownEvent, UnknownPart, Usage,
 };
 use serde_json::Value;
 
@@ -368,10 +368,132 @@ impl Decoder {
                 self.decode_tool_delta(events, call)?;
             }
         }
+        if let Some(reasoning) = take_saying(&mut delta, "reasoning") {
+            self.push_reasoning(events, reasoning);
+        }
+        if let Some(details) = take_saying(&mut delta, "reasoning_details") {
+            self.push_reasoning(events, details);
+        }
+        if let Some(refusal) = take_string(&mut delta, "refusal")?
+            && !refusal.is_empty()
+        {
+            self.push_text(events, refusal);
+        }
+        if let Some(call) = take_saying(&mut delta, "function_call") {
+            self.push_function_call(events, call);
+        }
         if !delta.is_empty() {
             attach_extensions(events, Extensions::from_map(delta));
         }
         Ok(())
+    }
+
+    fn push_text(&mut self, events: &mut Vec<StreamEvent>, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        if !self.text_open {
+            events.push(block_start(TEXT_INDEX, BlockStart::Text));
+            self.text_open = true;
+        }
+        events.push(StreamEvent::TextDelta(TextDelta {
+            index: TEXT_INDEX,
+            text,
+            extensions: Extensions::new(),
+        }));
+    }
+
+    fn push_thinking_text(&mut self, events: &mut Vec<StreamEvent>, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        if !self.thinking_open {
+            events.push(block_start(
+                THINKING_INDEX,
+                BlockStart::Thinking {
+                    redacted: false,
+                    data: None,
+                },
+            ));
+            self.thinking_open = true;
+        }
+        events.push(StreamEvent::ThinkingDelta(ThinkingDelta {
+            index: THINKING_INDEX,
+            text,
+            extensions: Extensions::new(),
+        }));
+    }
+
+    /// `reasoning` and `reasoning_details` are a reply even when they are not
+    /// a string `reasoning_content`. Readable text becomes a thinking delta.
+    /// A value that says something without text (an empty object in
+    /// `reasoning_details`) stays on the thinking block so extension stripping
+    /// cannot drop it.
+    fn push_reasoning(&mut self, events: &mut Vec<StreamEvent>, value: Value) {
+        if !value_says(&value) {
+            return;
+        }
+        let text = reasoning_text(&value);
+        if !text.is_empty() {
+            self.push_thinking_text(events, text);
+            return;
+        }
+        let data = serde_json::to_string(&value).unwrap_or_default();
+        if data.is_empty() || self.thinking_open {
+            return;
+        }
+        events.push(block_start(
+            THINKING_INDEX,
+            BlockStart::Thinking {
+                redacted: true,
+                data: Some(data),
+            },
+        ));
+        self.thinking_open = true;
+    }
+
+    fn push_function_call(&mut self, events: &mut Vec<StreamEvent>, value: Value) {
+        if !value_says(&value) {
+            return;
+        }
+        let (id, name, arguments) = match value {
+            Value::Object(mut object) => {
+                let id = take_string(&mut object, "id")
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                let name = take_string(&mut object, "name")
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                let arguments = take_string(&mut object, "arguments")
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                (id, name, arguments)
+            }
+            other => (
+                String::new(),
+                String::new(),
+                other.as_str().unwrap_or_default().to_owned(),
+            ),
+        };
+        let index = TOOL_INDEX_BASE;
+        if !self.tools_open.contains(&index) {
+            events.push(StreamEvent::ContentBlockStart(ContentBlockStart {
+                index,
+                block: BlockStart::ToolCall { id, name },
+                extensions: Extensions::new(),
+            }));
+            self.tools_open.insert(index);
+        }
+        if !arguments.is_empty() {
+            events.push(StreamEvent::ToolArgumentsDelta(ToolArgumentsDelta {
+                index,
+                partial_json: arguments,
+                extensions: Extensions::new(),
+            }));
+        }
     }
 
     fn decode_tool_delta(
@@ -833,6 +955,10 @@ fn decode_message(value: Value) -> Result<Message, CodecError> {
         });
     }
     let reasoning = take_string(&mut object, "reasoning_content")?;
+    let extra_reasoning = take_saying(&mut object, "reasoning");
+    let reasoning_details = take_saying(&mut object, "reasoning_details");
+    let refusal = take_string(&mut object, "refusal")?;
+    let function_call = take_saying(&mut object, "function_call");
     let tool_calls = match object.remove("tool_calls") {
         None | Some(Value::Null) => Vec::new(),
         Some(Value::Array(items)) => items,
@@ -847,9 +973,21 @@ fn decode_message(value: Value) -> Result<Message, CodecError> {
     if let Some(reasoning) = reasoning.filter(|text| !text.is_empty()) {
         content.push(ContentPart::thinking(reasoning));
     }
+    if let Some(extra) = extra_reasoning {
+        content.extend(thinking_parts(extra));
+    }
+    if let Some(details) = reasoning_details {
+        content.extend(thinking_parts(details));
+    }
     content.extend(body);
+    if let Some(refusal) = refusal.filter(|text| !text.is_empty()) {
+        content.push(ContentPart::text(refusal));
+    }
     for call in tool_calls {
         content.push(decode_tool_call(call)?);
+    }
+    if let Some(call) = function_call {
+        content.push(function_call_part(call));
     }
     Ok(Message {
         role,
@@ -1446,6 +1584,101 @@ fn encode_finish(reason: &StopReason) -> &str {
         StopReason::Refusal => "refusal",
         StopReason::Other(token) => token.as_str(),
     }
+}
+
+fn take_saying(object: &mut Object, key: &str) -> Option<Value> {
+    if object.get(key).is_some_and(value_says) {
+        object.remove(key)
+    } else {
+        None
+    }
+}
+
+fn value_says(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::String(text) => !text.is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        _ => true,
+    }
+}
+
+fn reasoning_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Array(items) => items.iter().filter_map(detail_text).collect(),
+        Value::Object(_) => detail_text(value).unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+fn detail_text(value: &Value) -> Option<String> {
+    if let Some(text) = value.as_str()
+        && !text.is_empty()
+    {
+        return Some(text.to_owned());
+    }
+    let object = value.as_object()?;
+    for key in ["text", "summary", "content", "reasoning"] {
+        if let Some(text) = object.get(key).and_then(Value::as_str)
+            && !text.is_empty()
+        {
+            return Some(text.to_owned());
+        }
+    }
+    None
+}
+
+fn thinking_parts(value: Value) -> Vec<ContentPart> {
+    if !value_says(&value) {
+        return Vec::new();
+    }
+    let text = reasoning_text(&value);
+    if !text.is_empty() {
+        return vec![ContentPart::thinking(text)];
+    }
+    let data = serde_json::to_string(&value).unwrap_or_default();
+    if data.is_empty() {
+        return Vec::new();
+    }
+    vec![ContentPart::Thinking(ThinkingPart {
+        text: String::new(),
+        signature: None,
+        redacted: true,
+        data: Some(data),
+        extensions: Extensions::new(),
+    })]
+}
+
+fn function_call_part(value: Value) -> ContentPart {
+    let (id, name, arguments) = match value {
+        Value::Object(mut object) => {
+            let id = take_string(&mut object, "id")
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            let name = take_string(&mut object, "name")
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            let arguments = take_string(&mut object, "arguments")
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            (id, name, arguments)
+        }
+        other => (
+            String::new(),
+            String::new(),
+            other.as_str().unwrap_or_default().to_owned(),
+        ),
+    };
+    ContentPart::ToolCall(ToolCallPart {
+        id,
+        name,
+        arguments: ToolArguments::from_text(&arguments),
+        extensions: Extensions::new(),
+    })
 }
 
 fn take_content_string(object: &mut Object) -> Result<Option<String>, CodecError> {
