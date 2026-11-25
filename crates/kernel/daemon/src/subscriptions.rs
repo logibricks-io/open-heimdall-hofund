@@ -75,6 +75,7 @@ pub(crate) struct SubscriptionState {
     limits: HttpLimits,
     timeouts: (Duration, Duration),
     at_once: u64,
+    stale_replica_quota: bool,
     members: Mutex<Vec<SubscriptionMember>>,
     ask: Arc<AskSlot>,
 }
@@ -158,6 +159,7 @@ pub(crate) fn build(
             limits,
         )
         .map_err(show)?;
+        let stale_replica_quota = factory.spec().stale_replica_quota();
         let instance = factory.validate_and_build(&raw, &host).map_err(|error| {
             DaemonError::new(format!("subscription `{}`: {error}", subscription.id))
         })?;
@@ -181,6 +183,7 @@ pub(crate) fn build(
                 limits,
                 timeouts,
                 at_once,
+                stale_replica_quota,
                 members: Mutex::new(Vec::new()),
                 ask: slot,
             }),
@@ -198,6 +201,11 @@ impl SubscriptionState {
     /// The host the instance was built with.
     pub(crate) fn host(&self) -> &HostContext {
         &self.host
+    }
+
+    /// Whether this subscription's quota windows need stale-replica filtering.
+    pub(crate) fn stale_replica_quota(&self) -> bool {
+        self.stale_replica_quota
     }
 
     /// The directory that holds the config file and legacy sibling imports.
@@ -582,7 +590,13 @@ impl QuotaPolls {
                         }
                         quotas.record_success(
                             card,
-                            windows.iter().map(WindowInfo::from_plugin).collect(),
+                            windows
+                                .iter()
+                                .map(WindowInfo::from_plugin)
+                                .map(|info| {
+                                    info.with_stale_replica_quota(state.stale_replica_quota)
+                                })
+                                .collect(),
                             quotas.now(),
                         );
                     }
@@ -673,7 +687,11 @@ impl QuotaPolls {
                     }
                     quotas.record_success(
                         card,
-                        windows.iter().map(WindowInfo::from_plugin).collect(),
+                        windows
+                            .iter()
+                            .map(WindowInfo::from_plugin)
+                            .map(|info| info.with_stale_replica_quota(state.stale_replica_quota))
+                            .collect(),
                         quotas.now(),
                     );
                 }
