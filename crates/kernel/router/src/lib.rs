@@ -1066,7 +1066,8 @@ impl Router {
         result
     }
 
-    /// Whether hop `index` is resting on a quota refusal that named its deadline.
+    /// Whether hop `index` has a vendor-timed quota or credit rest without an
+    /// open renewal probe.
     fn vendor_timed_quota_at(&self, resolved: &Resolved, index: usize) -> bool {
         let Some(cooldowns) = &self.cooldowns else {
             return false;
@@ -1079,10 +1080,11 @@ impl Router {
     /// Counts input tokens for `request`.
     ///
     /// An upstream that has a count endpoint is asked, with the same failover
-    /// rules as [`Self::dispatch`]. A vendor-timed quota rest is not asked.
-    /// The next member counts, or the result is a character estimate when
-    /// none remains. When every asked upstream has no count endpoint, the
-    /// result is that estimate and [`InputCount::estimated`] is set.
+    /// rules as [`Self::dispatch`]. A vendor-timed quota or credit rest is not
+    /// asked unless its renewal probe is open. The next member counts, or the
+    /// result is a character estimate when none remains. When every asked
+    /// upstream has no count endpoint, the result is that estimate and
+    /// [`InputCount::estimated`] is set.
     ///
     /// # Errors
     ///

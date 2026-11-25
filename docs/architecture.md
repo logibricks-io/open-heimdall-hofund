@@ -464,9 +464,10 @@ hours, then five hours. A renewed window lifts a rest whose deadline was not
 vendor-named. A vendor-timed quota or credit rest instead opens one upstream
 probe while keeping the rest. Only a vendor-timed refusal within one second of
 that deadline closes it; a guessed or farther refusal leaves it open. A real
-answer clears the open rest and retains its asked deadline. When every remaining
-candidate is held, routing returns the first stored refusal and soonest reset
-without calling upstream.
+answer clears only an open vendor-timed quota or credit rest and retains its
+asked deadline. An unused open probe closes when its rest expires. When every
+remaining candidate is held, routing returns the first stored refusal and
+soonest reset without calling upstream.
 Other subscription accounts stay at 30 minutes. Named credit resets cap at 35
 days, generic/rate/quota header hints cap at one hour, and passive window resets
 cap at eight days. New events never shorten a longer active rest. A vendor-restricted account,
@@ -506,10 +507,12 @@ slow-start, or overload rest was guessed, soonest first. Fit does not treat a
 guessed quota, credit, key, or vendor-timed rest as a member that can hold the
 prompt; when no eligible member fits, the soonest probe is still asked. The shared cooldown
 book prevents another hand-on to that resting member for 30 seconds. A
-vendor-timed quota rest is the exception: when every member still to be asked
-rests that way, the stored refusal is returned with `Retry-After` at the
-soonest reset and nobody is asked. A token count skips that rest and uses the
-next member, or the local estimate when none remains.
+vendor-timed quota or credit rest without an open renewal probe is the
+exception: when every member still to be asked rests that way, the stored
+refusal is returned with `Retry-After` at the soonest reset and nobody is asked.
+An open renewal probe is asked. A token count skips a held rest and uses the
+next member, or the local estimate when none remains; an open renewal probe is
+counted upstream.
 
 ## Failover decisions
 

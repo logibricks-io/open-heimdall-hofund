@@ -2109,6 +2109,92 @@ fn d251_10_repeated_same_reset_samples_stay_pinned_and_closed() {
 }
 
 #[test]
+fn d251_12_expired_open_probe_does_not_release_a_later_rest() {
+    for quota in [false, true] {
+        let (book, id, clock) = windowed();
+        let window_reset = *clock.lock().expect("clock") + Duration::from_secs(DAY);
+        let reading = |used| window_at(&clock, window_reset, used);
+        let refusal = |after| {
+            if quota {
+                PluginError::quota("empty").with_reset_after(after)
+            } else {
+                credit_error().with_reset_after(after)
+            }
+        };
+        book.observe_credit_window(&id, &[reading(10)]);
+        let rest = book
+            .record_failure(&id, &refusal(Duration::from_secs(6 * HOUR)))
+            .expect("vendor-timed rest");
+        book.observe_credit_window(&id, &[reading(8)]);
+        assert!(book.renewal_probe(&id));
+
+        *clock.lock().expect("clock") = rest.until();
+        let now = *clock.lock().expect("clock");
+        let later = book
+            .record_failure(&id, &refusal(Duration::from_secs(12 * HOUR)))
+            .expect("later vendor-timed rest");
+        assert_eq!(later.until(), now + Duration::from_secs(12 * HOUR));
+        assert!(!book.renewal_probe(&id));
+
+        book.observe_credit_window(&id, &[reading(10)]);
+        book.observe_credit_window(&id, &[reading(8)]);
+        assert!(book.renewal_probe(&id));
+    }
+}
+
+#[test]
+fn d251_13_model_success_keeps_a_later_restricted_rest() {
+    let (book, id, clock) = windowed();
+    let window_reset = *clock.lock().expect("clock") + Duration::from_secs(DAY);
+    let reading = |used| window_at(&clock, window_reset, used);
+    let refusal = PluginError::quota("empty").with_reset_after(Duration::from_secs(30 * MINUTE));
+    book.observe_credit_window(&id, &[reading(10)]);
+    book.record_failure(&id, &refusal)
+        .expect("vendor-timed rest");
+    book.observe_credit_window(&id, &[reading(8)]);
+    assert!(book.renewal_probe(&id));
+    let restricted = book
+        .record_failure(
+            &id,
+            &PluginError::status_error(403, "restricted").account_restricted(),
+        )
+        .expect("restricted rest");
+    assert_eq!(restricted.cause(), CooldownCause::Restricted);
+
+    book.record_success_for_model(&id, "served-model");
+    assert_eq!(book.cooling(&id), Some(restricted));
+    assert!(book.drain_recoveries().is_empty());
+}
+
+#[test]
+fn d251_14_capacity_does_not_evict_asked_history() {
+    let (book, clock) = with_policy(custom_policy(1, Duration::from_secs(30 * MINUTE)));
+    let id = subscription();
+    book.configure_credit_window(&id);
+    let window_reset = *clock.lock().expect("clock") + Duration::from_secs(DAY);
+    let reading = |used| window_at(&clock, window_reset, used);
+    let refusal = |after| PluginError::quota("empty").with_reset_after(after);
+    book.observe_credit_window(&id, &[reading(10)]);
+    let rest = book
+        .record_failure(&id, &refusal(Duration::from_secs(6 * HOUR)))
+        .expect("vendor-timed rest");
+    book.observe_credit_window(&id, &[reading(8)]);
+    book.record_success_for_model(&id, "served-model");
+    assert_eq!(book.cooling(&id), None);
+
+    book.record_failure(&member("other"), &PluginError::connect("down"));
+    advance(&clock, 2 * MINUTE);
+    let now = *clock.lock().expect("clock");
+    let same_time = rest.until().duration_since(now);
+    book.record_failure(&id, &refusal(same_time))
+        .expect("later same-time refusal");
+    book.observe_credit_window(&id, &[reading(10)]);
+    book.observe_credit_window(&id, &[reading(8)]);
+    assert_eq!(book.cooling(&id).expect("held rest").until(), rest.until());
+    assert!(!book.renewal_probe(&id));
+}
+
+#[test]
 fn d29_6_same_reset_read_a_moment_later_keeps_vendor_timed_rest() {
     let (book, id, clock) = windowed();
     let reset = SystemTime::now() + Duration::from_secs(3 * HOUR);

@@ -9,7 +9,7 @@
 //! | HTTP 429 | Uses the larger of the rate ladder and the retry hint, with the hint capped at 1 hour. The rate ladder starts at 1 minute, doubles for a new 429 within 30 minutes after the previous rate rest ended, and is capped at 30 minutes. A 429 during an active rest does not advance the ladder. A refusal saying the requested model's credentials are cooling uses a model-local ladder. |
 //! | Exhausted quota | Uses a body-written reset capped at 8 days, otherwise the header retry hint capped at 1 hour, or 15 minutes without a positive hint. Model-cooling wording, or a model-scope flag set by the plugin, scopes the rest to that model. |
 //! | API-key credit refusal | Climbs 30 minutes, 2 hours, 8 hours, 24 hours, 3 days, then 7 days after each ended credit rest, repeating 7 days. An active rest keeps its rung. A named reset wins and is capped at 35 days. A retry hint or soon/smaller-request wording stays flat at 30 minutes and off the ladder. Model-cooling wording keys the ladder by model. Success and manual removal restart the ladder. |
-//! | Windowed-account credit refusal | Uses a named body or header reset, the latest full-window reset, a retry hint longer than 5 hours, then 5 hours, capped at 35 days. A renewed window lifts a rest whose deadline was not vendor-named. For a vendor-timed quota or credit rest, the first renewed reading opens one upstream probe without lifting the rest. Only a vendor-timed refusal within one second of that deadline closes the probe; a guessed or farther refusal leaves it open. A real answer clears the open rest and retains its asked deadline. A vendor-timed rest lifts only when a matching window's reset elapsed or moved to a later cycle. Failed and empty readings lift nothing. Other subscription accounts stay flat at 30 minutes. |
+//! | Windowed-account credit refusal | Uses a named body or header reset, the latest full-window reset, a retry hint longer than 5 hours, then 5 hours, capped at 35 days. A renewed window lifts a rest whose deadline was not vendor-named. For a vendor-timed quota or credit rest, the first renewed reading opens one upstream probe without lifting the rest. Only a vendor-timed refusal within one second of that deadline closes the probe; a guessed or farther refusal leaves it open. A real answer clears only the open vendor-timed quota or credit rest and retains its asked deadline. An unused open probe closes when its rest expires. A vendor-timed rest lifts only when a matching window's reset elapsed or moved to a later cycle. Failed and empty readings lift nothing. Other subscription accounts stay flat at 30 minutes. |
 //! | Passive observation | Zero remaining uses the window reset capped at 8 days, the retry hint capped at 1 hour, or 15 minutes without either. Positive remaining at least 98% used with a known positive limit rests only for a positive window reset capped at 8 days. Accounts spending credits and all other observations record nothing. Observations do not advance either failure ladder. |
 //! | Account verification | Rests the whole account for 30 minutes when the error asks for verification. It does not climb the generic ladder. The message is kept, including any link, and is not rewritten. |
 //! | Contained panic | Uses the generic failure ladder with [`CooldownCause::Panic`]. |
@@ -1540,7 +1540,9 @@ impl Cooldowns {
             let oldest = book
                 .states
                 .iter()
-                .filter(|(_, state)| !state.active(now))
+                .filter(|(_, state)| {
+                    !state.active(now) && !matches!(state.renewal, ProbeState::Asked { .. })
+                })
                 .min_by_key(|(_, state)| state.touched)
                 .map(|(key, _)| key.clone());
             let oldest = oldest?;
@@ -1611,6 +1613,9 @@ impl Cooldowns {
                 && let Some(cooling) = state.cooling.take()
             {
                 state.idle_since = Some(cooling.until);
+                if state.renewal.is_open() {
+                    state.renewal = ProbeState::Closed;
+                }
                 recovered.push((key.clone(), cooling.cause));
             }
             if state.rate_until.is_some_and(|until| {
@@ -1866,16 +1871,25 @@ fn qualify_suspension(book: &Book, id: &MemberId, failure: Failure) -> Failure {
 }
 
 fn lift_open_renewal(book: &mut Book, member: &CooldownKey, now: Instant) {
-    let lifted = book.states.get(member).and_then(|state| {
+    let lifted = {
+        let Some(state) = book.states.get_mut(member) else {
+            return;
+        };
         if !state.renewal.is_open() {
-            return None;
+            return;
         }
-        let cooling = state.cooling.as_ref()?;
-        Some((cooling.cause, state.renewal.until().expect("open reset")))
-    });
-    let Some((cause, until)) = lifted else {
-        return;
+        let Some(cooling) = state.cooling.as_ref() else {
+            state.renewal = ProbeState::Closed;
+            return;
+        };
+        if !cooling.vendor_timed
+            || !matches!(cooling.cause, CooldownCause::Quota | CooldownCause::Credit)
+        {
+            return;
+        }
+        (cooling.cause, state.renewal.until().expect("open reset"))
     };
+    let (cause, until) = lifted;
     let revision = next_revision(book);
     let state = book.states.get_mut(member).expect("open renewal state");
     state.cooling = None;
