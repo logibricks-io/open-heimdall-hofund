@@ -5,9 +5,13 @@
 //! temporary file and a rename replaces the file, and a watch on the old one
 //! would go quiet. Events for any other name in those directories (the usage
 //! ledger, the token, the sidecar `.lock`, editor swap files) are ignored.
-//! Matching events are debounced on the trailing edge, so a partial save
-//! followed by the final write reloads once. A rescan or overflow notice, or
-//! a watcher error, forces an immediate check because events may be lost.
+//! Matching events are debounced on the trailing edge. One in-flight check is
+//! followed by a bounded disk recheck, and later events still debounce. When
+//! a check leaves an edit unapplied, disk-stamp comparisons stay armed at the
+//! same quiet-period cadence until a stable correction is applied, even if
+//! notify delivers no further event. A healthy stable file consumes the arm.
+//! A rescan or overflow notice, or a watcher error, forces an immediate check
+//! because events may be lost.
 //! When the watcher cannot be set up, or its event stream ends, the file is
 //! polled instead by length, modification time, and content revision.
 //!
@@ -54,7 +58,13 @@ impl Default for WatchTiming {
     }
 }
 
-type CheckFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CheckOutcome {
+    Applied,
+    Unapplied,
+}
+
+type CheckFuture = Pin<Box<dyn Future<Output = CheckOutcome> + Send>>;
 /// One look at the file on disk: a watcher-origin reload in the daemon.
 pub(crate) type Check = Arc<dyn Fn() -> CheckFuture + Send + Sync>;
 type Events = mpsc::UnboundedReceiver<notify::Result<Event>>;
@@ -64,11 +74,15 @@ pub(crate) fn spawn(ops: Arc<ConfigOps>, path: PathBuf) -> JoinHandle<()> {
     let check: Check = Arc::new(move || {
         let ops = Arc::clone(&ops);
         Box::pin(async move {
-            if let Err(failure) = ops.reload(None, ReloadOrigin::Watcher).await {
-                tracing::warn!(
-                    kind = ?failure.error.kind,
-                    "configuration edit on disk was not applied; the last good configuration stays"
-                );
+            match ops.reload(None, ReloadOrigin::Watcher).await {
+                Ok(_) => CheckOutcome::Applied,
+                Err(failure) => {
+                    tracing::warn!(
+                        kind = ?failure.error.kind,
+                        "configuration edit on disk was not applied; the last good configuration stays"
+                    );
+                    CheckOutcome::Unapplied
+                }
             }
         })
     });
@@ -199,9 +213,35 @@ fn classify(targets: &Targets, event: &notify::Result<Event>) -> Step {
         // A rescan flag, or an event kind the backend could not classify, may
         // stand for changes whose paths were not reported.
         Ok(event) if event.need_rescan() || matches!(event.kind, EventKind::Other) => Step::Force,
+        // Reading the configuration for a check must not schedule another check.
+        Ok(event) if matches!(event.kind, EventKind::Access(_)) => Step::Ignore,
         Ok(event) if event.paths.iter().any(|path| targets.matches(path)) => Step::Settle,
         Ok(_) => Step::Ignore,
     }
+}
+
+/// Why the quiet-period timer is running.
+enum Wake {
+    /// Trailing edge of a matching notify event. The expiry always checks.
+    Event,
+    /// Disk stamp sampled when the in-flight check returned. The expiry
+    /// checks only when the file has moved since that sample.
+    Disk(DiskArm),
+}
+
+struct DiskArm {
+    previous: Option<Stamp>,
+    persistent: bool,
+}
+
+struct Quiet {
+    at: Instant,
+    wake: Wake,
+}
+
+enum Incoming {
+    Event(Option<notify::Result<Event>>),
+    Tick,
 }
 
 /// Debounces watcher events until the stream ends, then polls.
@@ -213,27 +253,84 @@ pub(crate) async fn follow(
     mut events: Events,
     mut watcher: Option<RecommendedWatcher>,
 ) {
-    let mut deadline: Option<Instant> = None;
+    let mut quiet: Option<Quiet> = None;
     loop {
-        let next = match deadline {
+        let pending = quiet.take();
+        let at = pending.as_ref().map(|pending| pending.at);
+        // Prefer a queued watcher event over the quiet-period tick so a
+        // rescan, a watcher error, or a new edit is not stuck behind a stat.
+        let incoming = match at {
             Some(at) => tokio::select! {
-                event = events.recv() => event,
-                () = tokio::time::sleep_until(at) => {
-                    deadline = None;
-                    look(path, check, &mut targets, watcher.as_mut()).await;
-                    continue;
-                }
+                biased;
+                event = events.recv() => Incoming::Event(event),
+                () = tokio::time::sleep_until(at) => Incoming::Tick,
             },
-            None => events.recv().await,
+            None => Incoming::Event(events.recv().await),
         };
-        let Some(event) = next else { break };
-        match classify(&targets, &event) {
-            Step::Settle => deadline = Some(Instant::now() + timing.debounce),
-            Step::Force => {
-                deadline = None;
-                look(path, check, &mut targets, watcher.as_mut()).await;
+        match incoming {
+            Incoming::Tick => {
+                let Some(pending) = pending else {
+                    continue;
+                };
+                match pending.wake {
+                    Wake::Event => {
+                        quiet = Some(
+                            look_and_arm(
+                                path,
+                                check,
+                                &mut targets,
+                                watcher.as_mut(),
+                                timing.debounce,
+                            )
+                            .await,
+                        );
+                    }
+                    Wake::Disk(arm) => {
+                        if stamp(path) != arm.previous {
+                            quiet = Some(
+                                look_and_arm(
+                                    path,
+                                    check,
+                                    &mut targets,
+                                    watcher.as_mut(),
+                                    timing.debounce,
+                                )
+                                .await,
+                            );
+                        } else if arm.persistent {
+                            quiet = Some(Quiet {
+                                at: Instant::now() + timing.debounce,
+                                wake: Wake::Disk(arm),
+                            });
+                        }
+                    }
+                }
             }
-            Step::Ignore => {}
+            Incoming::Event(event) => {
+                quiet = pending;
+                let Some(event) = event else { break };
+                match classify(&targets, &event) {
+                    Step::Settle => {
+                        quiet = Some(Quiet {
+                            at: Instant::now() + timing.debounce,
+                            wake: Wake::Event,
+                        });
+                    }
+                    Step::Force => {
+                        quiet = Some(
+                            look_and_arm(
+                                path,
+                                check,
+                                &mut targets,
+                                watcher.as_mut(),
+                                timing.debounce,
+                            )
+                            .await,
+                        );
+                    }
+                    Step::Ignore => {}
+                }
+            }
         }
     }
     drop(watcher);
@@ -247,16 +344,56 @@ pub(crate) async fn follow(
     poll(path, timing.poll, check).await;
 }
 
-/// Checks the file, then follows a symlink that now points somewhere else.
+struct Look {
+    baseline: Option<Stamp>,
+    persistent: bool,
+}
+
+/// Runs one check and arms its stamp for the quiet period.
+async fn look_and_arm(
+    path: &Path,
+    check: &Check,
+    targets: &mut Targets,
+    watcher: Option<&mut RecommendedWatcher>,
+    debounce: Duration,
+) -> Quiet {
+    let looked = look(path, check, targets, watcher).await;
+    Quiet {
+        at: Instant::now() + debounce,
+        wake: Wake::Disk(DiskArm {
+            previous: looked.baseline,
+            persistent: looked.persistent,
+        }),
+    }
+}
+
+/// Runs the in-flight check, then at most one immediate disk recheck.
+///
+/// The baseline is the stamp sampled after the in-flight check, before that
+/// recheck. Recovery remains armed after an unapplied or unstable check until
+/// a later check applies a stable file. Watcher events keep being read.
 async fn look(
     path: &Path,
     check: &Check,
     targets: &mut Targets,
     watcher: Option<&mut RecommendedWatcher>,
-) {
-    check().await;
+) -> Look {
+    let observed = stamp(path);
+    let mut outcome = check().await;
+    let after = stamp(path);
+    let mut unstable = false;
+    // Cap the tight loop at one recheck. A save storm must return to `follow`
+    // so later writes still debounce and queued events are still serviced.
+    if after != observed {
+        outcome = check().await;
+        unstable = stamp(path) != after;
+    }
+    let persistent = outcome == CheckOutcome::Unapplied || unstable;
     let Ok(current) = Targets::resolve(path) else {
-        return;
+        return Look {
+            baseline: after,
+            persistent,
+        };
     };
     if let Some(watcher) = watcher {
         for dir in current.dirs.difference(&targets.dirs) {
@@ -266,6 +403,10 @@ async fn look(
         }
     }
     *targets = current;
+    Look {
+        baseline: after,
+        persistent,
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -303,18 +444,30 @@ pub(crate) async fn poll(path: &Path, every: Duration, check: &Check) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use notify::event::{Flag, ModifyKind};
+    use tokio::task::JoinHandle;
 
     use super::*;
+
+    /// Aborts the watcher task on every exit, including an assertion failure.
+    struct AbortOnDrop(JoinHandle<()>);
+
+    impl Drop for AbortOnDrop {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
 
     fn counter() -> (Arc<AtomicUsize>, Check) {
         let count = Arc::new(AtomicUsize::new(0));
         let seen = Arc::clone(&count);
         let check: Check = Arc::new(move || {
             seen.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async {})
+            Box::pin(async { CheckOutcome::Applied })
         });
         (count, check)
     }
@@ -358,22 +511,6 @@ mod tests {
         fs::write(dir.join("sub").join("hofund.toml"), "x").expect("nested");
     }
 
-    /// Waits until `count` holds still for 500 ms and returns it. macOS
-    /// FSEvents can deliver the config file's own creation late, so a test
-    /// that asserts "no new check" compares against this baseline (#281).
-    async fn settled(count: &AtomicUsize) -> usize {
-        let mut last = count.load(Ordering::SeqCst);
-        for _ in 0..10 {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            let now = count.load(Ordering::SeqCst);
-            if now == last {
-                return now;
-            }
-            last = now;
-        }
-        last
-    }
-
     /// Waits up to `limit` for `count` to reach `want`.
     async fn reaches(count: &AtomicUsize, want: usize, limit: Duration) -> bool {
         let until = Instant::now() + limit;
@@ -413,6 +550,15 @@ mod tests {
         assert!(targets.matches(&path));
         assert!(!targets.matches(&dir.path().join("sub").join("hofund.toml")));
         assert!(!targets.matches(&dir.path().join("hofund.toml.tmp")));
+    }
+
+    #[test]
+    fn configuration_access_does_not_schedule_a_check() {
+        let (_dir, path) = scratch();
+        let targets = Targets::resolve(&path).expect("targets");
+        let event =
+            Ok(Event::new(EventKind::Access(notify::event::AccessKind::Any)).add_path(path));
+        assert!(matches!(classify(&targets, &event), Step::Ignore));
     }
 
     #[test]
@@ -494,6 +640,217 @@ mod tests {
         task.abort();
     }
 
+    /// Virtual bound slightly past one quiet period. Paused time makes the
+    /// debounce immediate, and the extra millisecond fails the test instead
+    /// of hanging when a check never arrives.
+    fn quiet_bound() -> Duration {
+        DEBOUNCE + Duration::from_millis(1)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn change_during_check_is_rechecked_without_another_event() {
+        let (_dir, path) = scratch();
+        let targets = Targets::resolve(&path).expect("targets");
+        let mtime = fs::metadata(&path)
+            .and_then(|meta| meta.modified())
+            .expect("mtime");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (checked, mut checks) = mpsc::unbounded_channel();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let gate = Arc::new(Mutex::new(Some((started_tx, release_rx))));
+        let check: Check = {
+            let calls = Arc::clone(&calls);
+            let gate = Arc::clone(&gate);
+            Arc::new(move || {
+                let call = calls.fetch_add(1, Ordering::SeqCst);
+                checked.send(call).expect("check record");
+                let gate = gate.lock().expect("check gate").take();
+                Box::pin(async move {
+                    if let Some((started, release)) = gate {
+                        started.send(()).expect("check started");
+                        release.await.expect("release check");
+                    }
+                    CheckOutcome::Applied
+                })
+            })
+        };
+        let (sender, events) = mpsc::unbounded_channel();
+        let task = AbortOnDrop({
+            let path = path.clone();
+            tokio::spawn(async move { follow(&path, fast(), &check, targets, events, None).await })
+        });
+
+        sender.send(modified(&path)).expect("modify");
+        assert_eq!(
+            tokio::time::timeout(quiet_bound(), checks.recv())
+                .await
+                .expect("first check timed out"),
+            Some(0)
+        );
+        started_rx.await.expect("first check dropped");
+
+        fs::write(&path, "listen = \"127.0.0.1:1\"\n").expect("second write");
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .and_then(|file| file.set_modified(mtime))
+            .expect("restore mtime");
+        release_tx.send(()).expect("release first check");
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(1), checks.recv())
+                .await
+                .expect("second write was not rechecked"),
+            Some(1)
+        );
+        drop(task);
+    }
+
+    /// The control-watch integration order: the check that publishes
+    /// `config_rejected` has already returned, the r1 one-shot arm has expired
+    /// unchanged, no second notify event is delivered, and only then does the
+    /// correcting write land.
+    #[tokio::test(start_paused = true)]
+    async fn correcting_write_after_rejection_is_rechecked_without_another_event() {
+        let (_dir, path) = scratch();
+        let targets = Targets::resolve(&path).expect("targets");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (checked, mut checks) = mpsc::unbounded_channel();
+        let check: Check = {
+            let calls = Arc::clone(&calls);
+            Arc::new(move || {
+                let call = calls.fetch_add(1, Ordering::SeqCst);
+                let checked = checked.clone();
+                Box::pin(async move {
+                    // The send is the end of the check, where `config_rejected`
+                    // is published. `follow` samples the stamp and arms the
+                    // quiet period before this receive resumes.
+                    checked.send(call).expect("check record");
+                    if call == 0 {
+                        CheckOutcome::Unapplied
+                    } else {
+                        CheckOutcome::Applied
+                    }
+                })
+            })
+        };
+        let (sender, events) = mpsc::unbounded_channel();
+        let task = AbortOnDrop({
+            let path = path.clone();
+            tokio::spawn(async move { follow(&path, fast(), &check, targets, events, None).await })
+        });
+
+        sender.send(modified(&path)).expect("modify");
+        assert_eq!(
+            tokio::time::timeout(quiet_bound(), checks.recv())
+                .await
+                .expect("rejection was not observed"),
+            Some(0)
+        );
+        tokio::time::advance(quiet_bound()).await;
+        tokio::task::yield_now().await;
+        assert!(
+            checks.try_recv().is_err(),
+            "an unchanged rejection was checked again"
+        );
+
+        fs::write(&path, "listen = \"127.0.0.1:1\"\n").expect("correcting write");
+        assert_eq!(
+            tokio::time::timeout(quiet_bound(), checks.recv())
+                .await
+                .expect("correcting write was not rechecked without another event"),
+            Some(1)
+        );
+        tokio::time::advance(quiet_bound()).await;
+        tokio::task::yield_now().await;
+        assert!(
+            checks.try_recv().is_err(),
+            "a stable applied file kept being checked"
+        );
+        drop(task);
+    }
+
+    /// A stamp that changes on every pass must not keep `look` from returning.
+    /// The write that arrives during the one recheck is picked up on the
+    /// quiet period, and a further notify event is still debounced.
+    #[tokio::test(start_paused = true)]
+    async fn recheck_returns_to_follow_while_writes_continue() {
+        let (_dir, path) = scratch();
+        let targets = Targets::resolve(&path).expect("targets");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let releases = Arc::new(Mutex::new(VecDeque::new()));
+        let (started_tx, mut started) = mpsc::unbounded_channel();
+        let check: Check = {
+            let calls = Arc::clone(&calls);
+            let releases = Arc::clone(&releases);
+            Arc::new(move || {
+                let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+                releases.lock().expect("releases").push_back(release_tx);
+                let call = calls.fetch_add(1, Ordering::SeqCst);
+                let started_tx = started_tx.clone();
+                Box::pin(async move {
+                    started_tx.send(call).expect("started");
+                    release_rx.await.expect("release check");
+                    CheckOutcome::Applied
+                })
+            })
+        };
+        let (sender, events) = mpsc::unbounded_channel();
+        let task = AbortOnDrop({
+            let path = path.clone();
+            tokio::spawn(async move { follow(&path, fast(), &check, targets, events, None).await })
+        });
+        let release_next = |releases: &Mutex<VecDeque<tokio::sync::oneshot::Sender<()>>>| {
+            let release = releases
+                .lock()
+                .expect("releases")
+                .pop_front()
+                .expect("queued release");
+            release.send(()).expect("release check");
+        };
+
+        sender.send(modified(&path)).expect("modify");
+        assert_eq!(
+            tokio::time::timeout(quiet_bound(), started.recv())
+                .await
+                .expect("in-flight check"),
+            Some(0)
+        );
+        fs::write(&path, "listen = \"127.0.0.1:1\"\n").expect("write during check");
+        release_next(&releases);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(1), started.recv())
+                .await
+                .expect("the one disk recheck did not run"),
+            Some(1)
+        );
+        fs::write(&path, "listen = \"127.0.0.1:2\"\n").expect("write during recheck");
+        release_next(&releases);
+        tokio::task::yield_now().await;
+        assert!(
+            started.try_recv().is_err(),
+            "look kept rechecking while writes were still arriving"
+        );
+        assert_eq!(
+            tokio::time::timeout(quiet_bound(), started.recv())
+                .await
+                .expect("the write during the recheck was dropped"),
+            Some(2)
+        );
+
+        // Returning to `follow` must keep servicing watcher events.
+        sender.send(modified(&path)).expect("later modify");
+        release_next(&releases);
+        assert_eq!(
+            tokio::time::timeout(quiet_bound(), started.recv())
+                .await
+                .expect("a later event was not debounced"),
+            Some(3)
+        );
+        drop(task);
+    }
+
     #[tokio::test]
     async fn watcher_debounces_parent_directory_rename_and_partial_save() {
         let (_dir, path) = scratch();
@@ -514,25 +871,55 @@ mod tests {
         task.abort();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn watcher_ignores_sibling_usage_and_token_writes() {
         let (dir, path) = scratch();
-        let (count, check) = counter();
-        let task = spawn_with(path.clone(), fast(), check);
-        let baseline = settled(&count).await;
+        let targets = Targets::resolve(&path).expect("targets");
+        let (checked, mut checks) = mpsc::unbounded_channel();
+        let check: Check = Arc::new(move || {
+            let checked = checked.clone();
+            Box::pin(async move {
+                checked.send(()).expect("check record");
+                CheckOutcome::Applied
+            })
+        });
+        let (sender, events) = mpsc::unbounded_channel();
+        let task = AbortOnDrop({
+            let path = path.clone();
+            tokio::spawn(async move { follow(&path, fast(), &check, targets, events, None).await })
+        });
+
+        sender.send(modified(&path)).expect("baseline modify");
+        tokio::time::timeout(quiet_bound(), checks.recv())
+            .await
+            .expect("baseline check timed out")
+            .expect("baseline check dropped");
         write_siblings(dir.path());
-        tokio::time::sleep(Duration::from_millis(900)).await;
-        assert_eq!(
-            count.load(Ordering::SeqCst),
-            baseline,
+        for entry in fs::read_dir(dir.path()).expect("siblings") {
+            let sibling = entry.expect("sibling").path();
+            if sibling != path {
+                sender.send(modified(&sibling)).expect("sibling event");
+            }
+        }
+        for nested in [".hofund/daemon.json", "sub/hofund.toml"] {
+            sender
+                .send(modified(&dir.path().join(nested)))
+                .expect("nested sibling event");
+        }
+        tokio::time::advance(quiet_bound()).await;
+        tokio::task::yield_now().await;
+        assert!(
+            checks.try_recv().is_err(),
             "a sibling write triggered a check"
         );
+
         fs::write(&path, "listen = \"127.0.0.1:2\"\n").expect("edit");
-        assert!(
-            reaches(&count, baseline + 1, Duration::from_secs(2)).await,
-            "edit missed"
-        );
-        task.abort();
+        sender.send(modified(&path)).expect("config event");
+        tokio::time::timeout(quiet_bound(), checks.recv())
+            .await
+            .expect("edit missed")
+            .expect("edit check dropped");
+        drop(task);
     }
 
     /// The backend-level half of the sibling test: no event the real watcher
