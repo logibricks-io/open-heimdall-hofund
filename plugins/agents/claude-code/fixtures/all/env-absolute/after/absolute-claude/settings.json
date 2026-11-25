@@ -7,6 +7,7 @@
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "absolute-model",
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "absolute-model",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "absolute-model",
-    "ANTHROPIC_SMALL_FAST_MODEL": "absolute-model"
+    "ANTHROPIC_SMALL_FAST_MODEL": "absolute-model",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "route-a"
   }
 }

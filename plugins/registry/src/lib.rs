@@ -254,6 +254,39 @@ pub fn find_fixture_preset(id: &str) -> Option<(&'static CompiledPreset, Option<
         .map(|preset| (preset, alias.region))
 }
 
+/// A subagent model read from a local agent settings file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InheritingSubagent {
+    /// Model id, without an effort suffix.
+    pub model: String,
+    /// Effort label when the setting named one.
+    pub effort: Option<String>,
+}
+
+/// The subagent model for an inheriting tool turn, when one is set.
+///
+/// `is_route` reports whether `model` is a gateway route right now. The
+/// settings directory is `$CLAUDE_CONFIG_DIR` or the user home. Tests that
+/// need a stand-in directory call the agent crate with that path instead.
+#[must_use]
+pub fn inheriting_subagent_model(
+    agent_id: &str,
+    body: &[u8],
+    gateway_origin: &str,
+    is_route: impl Fn(&str) -> bool,
+) -> Option<InheritingSubagent> {
+    hofund_plugin_agent_claude::inheriting_subagent_from_env(
+        agent_id,
+        body,
+        gateway_origin,
+        is_route,
+    )
+    .map(|setting| InheritingSubagent {
+        model: setting.model,
+        effort: setting.effort,
+    })
+}
+
 /// The linked read-only session stores.
 #[must_use]
 pub fn session_stores() -> Vec<Arc<dyn hofund_plugin_api::SessionStore>> {

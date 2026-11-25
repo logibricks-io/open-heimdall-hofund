@@ -634,13 +634,24 @@ async fn start_inner(
         );
     }
     // Downgrade shares the allocation, so this follows every `Arc::get_mut` builder.
-    runtime.set_ask(gateway.ask_backend());
     let env = match options.hofund_addr {
         Some(value) => Some(value),
         None => hofund_config::addr_env(),
     };
     let (listen, source) =
         hofund_config::effective_listen(&config, env.as_deref()).map_err(show)?;
+    let gateway_origin = format!("http://{listen}");
+    let subagent_routes = snapshot.clone();
+    let subagent_config = runtime.config_updates();
+    gateway = gateway.with_subagent_model(Arc::new(move |query| {
+        let models = subagent_routes.load().models();
+        let config = subagent_config.borrow();
+        registry::inheriting_subagent_model(query.agent_id, query.body, &gateway_origin, |model| {
+            models.iter().any(|id| id == model)
+                || config.routes.iter().any(|route| route.model == model)
+        })
+    }));
+    runtime.set_ask(gateway.ask_backend());
     let model_listener = options.model_listener.take();
     let relisten_listeners = std::mem::take(&mut options.relisten_listeners);
     let mut running = gateway

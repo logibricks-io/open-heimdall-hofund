@@ -316,6 +316,12 @@ impl RouteTraceBook {
         self.upsert(decision, true);
     }
 
+    /// Lists the newest decisions with the default query.
+    #[must_use]
+    pub fn recent(&self) -> Vec<RoutingDecision> {
+        self.list(&RouteQuery::default()).decisions
+    }
+
     /// Lists decisions for the management API.
     #[must_use]
     pub fn list(&self, query: &RouteQuery) -> RouteListResponse {
@@ -582,6 +588,11 @@ impl RouteTraceHandle {
         self.builder.decision.moved = Some(ModelMove::new(to, why));
     }
 
+    /// Records a subagent model consideration before routing completes.
+    pub fn set_subagent(&mut self, route: hofund_control_proto::SubagentRoute) {
+        self.builder.decision.subagent = Some(Box::new(route));
+    }
+
     /// Records ordered candidates.
     pub fn set_candidates(&mut self, candidates: Vec<RouteCandidate>) {
         self.builder.decision.candidates = candidates;
@@ -818,6 +829,26 @@ mod tests {
         let row = list.decisions[0].moved.as_ref().expect("moved");
         assert_eq!(row.to, "wire-model");
         assert_eq!(row.why, "stand-in");
+    }
+
+    #[test]
+    fn d267_subagent_note_keeps_the_asked_model() {
+        let book = RouteTraceBook::new();
+        let mut handle = book.begin(RouteMeta {
+            asked: "lead".to_owned(),
+            ..RouteMeta::default()
+        });
+        handle.set_subagent(hofund_control_proto::SubagentRoute::new(
+            "lead",
+            "sub",
+            "the gateway does not serve it now",
+        ));
+        handle.finish(None, None, Some(200), None, None);
+        let row = &book.recent()[0];
+        assert_eq!(row.asked, "lead");
+        let note = row.subagent.as_ref().expect("subagent");
+        assert_eq!(note.to, "sub");
+        assert_eq!(note.kept, "the gateway does not serve it now");
     }
 
     #[test]

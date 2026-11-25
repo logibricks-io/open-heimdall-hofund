@@ -12,7 +12,8 @@
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "user-model",
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "user-model",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "user-model",
-    "ANTHROPIC_SMALL_FAST_MODEL": "user-model"
+    "ANTHROPIC_SMALL_FAST_MODEL": "user-model",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "route-a"
   },
   "ui": {
     "theme": "dark"
