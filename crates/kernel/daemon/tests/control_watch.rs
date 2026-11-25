@@ -11,6 +11,8 @@ use hofund_control_proto::{
     decode_response,
 };
 use hofund_daemon::{ControlRuntime, Running, StartOptions, start_with_options};
+use notify::event::ModifyKind;
+use notify::{Event, EventKind};
 use sha2::{Digest, Sha256};
 
 const SECRET: &str = "sk-control-watch-provider-secret";
@@ -28,6 +30,10 @@ fn revision(text: &str) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+fn watch_event(path: &std::path::Path) -> notify::Result<Event> {
+    Ok(Event::new(EventKind::Modify(ModifyKind::Any)).add_path(path.to_path_buf()))
+}
+
 struct Daemon {
     running: Running,
     http: reqwest::Client,
@@ -43,6 +49,14 @@ impl Daemon {
     }
 
     async fn start_cased(text: &str, start_name: &str) -> Self {
+        Self::start_cased_with_events(text, start_name, None).await
+    }
+
+    async fn start_cased_with_events(
+        text: &str,
+        start_name: &str,
+        config_watch_events: Option<tokio::sync::mpsc::UnboundedReceiver<notify::Result<Event>>>,
+    ) -> Self {
         let config_dir = tempfile::tempdir().expect("config dir");
         let runtime_dir = tempfile::tempdir().expect("runtime dir");
         std::fs::create_dir_all(runtime_dir.path().join("home")).expect("home");
@@ -55,6 +69,7 @@ impl Daemon {
                 control_listen: Some("127.0.0.1:0".parse().expect("control address")),
                 control_runtime: Some(ControlRuntime::new(None, runtime_dir.path().to_path_buf())),
                 agent_session: Some(Session::new(runtime_dir.path().join("home")).with_path("")),
+                config_watch_events,
                 ..StartOptions::default()
             },
         )
@@ -179,6 +194,57 @@ async fn watcher_invalid_edit_keeps_last_good_and_emits_config_rejected() {
         other => panic!("expected config_reloaded, got {other:?}"),
     }
     assert_eq!(daemon.config().await.generation, 2);
+    drop(stream);
+    support::shutdown(daemon.running).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn duplicated_old_events_cannot_starve_a_corrected_edit() {
+    let original = config("");
+    let (sender, events) = tokio::sync::mpsc::unbounded_channel();
+    let daemon = Daemon::start_cased_with_events(&original, "hofund.toml", Some(events)).await;
+    let mut stream = daemon.events().await;
+    let mut buffer = String::new();
+
+    let invalid = format!("{original}[[routes]]\nmodel = \"x\"\nupstreams = [\"missing\"]\n");
+    std::fs::write(&daemon.path, &invalid).expect("invalid edit");
+    sender
+        .send(watch_event(&daemon.path))
+        .expect("invalid event");
+    match next_event(&mut stream, &mut buffer, Duration::from_secs(3)).await {
+        Some((_, EventPayload::ConfigRejected(event))) => {
+            assert_eq!(event.revision, revision(&invalid));
+        }
+        other => panic!("expected config_rejected, got {other:?}"),
+    }
+    tokio::time::advance(Duration::from_millis(400)).await;
+    tokio::task::yield_now().await;
+
+    // FSEvents can keep delivering coalesced duplicates for the first write
+    // after the correction is already on disk, while omitting its own event.
+    let fixed = config("# fixed by hand\n");
+    std::fs::write(&daemon.path, &fixed).expect("fixed edit");
+    let corrected_at = tokio::time::Instant::now();
+    let duplicate_path = daemon.path.clone();
+    let duplicates = tokio::spawn(async move {
+        let mut ticks = tokio::time::interval(Duration::from_millis(100));
+        loop {
+            ticks.tick().await;
+            if sender.send(watch_event(&duplicate_path)).is_err() {
+                break;
+            }
+        }
+    });
+    let reloaded = next_event(&mut stream, &mut buffer, Duration::from_secs(3)).await;
+    duplicates.abort();
+    match reloaded {
+        Some((_, EventPayload::ConfigReloaded(event))) => {
+            assert_eq!(event.generation, 2);
+            assert_eq!(event.runtime_revision, revision(&fixed));
+        }
+        other => panic!("expected config_reloaded, got {other:?}"),
+    }
+    assert!(corrected_at.elapsed() <= Duration::from_millis(400));
     drop(stream);
     support::shutdown(daemon.running).await;
 }
