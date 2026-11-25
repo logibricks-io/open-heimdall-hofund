@@ -876,3 +876,148 @@ async fn d246_enabled_output_config_none_selects_low_when_minimal_is_listed() {
     assert_eq!(posted[2]["model"], "model-4-alpha-minimal");
     assert_eq!(posted[3]["model"], "model-4-alpha-minimal");
 }
+
+fn posted_models(calls: &[wiremock::Request]) -> Vec<String> {
+    calls
+        .iter()
+        .filter(|call| call.method.as_str() == "POST")
+        .filter_map(|call| {
+            serde_json::from_slice::<serde_json::Value>(&call.body)
+                .ok()
+                .and_then(|body| body.get("model")?.as_str().map(str::to_owned))
+        })
+        .collect()
+}
+
+/// A 529 on the selected high id is stored under that id. The next family
+/// execute and count at high must see the rest. A different effort uses a
+/// different member and is not blocked. Rewriting the model only inside
+/// `apply_wire` already stores the member id; eligibility that still reads
+/// the family wire id asks the rested member again.
+#[tokio::test]
+async fn d246_overloaded_high_member_rests_the_next_family_call() {
+    let first = MockServer::start().await;
+    let second = MockServer::start().await;
+    let overloaded =
+        r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(Model("model-4-alpha-high"))
+        .respond_with(ResponseTemplate::new(529).set_body_string(overloaded))
+        .mount(&first)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(Model("model-4-alpha-low"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(MESSAGES_OK))
+        .mount(&first)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages/count_tokens"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"input_tokens":7}"#))
+        .mount(&first)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(MESSAGES_OK))
+        .mount(&second)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages/count_tokens"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"input_tokens":7}"#))
+        .mount(&second)
+        .await;
+    let config = hofund_config::load(&format!(
+        "[[providers]]\nid = \"relay-a\"\nprotocol = \"anthropic-messages\"\nbase_url = \"{}\"\napi_key = \"test-key\"\n[[providers]]\nid = \"relay-b\"\nprotocol = \"anthropic-messages\"\nbase_url = \"{}\"\napi_key = \"test-key\"\n[[routes]]\nmodel = \"model-4-alpha\"\nrouting = \"order\"\nupstreams = [\"relay-a\", \"relay-b\"]\n",
+        first.uri(),
+        second.uri()
+    ))
+    .expect("config");
+    let host = super::ModelsHost::new(
+        std::time::Duration::from_secs(2),
+        std::time::Duration::from_secs(2),
+    );
+    let models = source_family();
+    host.seed_models("relay-a", &models);
+    host.seed_models("relay-b", &models);
+    let (_dir, snapshot) = open_routes(&config, &host);
+    let high = ask("model-4-alpha", Some(Effort::High));
+    let opened = snapshot
+        .load()
+        .dispatch(&high, "anthropic-messages")
+        .await
+        .expect("failover after overload");
+    assert_eq!(opened.upstream_model, "model-4-alpha-high");
+    assert_eq!(opened.upstream_id, "relay-b");
+    let high_on = |models: &[String]| {
+        models
+            .iter()
+            .filter(|model| model.as_str() == "model-4-alpha-high")
+            .count()
+    };
+    let first_after_open = posted_models(&first.received_requests().await.expect("requests"));
+    assert_eq!(high_on(&first_after_open), 1, "the overload was sent once");
+    let again = snapshot
+        .load()
+        .dispatch(&high, "anthropic-messages")
+        .await
+        .expect("rested high member is not asked");
+    assert_eq!(again.upstream_id, "relay-b");
+    let first_after_again = posted_models(&first.received_requests().await.expect("requests"));
+    assert_eq!(
+        high_on(&first_after_again),
+        1,
+        "the next high execute does not send the rested member"
+    );
+    let counted = snapshot
+        .load()
+        .count(&high, "anthropic-messages")
+        .await
+        .expect("count");
+    assert_eq!(counted.tokens, 7);
+    assert!(!counted.estimated);
+    assert_eq!(counted.upstream_id, "relay-b");
+    let first_after_count = posted_models(&first.received_requests().await.expect("requests"));
+    assert_eq!(
+        high_on(&first_after_count),
+        1,
+        "the next high count does not send the rested member"
+    );
+    let low = snapshot
+        .load()
+        .dispatch(
+            &ask("model-4-alpha", Some(Effort::Low)),
+            "anthropic-messages",
+        )
+        .await
+        .expect("low member");
+    assert_eq!(low.upstream_model, "model-4-alpha-low");
+    assert_eq!(low.upstream_id, "relay-a");
+    let first_models = posted_models(&first.received_requests().await.expect("first"));
+    let second_models = posted_models(&second.received_requests().await.expect("second"));
+    assert_eq!(
+        first_models
+            .iter()
+            .filter(|model| model.as_str() == "model-4-alpha-high")
+            .count(),
+        1,
+        "the rested high member is sent once, then left out of execute and count"
+    );
+    assert_eq!(
+        first_models
+            .iter()
+            .filter(|model| model.as_str() == "model-4-alpha-low")
+            .count(),
+        1
+    );
+    assert!(
+        second_models
+            .iter()
+            .any(|model| model == "model-4-alpha-high")
+    );
+    assert!(
+        !second_models
+            .iter()
+            .any(|model| model == "model-4-alpha-low")
+    );
+}
