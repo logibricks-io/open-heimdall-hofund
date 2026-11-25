@@ -194,7 +194,8 @@ fn r49e_version_manifest_refresh_is_cached_and_used_on_upstream() {
             .expect("upstream")
             .execute(unary_request(), ProtocolId::GENERATIVE_LANGUAGE),
     )
-    .expect("execute") else {
+    .expect("execute")
+    .peel() else {
         panic!("expected raw completion");
     };
     assert_hub_version(&host, "3.5.0");

@@ -160,7 +160,8 @@ pub(crate) fn provider_error(error: PluginError) -> ProviderError {
 }
 
 fn provider_completion(completion: PluginCompletion) -> Completion {
-    match completion {
+    let (codec, completion) = completion.split_produced();
+    let mapped = match completion {
         PluginCompletion::Unary(response) => Completion::Unary(response),
         PluginCompletion::Stream(stream) => {
             Completion::Stream(Box::pin(stream.map(|item| item.map_err(provider_error))))
@@ -174,6 +175,10 @@ fn provider_completion(completion: PluginCompletion) -> Completion {
             },
         ))),
         _ => Completion::Raw(Box::pin(futures_util::stream::empty())),
+    };
+    match codec {
+        Some(codec) => mapped.produced(codec),
+        None => mapped,
     }
 }
 

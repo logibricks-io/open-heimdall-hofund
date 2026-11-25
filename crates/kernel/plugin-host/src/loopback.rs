@@ -253,6 +253,31 @@ impl LoopbackBackend for LoopbackRegistry {
         session: &str,
         spec: &LoopbackSpec,
     ) -> Result<LoopbackBinding, PluginError> {
+        self.bind_listener(plugin, session, spec, None)
+    }
+
+    fn release(&self, plugin: &PluginKey, session: &str) {
+        let owned = self
+            .session(session)
+            .is_some_and(|entry| entry.plugin == *plugin);
+        if owned {
+            Self::release(self, session);
+        }
+    }
+}
+
+impl LoopbackRegistry {
+    /// Binds `spec`, or serves `prepared` when a test already holds that socket.
+    ///
+    /// `prepared` must already be bound to the fixed port when `spec` asks for
+    /// one. The socket is not closed and bound again.
+    fn bind_listener(
+        &self,
+        plugin: &PluginKey,
+        session: &str,
+        spec: &LoopbackSpec,
+        prepared: Option<std::net::TcpListener>,
+    ) -> Result<LoopbackBinding, PluginError> {
         let mode = match (spec.state(), spec.query_token_success_url()) {
             (Some(state), None) if !state.is_empty() => Mode::OAuth {
                 state: state.to_owned(),
@@ -283,26 +308,30 @@ impl LoopbackBackend for LoopbackRegistry {
         let requested = spec.requested_port().unwrap_or(0);
         let (listener, port, blocked) = {
             let _guard = runtime.enter();
-            match listen(requested) {
-                Ok(listener) => {
-                    let port = listener
-                        .local_addr()
-                        .map_err(|error| {
-                            PluginError::io("loopback listener address").with_source(error)
-                        })?
-                        .port();
-                    (Some(listener), port, None)
-                }
-                Err(error) if requested != 0 && error.kind() == ErrorKind::AddrInUse => {
-                    (None, requested, Some(BindBlocked::Busy))
-                }
-                Err(error) if requested != 0 && error.kind() == ErrorKind::PermissionDenied => {
-                    (None, requested, Some(BindBlocked::Reserved))
-                }
-                Err(error) => {
-                    return Err(
-                        PluginError::io("cannot bind the loopback listener").with_source(error)
-                    );
+            if let Some(prepared) = prepared {
+                adopt_prepared(requested, prepared)?
+            } else {
+                match listen(requested) {
+                    Ok(listener) => {
+                        let port = listener
+                            .local_addr()
+                            .map_err(|error| {
+                                PluginError::io("loopback listener address").with_source(error)
+                            })?
+                            .port();
+                        (Some(listener), port, None)
+                    }
+                    Err(error) if requested != 0 && error.kind() == ErrorKind::AddrInUse => {
+                        (None, requested, Some(BindBlocked::Busy))
+                    }
+                    Err(error) if requested != 0 && error.kind() == ErrorKind::PermissionDenied => {
+                        (None, requested, Some(BindBlocked::Reserved))
+                    }
+                    Err(error) => {
+                        return Err(
+                            PluginError::io("cannot bind the loopback listener").with_source(error)
+                        );
+                    }
                 }
             }
         };
@@ -339,15 +368,31 @@ impl LoopbackBackend for LoopbackRegistry {
         );
         Ok(LoopbackBinding::from_parts(redirect_uri, port, blocked))
     }
+}
 
-    fn release(&self, plugin: &PluginKey, session: &str) {
-        let owned = self
-            .session(session)
-            .is_some_and(|entry| entry.plugin == *plugin);
-        if owned {
-            Self::release(self, session);
-        }
+/// Adopts a socket the caller already bound.
+///
+/// A non-zero `requested` port must be the socket's port. The socket stays
+/// open; nothing binds that port a second time.
+fn adopt_prepared(
+    requested: u16,
+    listener: std::net::TcpListener,
+) -> Result<(Option<TcpListener>, u16, Option<BindBlocked>), PluginError> {
+    let port = listener
+        .local_addr()
+        .map_err(|error| PluginError::io("loopback listener address").with_source(error))?
+        .port();
+    if requested != 0 && port != requested {
+        return Err(PluginError::config(
+            "prepared loopback listener is not on the requested port",
+        ));
     }
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| PluginError::io("loopback listener").with_source(error))?;
+    let listener = TcpListener::from_std(listener)
+        .map_err(|error| PluginError::io("loopback listener").with_source(error))?;
+    Ok((Some(listener), port, None))
 }
 
 /// Binds `127.0.0.1:port`. Unix sets `SO_REUSEADDR` so a port left in
@@ -787,22 +832,19 @@ mod tests {
         }
     }
 
-    fn free_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0")
-            .expect("probe")
-            .local_addr()
-            .expect("addr")
-            .port()
-    }
-
-    async fn port_is_free(port: u16) -> bool {
+    /// Waits until `port` can be bound and returns that socket still held.
+    ///
+    /// Release closes the listener on the accept task, so the port stays busy
+    /// until that task runs. The socket this function binds is the one the
+    /// next session serves; it is not dropped and bound again.
+    async fn reclaim_port(port: u16) -> std::net::TcpListener {
         for _ in 0..40 {
-            if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
-                return true;
+            if let Ok(listener) = std::net::TcpListener::bind(("127.0.0.1", port)) {
+                return listener;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        false
+        panic!("127.0.0.1:{port} stayed busy after release");
     }
 
     #[tokio::test]
@@ -874,22 +916,27 @@ mod tests {
 
     #[tokio::test]
     async fn fixed_port_binds_and_rebinds_after_release() {
-        let port = free_port();
+        let first = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = first.local_addr().expect("addr").port();
         let registry = LoopbackRegistry::new();
+        let mut prepared = Some(first);
         for _ in 0..2 {
             let session = session();
             let binding = registry
-                .bind(
+                .bind_listener(
                     &key(),
                     &session,
                     &LoopbackSpec::fixed(port).expect_state(STATE),
+                    prepared.take(),
                 )
                 .expect("bind");
             assert_eq!((binding.port(), binding.blocked()), (port, None));
             let (status, _) = get(port, &format!("/callback?code=c&state={STATE}")).await;
             assert_eq!(status, 200);
             registry.release(&session);
-            assert!(port_is_free(port).await);
+            let reclaimed = reclaim_port(port).await;
+            assert_eq!(reclaimed.local_addr().expect("addr").port(), port);
+            prepared = Some(reclaimed);
         }
     }
 
@@ -1267,14 +1314,16 @@ mod tests {
 
     #[tokio::test]
     async fn binding_released_on_cancel_sign_in() {
-        let port = free_port();
+        let held = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = held.local_addr().expect("addr").port();
         let registry = std::sync::Arc::new(LoopbackRegistry::new());
         let session = session();
         registry
-            .bind(
+            .bind_listener(
                 &key(),
                 &session,
                 &LoopbackSpec::fixed(port).expect_state(STATE),
+                Some(held),
             )
             .expect("bind");
         let waiter = {
@@ -1286,7 +1335,12 @@ mod tests {
         registry.release(&session);
         let error = waiter.await.expect("join").expect_err("cancelled");
         assert_eq!(error.kind(), PluginErrorKind::Cancelled);
-        assert!(port_is_free(port).await, "the port is still bound");
+        let reclaimed = reclaim_port(port).await;
+        assert_eq!(
+            reclaimed.local_addr().expect("addr").port(),
+            port,
+            "the port is still bound"
+        );
         let error = registry
             .await_callback(&session, no_paste(), WAIT)
             .await
@@ -1357,7 +1411,12 @@ mod tests {
             .await
             .expect_err("released");
         assert_eq!(error.kind(), PluginErrorKind::Config);
-        assert!(port_is_free(port).await, "the port is still bound");
+        let reclaimed = reclaim_port(port).await;
+        assert_eq!(
+            reclaimed.local_addr().expect("addr").port(),
+            port,
+            "the port is still bound"
+        );
     }
 
     #[test]

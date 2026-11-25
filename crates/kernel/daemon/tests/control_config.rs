@@ -667,12 +667,11 @@ async fn rotated_key_reaches_the_model_host_after_apply() {
     support::shutdown(running).await;
 }
 
-/// Returns a loopback address whose port was free a moment ago.
-fn free_addr() -> std::net::SocketAddr {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("probe bind")
-        .local_addr()
-        .expect("probe address")
+/// Binds a loopback socket and returns it still held, with its address.
+fn held_addr() -> (std::net::TcpListener, std::net::SocketAddr) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("address");
+    (listener, addr)
 }
 
 fn with_listen(listen: &str) -> String {
@@ -696,7 +695,10 @@ async fn health(addr: std::net::SocketAddr) -> Result<reqwest::StatusCode, reqwe
 async fn relisten_port_change_moves_the_model_listener_and_status() {
     let scratch = Scratch::new("relisten-move");
     let original = config("");
-    let running = start_with(&scratch.path(), &original, options(&scratch)).await;
+    let (held, to) = held_addr();
+    let mut start = options(&scratch);
+    start.relisten_listeners.push(held);
+    let running = start_with(&scratch.path(), &original, start).await;
     let client = Client::new(&running, &scratch);
     let old = running.listen_addr();
     assert_eq!(
@@ -704,7 +706,6 @@ async fn relisten_port_change_moves_the_model_listener_and_status() {
         Some(old.to_string())
     );
 
-    let to = free_addr();
     let edited = with_listen(&to.to_string());
     let (status, body) = client.apply(&revision(&original), &edited).await;
     let applied = ok(status, &body);
@@ -778,8 +779,9 @@ async fn relisten_failure_publishes_rest_and_reports_not_applied() {
         ),
     }
 
-    // Once the port frees up, an explicit reload of the same revision retries.
-    drop(held);
+    // Hand the socket to the daemon and retry. Dropping it first would leave
+    // a gap where another process could bind the port.
+    running.hold_for_relisten(held);
     let (status, body) = client.reload(&applied.disk_revision).await;
     let retried = ok(status, &body);
     assert_eq!(retried.generation, 3);
@@ -831,11 +833,12 @@ async fn reload_listen_with_hofund_addr_reports_not_applied_env_override() {
 
     let scratch = Scratch::new("relisten-env");
     let original = config("");
-    let env = free_addr();
+    let (held, env) = held_addr();
     let binds = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&binds);
     let mut options = options(&scratch);
     options.hofund_addr = Some(format!(" {env} "));
+    options.model_listener = Some(held);
     options.relisten_hook = Some(hofund_daemon::BindHook::new(move |_| {
         counter.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -857,8 +860,8 @@ async fn reload_listen_with_hofund_addr_reports_not_applied_env_override() {
     assert_eq!(status.not_applied[0].reason, "env_override");
 
     let mut stream = client.events().await;
-    let elsewhere = free_addr();
-    let edited = with_listen(&elsewhere.to_string());
+    // The override blocks relisten, so this address is never bound.
+    let edited = with_listen("127.0.0.1:9");
     let (status, body) = client.apply(&revision(&original), &edited).await;
     let applied = ok(status, &body);
     assert_eq!(applied.not_applied.len(), 1, "{:?}", applied.not_applied);
