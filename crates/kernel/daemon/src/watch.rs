@@ -72,7 +72,11 @@ type Events = mpsc::UnboundedReceiver<notify::Result<Event>>;
 
 /// Starts following `path` for the daemon's lifetime.
 pub(crate) fn spawn(ops: Arc<ConfigOps>, path: PathBuf) -> JoinHandle<()> {
-    let check: Check = Arc::new(move || {
+    spawn_with(path, WatchTiming::default(), config_check(ops))
+}
+
+fn config_check(ops: Arc<ConfigOps>) -> Check {
+    Arc::new(move || {
         let ops = Arc::clone(&ops);
         Box::pin(async move {
             match ops.reload(None, ReloadOrigin::Watcher).await {
@@ -86,8 +90,7 @@ pub(crate) fn spawn(ops: Arc<ConfigOps>, path: PathBuf) -> JoinHandle<()> {
                 }
             }
         })
-    });
-    spawn_with(path, WatchTiming::default(), check)
+    })
 }
 
 /// Starts following `path`, calling `check` for each settled change.
@@ -107,6 +110,26 @@ pub(crate) fn spawn_with(path: PathBuf, timing: WatchTiming, check: Check) -> Jo
                 poll(&path, timing.poll, &check).await;
             }
         }
+    })
+}
+
+#[cfg(feature = "test-util")]
+pub(crate) fn spawn_with_events(
+    ops: Arc<ConfigOps>,
+    path: PathBuf,
+    events: Events,
+) -> JoinHandle<()> {
+    let targets = Targets::resolve(&path).expect("test configuration watch targets");
+    tokio::spawn(async move {
+        follow(
+            &path,
+            WatchTiming::default(),
+            &config_check(ops),
+            targets,
+            events,
+            None,
+        )
+        .await;
     })
 }
 
@@ -241,8 +264,9 @@ fn classify(targets: &Targets, event: &notify::Result<Event>) -> Step {
 
 /// Why the quiet-period timer is running.
 enum Wake {
-    /// Trailing edge of a matching notify event. The expiry always checks.
-    Event,
+    /// Trailing edge of a matching notify event and the stamp it announced.
+    /// Duplicates of that stamp do not postpone the expiry, which always checks.
+    Event(Option<Stamp>),
     /// Disk stamp sampled when the in-flight check returned. The expiry
     /// checks only when the file has moved since that sample.
     Disk(DiskArm),
@@ -276,9 +300,10 @@ pub(crate) async fn follow(
     loop {
         let pending = quiet.take();
         let at = pending.as_ref().map(|pending| pending.at);
-        // Prefer a queued watcher event over the quiet-period tick so a
-        // rescan, a watcher error, or a new edit is not stuck behind a stat.
+        // An expired quiet period cannot be postponed by an event backlog.
+        // Otherwise prefer a queued rescan, error, or edit over the tick.
         let incoming = match at {
+            Some(at) if at <= Instant::now() => Incoming::Tick,
             Some(at) => tokio::select! {
                 biased;
                 event = events.recv() => Incoming::Event(event),
@@ -292,7 +317,7 @@ pub(crate) async fn follow(
                     continue;
                 };
                 match pending.wake {
-                    Wake::Event => {
+                    Wake::Event(_) => {
                         quiet = Some(
                             look_and_arm(
                                 path,
@@ -328,6 +353,18 @@ pub(crate) async fn follow(
             Incoming::Event(event) => {
                 let Some(event) = event else { break };
                 match classify(&targets, &event) {
+                    Step::Settle
+                        if matches!(
+                            &pending,
+                            Some(Quiet {
+                                wake: Wake::Event(previous),
+                                ..
+                            }) if stamp(path) == *previous
+                        ) =>
+                    {
+                        // Duplicate events for one write share its trailing edge.
+                        quiet = pending;
+                    }
                     Step::Settle | Step::Force
                         if matches!(
                             &pending,
@@ -344,7 +381,7 @@ pub(crate) async fn follow(
                     Step::Settle => {
                         quiet = Some(Quiet {
                             at: Instant::now() + timing.debounce,
-                            wake: Wake::Event,
+                            wake: Wake::Event(stamp(path)),
                         });
                     }
                     Step::Force => {
@@ -676,7 +713,8 @@ mod tests {
             let path = path.clone();
             tokio::spawn(async move { follow(&path, fast(), &check, targets, events, None).await })
         };
-        for _ in 0..4 {
+        for port in 1..=4 {
+            fs::write(&path, format!("listen = \"127.0.0.1:{port}\"\n")).expect("edit");
             sender.send(modified(&path)).expect("send");
             tokio::time::sleep(Duration::from_millis(300)).await;
             assert_eq!(count.load(Ordering::SeqCst), 0, "fired before quiet");
@@ -805,6 +843,61 @@ mod tests {
         assert!(
             checks.try_recv().is_err(),
             "a forced event repeated the unchanged rejection"
+        );
+        drop(task);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queued_duplicates_cannot_postpone_an_expired_correction_check() {
+        let (_dir, path) = scratch();
+        let targets = Targets::resolve(&path).expect("targets");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (checked, mut checks) = mpsc::unbounded_channel();
+        let check: Check = {
+            let calls = Arc::clone(&calls);
+            Arc::new(move || {
+                let call = calls.fetch_add(1, Ordering::SeqCst);
+                checked.send(call).expect("check record");
+                Box::pin(async move {
+                    if call == 0 {
+                        CheckOutcome::Unapplied
+                    } else {
+                        CheckOutcome::Applied
+                    }
+                })
+            })
+        };
+        let (sender, events) = mpsc::unbounded_channel();
+        let task = AbortOnDrop({
+            let path = path.clone();
+            tokio::spawn(async move { follow(&path, fast(), &check, targets, events, None).await })
+        });
+
+        sender.send(modified(&path)).expect("modify");
+        assert_eq!(
+            tokio::time::timeout(quiet_bound(), checks.recv())
+                .await
+                .expect("rejection was not observed"),
+            Some(0)
+        );
+        tokio::time::advance(quiet_bound()).await;
+        tokio::task::yield_now().await;
+
+        fs::write(&path, "listen = \"127.0.0.1:1\"\n").expect("correcting write");
+        sender.send(modified(&path)).expect("first duplicate");
+        tokio::task::yield_now().await;
+        let flood = tokio::spawn(async move {
+            loop {
+                sender.send(modified(&path)).expect("duplicate");
+                tokio::task::yield_now().await;
+            }
+        });
+        tokio::time::advance(quiet_bound()).await;
+        let checked = tokio::time::timeout(Duration::from_millis(1), checks.recv()).await;
+        flood.abort();
+        assert_eq!(
+            checked.expect("queued duplicates postponed the expired check"),
+            Some(1)
         );
         drop(task);
     }
