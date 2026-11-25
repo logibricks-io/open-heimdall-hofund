@@ -12,6 +12,7 @@ use crate::cosy::digest_hex;
 use crate::models::{ModelInfo, model_config};
 
 const SYSTEM: &str = "You are a Qoder agent. Use the instructions below and the tools available to you to assist the user.";
+const AGENT_SDK_LINE: &str = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
 const SMALL_BUDGET: u64 = 1024;
 const RANK: &[&str] = &[
     "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
@@ -129,6 +130,11 @@ fn build(
         .filter(|text| !text.is_empty())
         .collect::<Vec<_>>()
         .join("\n\n");
+    // Qoder answers Claude Code's identity line with 400 "Cannot find model"
+    // on any model. Only that line, including its whitespace and the form
+    // that says it is running within the Claude Agent SDK, is rewritten.
+    // The rest of the system text and the caller's messages stay as written.
+    let system = as_agent_sdk(&system);
     let mut system = if system.is_empty() {
         SYSTEM.to_owned()
     } else {
@@ -551,6 +557,83 @@ fn image_block(part: &Value) -> Option<Value> {
             .or_else(|| image.get("url").and_then(Value::as_str).map(str::to_owned))
     })?;
     Some(json!({"type": "image_url", "image_url": {"url": url}}))
+}
+
+fn as_agent_sdk(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut index = 0;
+    while let Some(found) = text[index..].find("You") {
+        let start = index + found;
+        out.push_str(&text[index..start]);
+        if let Some(end) = claude_code_line_end(text, start) {
+            out.push_str(AGENT_SDK_LINE);
+            index = end;
+        } else {
+            out.push_str("You");
+            index = start + "You".len();
+        }
+    }
+    out.push_str(&text[index..]);
+    out
+}
+
+fn claude_code_line_end(text: &str, start: usize) -> Option<usize> {
+    let mut at = take(text, start, "You")?;
+    at = whitespace(text, at)?;
+    at = take(text, at, "are")?;
+    at = whitespace(text, at)?;
+    at = take(text, at, "Claude")?;
+    at = whitespace(text, at)?;
+    at = take(text, at, "Code,")?;
+    at = whitespace(text, at)?;
+    at = take(text, at, "Anthropic's")?;
+    at = whitespace(text, at)?;
+    at = take(text, at, "official")?;
+    at = whitespace(text, at)?;
+    at = take(text, at, "CLI")?;
+    at = whitespace(text, at)?;
+    at = take(text, at, "for")?;
+    at = whitespace(text, at)?;
+    at = take(text, at, "Claude")?;
+    if let Some(formed) = sdk_form(text, at) {
+        at = formed;
+    }
+    take(text, at, ".")
+}
+
+fn sdk_form(text: &str, at: usize) -> Option<usize> {
+    let at = take(text, at, ",")?;
+    let at = whitespace(text, at)?;
+    let at = take(text, at, "running")?;
+    let at = whitespace(text, at)?;
+    let at = take(text, at, "within")?;
+    let at = whitespace(text, at)?;
+    let at = take(text, at, "the")?;
+    let at = whitespace(text, at)?;
+    let at = take(text, at, "Claude")?;
+    let at = whitespace(text, at)?;
+    let at = take(text, at, "Agent")?;
+    let at = whitespace(text, at)?;
+    take(text, at, "SDK")
+}
+
+fn take(text: &str, at: usize, literal: &str) -> Option<usize> {
+    text.get(at..)?
+        .strip_prefix(literal)
+        .map(|_| at + literal.len())
+}
+
+fn whitespace(text: &str, at: usize) -> Option<usize> {
+    let mut end = at;
+    let mut saw = false;
+    for character in text.get(at..)?.chars() {
+        if !character.is_whitespace() {
+            break;
+        }
+        saw = true;
+        end += character.len_utf8();
+    }
+    saw.then_some(end)
 }
 
 fn text_of(content: &Value) -> String {
