@@ -571,11 +571,11 @@ fn list_failures_are_joined_redacted_and_keep_the_wait() {
 #[test]
 fn validate_rejects_unknown_keys_and_build_refuses_an_empty_base_or_converse() {
     let mut unknown = raw(V1);
-    unknown.insert("region", RawValue::String("SENTINEL".to_owned()));
+    unknown.insert("unknown", RawValue::String("SENTINEL".to_owned()));
     let error = UpstreamFactory::validate(&MantleFactory, &unknown)
         .map(drop)
         .expect_err("unknown");
-    assert_eq!(error.path(), "region");
+    assert_eq!(error.path(), "unknown");
     let mut headers = raw(V1);
     headers.insert("headers", RawValue::String("x".to_owned()));
     assert_eq!(
