@@ -91,6 +91,10 @@ struct LedgerInner {
     owed: HashMap<String, Debt>,
     misses: HashMap<String, u32>,
     unreadable: HashMap<String, i64>,
+    #[cfg(test)]
+    pre_poll_waits: usize,
+    #[cfg(test)]
+    retry_waits: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -126,6 +130,22 @@ impl UsageLedger {
             theirs: None,
             finished: false,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pre_poll_waits(&self) -> usize {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .pre_poll_waits
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retry_waits(&self) -> usize {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .retry_waits
     }
 
     fn usage_key(tok: &str, conv: &str) -> String {
@@ -197,6 +217,13 @@ impl UsageLedger {
         let started = args.host.clock().monotonic();
         let end = started.saturating_add(args.limits.usage_give_up);
         if polling {
+            #[cfg(test)]
+            {
+                self.inner
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .pre_poll_waits += 1;
+            }
             sleep(first_wait).await;
         }
         let mut events = Vec::new();
@@ -278,6 +305,13 @@ impl UsageLedger {
                     > end
             {
                 break;
+            }
+            #[cfg(test)]
+            {
+                self.inner
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .retry_waits += 1;
             }
             sleep(args.limits.usage_interval).await;
         }
