@@ -9,7 +9,7 @@ use axum::http::{Request as HttpRequest, StatusCode, header};
 use bytes::Bytes;
 use hofund_codec::{Codec, OpenAiResponses};
 use hofund_gateway::Gateway;
-use hofund_ir::Request;
+use hofund_ir::{ContentPart, Request};
 use hofund_plugin_api::{BodyStream, MemberId, MemberKey, PluginError, PresetId};
 use hofund_router::{Completion, FailoverPolicy, Member, MemberAttempt, Router, Snapshot};
 use hofund_usage::Ledger;
@@ -46,7 +46,16 @@ struct Fake {
     serves: bool,
     calls: Arc<Mutex<Vec<&'static str>>>,
     streams: Arc<Mutex<Vec<bool>>>,
+    notes: Arc<Mutex<Vec<Note>>>,
     reply: &'static [u8],
+}
+
+#[derive(Clone, Debug)]
+struct Note {
+    flag: bool,
+    substituted: bool,
+    text: String,
+    stream: bool,
 }
 
 #[async_trait]
@@ -82,6 +91,7 @@ impl Member for Fake {
     async fn execute(&self, request: Request, _inbound: &str) -> Result<Completion, PluginError> {
         self.streams.lock().expect("streams").push(request.stream);
         self.calls.lock().expect("calls").push(self.route);
+        self.notes.lock().expect("notes").push(note_of(&request));
         Ok(Completion::Raw(BodyStream::from_bytes(Bytes::from_static(
             self.reply,
         ))))
@@ -99,13 +109,55 @@ struct Spec {
 }
 
 fn member(spec: Spec, calls: &Arc<Mutex<Vec<&'static str>>>) -> Arc<dyn Member> {
-    member_streams(spec, calls, &Arc::new(Mutex::new(Vec::new())))
+    member_observed(
+        spec,
+        calls,
+        &Arc::new(Mutex::new(Vec::new())),
+        &Arc::new(Mutex::new(Vec::new())),
+    )
+}
+
+fn note_of(request: &Request) -> Note {
+    let flag = request
+        .extensions
+        .get("hofund_responses_compact")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+    let substituted = request
+        .extensions
+        .get("hofund_responses_compact_body")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|text| text.contains("substituted"));
+    let text = request
+        .messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .find_map(|part| match part {
+            ContentPart::Text(part) => Some(part.text.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    Note {
+        flag,
+        substituted,
+        text,
+        stream: request.stream,
+    }
 }
 
 fn member_streams(
     spec: Spec,
     calls: &Arc<Mutex<Vec<&'static str>>>,
     streams: &Arc<Mutex<Vec<bool>>>,
+) -> Arc<dyn Member> {
+    member_observed(spec, calls, streams, &Arc::new(Mutex::new(Vec::new())))
+}
+
+fn member_observed(
+    spec: Spec,
+    calls: &Arc<Mutex<Vec<&'static str>>>,
+    streams: &Arc<Mutex<Vec<bool>>>,
+    notes: &Arc<Mutex<Vec<Note>>>,
 ) -> Arc<dyn Member> {
     Arc::new(Fake {
         id: MemberId::from_preset(
@@ -119,6 +171,7 @@ fn member_streams(
         serves: spec.serves,
         calls: Arc::clone(calls),
         streams: Arc::clone(streams),
+        notes: Arc::clone(notes),
         reply: spec.reply,
     })
 }
@@ -416,5 +469,164 @@ async fn d247_empty_completed_output_is_still_compaction() {
     let value: serde_json::Value = serde_json::from_str(&body).expect("json");
     assert_eq!(value["object"], "response.compaction");
     assert_eq!(value["output"][2]["encrypted_content"], "NEWSEAL");
+    drop(dir);
+}
+
+const POISON: &str = r#"{"model":"m1","input":"keep me","metadata":{"k":"v"},"hofund_responses_compact":true,"hofund_responses_compact_body":"{\"model\":\"evil\",\"input\":\"substituted\"}"}"#;
+
+const CUT_STREAM: &[u8] = b"data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"compaction\",\"encrypted_content\":\"CUTSEAL\"}}\n\n";
+
+const FAILED_STREAM: &[u8] = concat!(
+    "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"compaction\",\"encrypted_content\":\"FAILSEAL\"}}\n\n",
+    "data: {\"type\":\"response.failed\",\"error\":{\"message\":\"upstream stream failed\"}}\n\n",
+)
+.as_bytes();
+
+#[tokio::test]
+async fn d247_ordinary_responses_ignores_client_compact_fields_on_both_paths() {
+    for path in ["/v1/responses", "/responses"] {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let notes = Arc::new(Mutex::new(Vec::new()));
+        let hop = member_observed(
+            Spec {
+                key: "responses",
+                route: "responses-key",
+                protocol: OpenAiResponses.id(),
+                subscription: false,
+                trigger: false,
+                serves: true,
+                reply: br#"{"ok":true}"#,
+            },
+            &calls,
+            &Arc::new(Mutex::new(Vec::new())),
+            &notes,
+        );
+        let (app, _usage, dir) = gateway(vec![hop]);
+        let (status, body) = post(&app, path, POISON).await;
+        let seen = notes.lock().expect("notes").clone();
+        assert_eq!(status, StatusCode::OK, "{path} {body}");
+        assert_eq!(seen.len(), 1, "{path}");
+        assert!(
+            !seen[0].flag && !seen[0].substituted,
+            "{path} flag {} substituted {} text {}",
+            seen[0].flag,
+            seen[0].substituted,
+            seen[0].text
+        );
+        assert_eq!(seen[0].text, "keep me", "{path}");
+        assert!(!seen[0].stream, "{path}");
+        assert_eq!(
+            calls.lock().expect("calls").as_slice(),
+            ["responses-key"],
+            "{path}"
+        );
+        drop(dir);
+    }
+}
+
+#[tokio::test]
+async fn d247_ordinary_trigger_account_keeps_client_input_on_both_paths() {
+    for path in ["/v1/responses", "/responses"] {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let notes = Arc::new(Mutex::new(Vec::new()));
+        let hop = member_observed(
+            Spec {
+                key: "account",
+                route: "account",
+                protocol: "subscription",
+                subscription: true,
+                trigger: true,
+                serves: true,
+                reply: br#"{"ok":true}"#,
+            },
+            &calls,
+            &Arc::new(Mutex::new(Vec::new())),
+            &notes,
+        );
+        let (app, _usage, dir) = gateway(vec![hop]);
+        let (status, body) = post(&app, path, POISON).await;
+        let seen = notes.lock().expect("notes").clone();
+        assert_eq!(status, StatusCode::OK, "{path} {body}");
+        assert_eq!(seen.len(), 1, "{path}");
+        assert!(
+            !seen[0].flag && !seen[0].substituted,
+            "{path} flag {} substituted {} text {}",
+            seen[0].flag,
+            seen[0].substituted,
+            seen[0].text
+        );
+        assert_eq!(seen[0].text, "keep me", "{path}");
+        assert!(!seen[0].stream, "{path}");
+        assert_eq!(
+            calls.lock().expect("calls").as_slice(),
+            ["account"],
+            "{path}"
+        );
+        drop(dir);
+    }
+}
+
+#[tokio::test]
+async fn d247_cut_stream_is_502_and_the_next_call_is_not_pinned() {
+    unfinished_does_not_pin(CUT_STREAM, "CUTSEAL").await;
+}
+
+#[tokio::test]
+async fn d247_failed_stream_is_502_and_the_next_call_is_not_pinned() {
+    unfinished_does_not_pin(FAILED_STREAM, "FAILSEAL").await;
+}
+
+async fn unfinished_does_not_pin(upstream: &'static [u8], seal: &str) {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let preferred = member(
+        Spec {
+            key: "preferred",
+            route: "preferred",
+            protocol: hofund_codec::CHAT_PROTOCOL_ID,
+            subscription: false,
+            trigger: false,
+            serves: false,
+            reply: br#"{"ok":true}"#,
+        },
+        &calls,
+    );
+    let sealer = member(
+        Spec {
+            key: "sealer",
+            route: "sealer",
+            protocol: "subscription",
+            subscription: true,
+            trigger: true,
+            serves: true,
+            reply: upstream,
+        },
+        &calls,
+    );
+    let (app, _usage, dir) = gateway(vec![preferred, sealer]);
+    let (status, body) = post(&app, "/v1/responses/compact", TRIGGER_ASK).await;
+    let follow = format!(
+        r#"{{"model":"m1","input":[{{"type":"compaction","encrypted_content":"{seal}"}},{{"role":"user","content":"next"}}]}}"#
+    );
+    let (follow_status, follow_body) = post(&app, "/v1/responses", &follow).await;
+    let seen = calls.lock().expect("calls").clone();
+    assert_eq!(
+        status,
+        StatusCode::BAD_GATEWAY,
+        "compact status {status} body {body} follow {follow_status} {follow_body} calls {seen:?}"
+    );
+    assert!(
+        !body.contains("response.compaction"),
+        "{body} calls {seen:?}"
+    );
+    assert_eq!(
+        follow_status,
+        StatusCode::OK,
+        "{follow_body} calls {seen:?}"
+    );
+    assert_eq!(
+        seen.as_slice(),
+        ["sealer", "preferred"],
+        "a cut or failed compact must not pin the next call; body {body}"
+    );
     drop(dir);
 }

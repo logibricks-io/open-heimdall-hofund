@@ -105,6 +105,7 @@ impl Codec for Converse {
                 .map(decode_tool_choice)
                 .transpose()?;
         }
+        crate::jsonutil::drop_reserved(&mut object);
         request.extensions = Extensions::from_map(object);
         Ok(request)
     }

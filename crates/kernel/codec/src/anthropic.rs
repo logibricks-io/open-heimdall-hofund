@@ -147,6 +147,7 @@ fn decode_request(bytes: &[u8]) -> Result<Request, CodecError> {
         ..GenerationParams::default()
     };
     let stream = take_bool(&mut object, "stream")?.unwrap_or(false);
+    crate::jsonutil::drop_reserved(&mut object);
     let mut request = Request::new(model)
         .with_messages(messages)
         .with_tools(tools)

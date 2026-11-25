@@ -1669,4 +1669,80 @@ mod tests {
         assert!(!text.contains("\"stream\":true"), "{text}");
         assert!(!text.contains("fake/m1"), "{text}");
     }
+
+    #[tokio::test]
+    async fn d247_key_relay_ignores_client_compact_fields() {
+        use std::sync::{Arc, Mutex};
+
+        use super::{Credential, Endpoint, Upstream, execute};
+        use hofund_codec::{Codec, OpenAiResponses};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&seen);
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            loop {
+                let read = socket.read(&mut chunk).await.expect("read");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                if complete_request(&request) {
+                    break;
+                }
+            }
+            *recorded.lock().expect("seen") = request;
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}")
+                .await
+                .expect("write");
+        });
+        let endpoint = Endpoint {
+            id: "loop".to_owned(),
+            base_url: format!("http://{address}/v1"),
+            realtime_url: String::new(),
+            preset: None,
+            api_key: String::new(),
+            credential: Credential::Default,
+            headers: Vec::new(),
+            pass_headers: Vec::new(),
+            quirks: None,
+            timeout: Duration::from_secs(2),
+            client: None,
+            client_slot: None,
+            client_refresh: None,
+        };
+        let upstream = Upstream::open(endpoint, "responses", reqwest::header::HeaderMap::new())
+            .expect("upstream");
+        let poisoned = r#"{"model":"fake/m1","input":"keep me","metadata":{"k":"v"},"hofund_responses_compact":true,"hofund_responses_compact_body":"{\"model\":\"evil\",\"input\":\"substituted\"}"}"#;
+        let mut request = OpenAiResponses
+            .decode_request(poisoned.as_bytes())
+            .expect("decode");
+        request.model = "m1".to_owned();
+        execute(
+            &upstream,
+            &OpenAiResponses,
+            request,
+            None,
+            OpenAiResponses.id(),
+        )
+        .await
+        .expect("post");
+        server.await.expect("server");
+        let request = seen.lock().expect("seen");
+        let text = String::from_utf8_lossy(&request);
+        assert!(
+            text.contains("POST /v1/responses ") && !text.contains("POST /v1/responses/compact "),
+            "{text}"
+        );
+        assert!(text.contains("keep me"), "{text}");
+        assert!(!text.contains("substituted"), "{text}");
+        assert!(!text.contains("hofund_responses_compact"), "{text}");
+    }
 }

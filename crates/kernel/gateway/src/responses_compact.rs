@@ -198,12 +198,15 @@ fn gather(original: &[u8], upstream: &[u8]) -> Option<Vec<u8>> {
         .unwrap_or_else(|| format!("cmp_{}", hex_prefix(original)));
     let created = reply
         .get("created_at")
-        .and_then(Value::as_i64)
+        .filter(|value| value.is_number())
+        .cloned()
         .unwrap_or_else(|| {
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(0))
-                .unwrap_or(0)
+            Value::from(
+                SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(0))
+                    .unwrap_or(0),
+            )
         });
     let mut object = Map::new();
     object.insert("id".to_owned(), Value::String(id));
@@ -211,7 +214,7 @@ fn gather(original: &[u8], upstream: &[u8]) -> Option<Vec<u8>> {
         "object".to_owned(),
         Value::String("response.compaction".to_owned()),
     );
-    object.insert("created_at".to_owned(), Value::from(created));
+    object.insert("created_at".to_owned(), created);
     object.insert("output".to_owned(), Value::Array(output));
     if let Some(usage) = reply.get("usage").filter(|usage| usage.is_object()) {
         object.insert("usage".to_owned(), usage.clone());
@@ -235,12 +238,16 @@ fn reply_of(upstream: &[u8]) -> Option<(Value, Vec<Value>)> {
                 indexed.insert(index, item.clone());
             }
             if matches!(kind, "response.completed" | "response.incomplete")
-                && let Some(response) = event.get("response").cloned()
+                && let Some(response) = event
+                    .get("response")
+                    .filter(|response| response.is_object())
             {
-                reply = Some(response);
+                reply = Some(response.clone());
             }
         }
-        let reply = reply.unwrap_or(Value::Null);
+        // A seal alone, or a failed or error terminal, is not a reply.
+        // `response.failed` and `error` do not fill `reply`.
+        let reply = reply?;
         let completed = reply
             .get("output")
             .and_then(Value::as_array)
@@ -389,6 +396,48 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
         assert_eq!(value["output"][0]["encrypted_content"], "EARLIER");
         assert_eq!(value["output"][1]["encrypted_content"], "LATER");
+    }
+
+    #[test]
+    fn d247_unfinished_stream_does_not_gather() {
+        let cut = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"compaction\",\"encrypted_content\":\"CUTSEAL\"}}\n\n";
+        assert!(gather(ASKED.as_bytes(), cut.as_bytes()).is_none());
+        let failed = concat!(
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"compaction\",\"encrypted_content\":\"FAILSEAL\"}}\n\n",
+            "data: {\"type\":\"response.failed\",\"error\":{\"message\":\"upstream stream failed\"}}\n\n",
+        );
+        assert!(gather(ASKED.as_bytes(), failed.as_bytes()).is_none());
+        let error = concat!(
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"compaction\",\"encrypted_content\":\"ERRSEAL\"}}\n\n",
+            "data: {\"type\":\"error\",\"error\":{\"message\":\"boom\"}}\n\n",
+        );
+        assert!(gather(ASKED.as_bytes(), error.as_bytes()).is_none());
+    }
+
+    #[test]
+    fn d247_created_at_keeps_a_fractional_number() {
+        let upstream = concat!(
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"compaction\",\"encrypted_content\":\"NEWSEAL\"}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"created_at\":1700000000.5,\"output\":[]}}\n\n",
+        );
+        let body = gather(ASKED.as_bytes(), upstream.as_bytes()).expect("compaction");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(value["created_at"], serde_json::json!(1_700_000_000.5));
+        assert_eq!(value["output"][2]["encrypted_content"], "NEWSEAL");
+    }
+
+    #[test]
+    fn d247_output_index_last_write_wins_and_a_missing_index_is_zero() {
+        let upstream = concat!(
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"compaction\",\"encrypted_content\":\"MISSING\"}}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"compaction\",\"encrypted_content\":\"SLOT0\"}}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"compaction\",\"encrypted_content\":\"SLOT2\"}}\n\n",
+            "data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_2\",\"output\":[]}}\n\n",
+        );
+        let body = gather(br#"{"input":[]}"#, upstream.as_bytes()).expect("compaction");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(value["output"][0]["encrypted_content"], "SLOT0");
+        assert_eq!(value["output"][1]["encrypted_content"], "SLOT2");
     }
 
     #[test]

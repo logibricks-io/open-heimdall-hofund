@@ -10,6 +10,15 @@ use crate::error::CodecError;
 
 pub(crate) type Object = Map<String, Value>;
 
+/// Drops client keys reserved for the gateway and the codecs.
+///
+/// A decoded request must not treat `hofund_` fields as trusted. Each codec
+/// inserts its own keys after this, and the gateway sets the compact flag
+/// only on the compact routes.
+pub(crate) fn drop_reserved(object: &mut Object) {
+    object.retain(|key, _| !key.starts_with("hofund_"));
+}
+
 pub(crate) fn parse_object(bytes: &[u8]) -> Result<Object, CodecError> {
     if bytes.iter().all(u8::is_ascii_whitespace) {
         return Err(CodecError::Empty);
