@@ -375,6 +375,10 @@ pub struct StartOptions {
     #[doc(hidden)]
     pub config_watch_events:
         Option<tokio::sync::mpsc::UnboundedReceiver<notify::Result<notify::Event>>>,
+    /// Observes the virtual instant when each injected-stream watcher check starts.
+    #[cfg(feature = "test-util")]
+    #[doc(hidden)]
+    pub config_watch_check_starts: Option<tokio::sync::mpsc::UnboundedSender<tokio::time::Instant>>,
     /// The `HOFUND_ADDR` value to use instead of the process environment, for
     /// tests. `None` reads the environment.
     #[doc(hidden)]
@@ -730,9 +734,12 @@ async fn start_inner(
         if !options.skip_config_watch {
             #[cfg(feature = "test-util")]
             let task = match options.config_watch_events.take() {
-                Some(events) => {
-                    watch::spawn_with_events(Arc::clone(&ops), path.to_path_buf(), events)
-                }
+                Some(events) => watch::spawn_with_events(
+                    Arc::clone(&ops),
+                    path.to_path_buf(),
+                    events,
+                    options.config_watch_check_starts.take(),
+                ),
                 None => watch::spawn(Arc::clone(&ops), path.to_path_buf()),
             };
             #[cfg(not(feature = "test-util"))]
