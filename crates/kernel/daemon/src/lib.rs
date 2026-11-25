@@ -340,7 +340,10 @@ pub use control_local::ControlRuntime;
 pub use one_shot::{one_shot_stdio, serve_one_shot};
 
 /// Optional listeners for a daemon start.
-#[derive(Clone, Debug, Default)]
+///
+/// A prepared model socket cannot be duplicated into two servers, so this
+/// value is passed by move and is not cloned.
+#[derive(Debug, Default)]
 pub struct StartOptions {
     /// Numeric loopback address for the opt-in control listener.
     pub control_listen: Option<SocketAddr>,
@@ -369,6 +372,17 @@ pub struct StartOptions {
     /// Runs before each relisten bind, for tests that need a bind to fail.
     #[doc(hidden)]
     pub relisten_hook: Option<hofund_gateway::BindHook>,
+    /// An already-bound model listener, for tests. When set, the daemon serves
+    /// this socket instead of binding the effective listen address. A non-zero
+    /// effective port must be this socket's port. Empty in production, which
+    /// binds the address itself.
+    #[doc(hidden)]
+    pub model_listener: Option<std::net::TcpListener>,
+    /// Sockets a later relisten installs instead of binding, for tests.
+    /// Each one stays open until relisten asks for its address. Empty in
+    /// production.
+    #[doc(hidden)]
+    pub relisten_listeners: Vec<std::net::TcpListener>,
     /// Overrides `HOFUND_SERVES` on the status response, for tests.
     #[doc(hidden)]
     pub hofund_serves: Option<String>,
@@ -492,7 +506,7 @@ async fn start_inner(
     max_idle_per_host: Option<usize>,
     refresh_timing: Option<RefreshTiming>,
     registry: Arc<dyn DaemonRegistry>,
-    options: StartOptions,
+    mut options: StartOptions,
 ) -> Result<Running, DaemonError> {
     let started_at_ms = control::unix_milliseconds();
     let config_text = std::fs::read_to_string(path)
@@ -627,10 +641,15 @@ async fn start_inner(
     };
     let (listen, source) =
         hofund_config::effective_listen(&config, env.as_deref()).map_err(show)?;
+    let model_listener = options.model_listener.take();
+    let relisten_listeners = std::mem::take(&mut options.relisten_listeners);
     let mut running = gateway
-        .bind(listen)
+        .bind_with_listener(listen, model_listener)
         .await
         .map_err(|error| DaemonError::new(error.to_string()))?;
+    for listener in relisten_listeners {
+        running.hold_for_relisten(listener);
+    }
     running = running.with_resource(Arc::clone(&route_trace));
     running = running.with_resource(Arc::clone(&quotas) as Arc<dyn hofund_gateway::QuotaSource>);
     if let Some(hook) = options.relisten_hook {
@@ -796,6 +815,10 @@ async fn start_inner(
     let running = running
         .with_resource(AffinityFlush(runtime.affinity()))
         .with_resource(sign_in::SubscriptionRisks::new(Arc::clone(&runtime)))
+        .with_before_drain({
+            let runtime = Arc::clone(&runtime);
+            move || runtime.stopping_upstreams()
+        })
         .with_after_drain({
             let runtime = Arc::clone(&runtime);
             move || async move {

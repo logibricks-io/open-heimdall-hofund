@@ -171,6 +171,7 @@ fn provider(
 }
 
 async fn outcome(result: Result<Completion, PluginError>) -> Outcome {
+    let result = result.map(Completion::peel);
     match result {
         Err(error) => Outcome::Failed(error.into()),
         Ok(Completion::Raw(mut body)) => {

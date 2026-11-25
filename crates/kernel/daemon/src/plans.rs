@@ -315,6 +315,7 @@ fn window_info(window: &hofund_plugin_api::PlanWindow) -> WindowInfo {
             ..QuotaSpan::default()
         },
         blocking: window.blocking(),
+        trial_credits: false,
         scope_model: None,
         models: Vec::new(),
         excluded_models: Vec::new(),

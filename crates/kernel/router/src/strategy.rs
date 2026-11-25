@@ -40,6 +40,8 @@ pub struct Seat {
     pub free: bool,
     /// Whether the account may spend credits past its allowance.
     pub credits: bool,
+    /// Whether those credits are a remaining trial or bonus rather than bought.
+    pub trial_credits: bool,
     /// Operator credits mode; default is `on`.
     pub credits_mode: CreditsMode,
     /// Whether the account is past blocking allowance on credits now.
@@ -86,6 +88,7 @@ impl Seat {
             tokens: 0.0,
             free: false,
             credits: false,
+            trial_credits: false,
             credits_mode: CreditsMode::default(),
             on_credits: false,
             ttft: 0.0,
@@ -611,6 +614,9 @@ fn tier(share: f64) -> u8 {
 
 fn seat_tier(seat: &Seat) -> u8 {
     let band = tier(seat.used);
+    if seat.known && seat.trial_credits && band == 2 {
+        return 0;
+    }
     if band == 1 && seat.week_low {
         return 0;
     }
@@ -743,6 +749,15 @@ fn least_used(_: &str, seats: &[Seat], _: &StrategyState) -> Vec<usize> {
     }
 }
 
+fn least_used_tier(seat: &Seat) -> u8 {
+    let band = tier(seat.used);
+    if seat.known && seat.trial_credits && band == 2 {
+        0
+    } else {
+        band
+    }
+}
+
 fn least_used_by_share(seats: &[Seat]) -> Vec<usize> {
     let left = by_left(seats, true);
     let mut order = identity(seats.len());
@@ -755,7 +770,9 @@ fn least_used_by_share(seats: &[Seat]) -> Vec<usize> {
         } else {
             std::cmp::Ordering::Equal
         };
-        credits
+        least_used_tier(a)
+            .cmp(&least_used_tier(b))
+            .then(credits)
             .then_with(|| a.used.total_cmp(&b.used))
             .then_with(|| left[a_index].cmp(&left[b_index]))
             .then_with(|| a.tokens.total_cmp(&b.tokens))
@@ -771,7 +788,7 @@ fn least_used_mixed(seats: &[Seat]) -> Vec<usize> {
     let mut low = Vec::new();
     let mut spent = Vec::new();
     for (index, seat) in seats.iter().enumerate() {
-        match tier(seat.used) {
+        match least_used_tier(seat) {
             2 => spent.push(index),
             1 => low.push(index),
             _ if seat.learns => learning.push(index),
@@ -1393,6 +1410,69 @@ mod tests {
             routed(&state, "pace", &[first, second]),
             ["second", "first"]
         );
+    }
+
+    #[test]
+    fn d255_trial_credits_have_room_without_changing_bought_credits() {
+        use std::time::{Duration, UNIX_EPOCH};
+
+        let state = StrategyState::with_builtins();
+        let now = UNIX_EPOCH + Duration::from_secs(1_900_000_000);
+        let mut seats = self::seats(&["spent", "room", "trial", "low", "bought"]);
+        for seat in &mut seats {
+            seat.known = true;
+        }
+        seats[0].used = 100.0;
+        seats[1].used = 40.0;
+        seats[1].soon = vec![Some(now + Duration::from_secs(48 * 3600))];
+        seats[2].used = 100.0;
+        seats[2].credits = true;
+        seats[2].trial_credits = true;
+        seats[2].soon = vec![Some(now + Duration::from_secs(9 * 24 * 3600))];
+        seats[3].used = 95.0;
+        seats[4].used = 100.0;
+        seats[4].credits = true;
+        for name in ["smart", "usage", "pace"] {
+            assert_eq!(
+                routed(&state, name, &seats),
+                ["room", "trial", "low", "bought", "spent"],
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn d255_mixed_usage_routing_keeps_trial_credits_with_told_room() {
+        let state = StrategyState::with_builtins();
+        let mut seats = self::seats(&["spent", "room", "trial", "shareless", "low", "bought"]);
+        for seat in &mut seats {
+            seat.known = true;
+        }
+        seats[0].used = 100.0;
+        seats[1].used = 40.0;
+        seats[2].used = 100.0;
+        seats[2].credits = true;
+        seats[2].trial_credits = true;
+        seats[4].used = 95.0;
+        seats[5].used = 100.0;
+        seats[5].credits = true;
+        assert_eq!(
+            routed(&state, "usage", &seats),
+            ["room", "trial", "shareless", "low", "bought", "spent"]
+        );
+    }
+
+    #[test]
+    fn d255_drain_does_not_pass_over_trial_credits() {
+        let state = StrategyState::with_builtins();
+        let mut seats = self::seats(&["spent", "trial"]);
+        seats[0].known = true;
+        seats[0].used = 100.0;
+        seats[1].known = true;
+        seats[1].used = 100.0;
+        seats[1].credits = true;
+        seats[1].trial_credits = true;
+        assert_eq!(routed(&state, "drain", &seats), ["trial", "spent"]);
     }
 
     #[test]

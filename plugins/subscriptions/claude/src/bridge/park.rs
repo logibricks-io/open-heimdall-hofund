@@ -875,7 +875,7 @@ fn text_delivered(text: &str, is_error: bool) -> Delivered {
 }
 
 async fn completion_text(completion: Completion) -> String {
-    match completion {
+    match completion.peel() {
         Completion::Unary(response) => part_text(&response.message.content),
         Completion::Stream(mut stream) => {
             use futures_util::StreamExt;

@@ -247,9 +247,10 @@ async fn listen_change_is_restart_pending_without_rebinding_and_lan_is_not_enfor
     let bound = running.local_addr;
     let client = Client::new(&running, &scratch);
     let before = client.settings().await;
+    // Hold the port for the whole test. Dropping it and binding again later
+    // races with anything else that wants a loopback port.
     let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("free port");
     let new_listen = probe.local_addr().expect("new listen");
-    drop(probe);
 
     let mut update = patch(&before.disk_revision);
     update.listen = Some(new_listen.to_string());
@@ -265,9 +266,10 @@ async fn listen_change_is_restart_pending_without_rebinding_and_lan_is_not_enfor
     assert!(updated.pending_restart);
     assert_eq!(updated.listen, new_listen.to_string());
     assert_eq!(running.local_addr, bound);
-    assert!(
-        std::net::TcpListener::bind(new_listen).is_ok(),
-        "the new port was rebound"
+    assert_eq!(
+        probe.local_addr().expect("probe still held"),
+        new_listen,
+        "the daemon took the listen port"
     );
 
     let status: StatusResponse = client.get("/v1/hofund/status").await;

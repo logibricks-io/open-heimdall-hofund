@@ -332,6 +332,8 @@ pub trait UpstreamProvider: Send + Sync + 'static {
         Ok(())
     }
 
+    fn stopping(&self) {}
+
     async fn shutdown(&self, deadline: Duration) -> Result<(), PluginError> {
         let _ = deadline;
         Ok(())

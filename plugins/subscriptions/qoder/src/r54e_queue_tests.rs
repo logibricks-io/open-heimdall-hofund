@@ -148,7 +148,7 @@ fn r54e_queue_poll_then_resend_succeeds() {
         )
         .await
         .expect("through queue");
-        assert!(matches!(completion, Completion::Unary(_)));
+        assert!(matches!(completion.peel(), Completion::Unary(_)));
 
         let calls = host.http().calls();
         let chat_bodies: Vec<_> = calls
