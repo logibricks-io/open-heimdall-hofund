@@ -271,6 +271,8 @@ mod tests {
         "GET /realtime",
         "GET /responses",
         "POST /responses",
+        "POST /v1/responses/compact",
+        "POST /responses/compact",
         "GET /v1beta/models",
         "POST /v1beta/models/{*target}",
         "*",
@@ -608,5 +610,30 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn d247_read_only_compact_is_refused() {
+        let fixture = fixture();
+        let display = fixture
+            .store
+            .add_with_access("Display", Some("display-secret-123"), true)
+            .expect("display");
+        let app = fixture.gateway.into_router();
+        for path in ["/v1/responses/compact", "/responses/compact"] {
+            let (status, _, body) = request(
+                &app,
+                "POST",
+                path,
+                Some(&display.secret),
+                r#"{"model":"m1"}"#,
+                &[],
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{path} {body:?}");
+            let error: serde_json::Value = serde_json::from_slice(&body).expect("error json");
+            assert_eq!(error["error"]["code"], READ_ONLY_CODE);
+        }
+        assert_eq!(fixture.hits.load(Ordering::SeqCst), 0);
     }
 }

@@ -114,7 +114,8 @@ impl CodexUpstream {
         let codex = self.instructions(access, &request.model).await;
         let declared: Vec<String> = request.tools.iter().map(|tool| tool.name.clone()).collect();
         let back = codex_tool_names::codex_tool_names_back(&declared);
-        let unary = !request.stream;
+        let compact = take_compact(&mut request);
+        let unary = !request.stream && !compact;
         request.stream = true;
         let posted = Arc::new(Mutex::new(None::<Vec<u8>>));
         let trimmed = Arc::new(Mutex::new(None::<Vec<u8>>));
@@ -126,6 +127,7 @@ impl CodexUpstream {
                 Arc::clone(&posted),
                 Arc::clone(&trimmed),
                 &back,
+                compact,
             );
             match wire::send(
                 self.host.http(),
@@ -192,6 +194,7 @@ impl CodexUpstream {
         posted: Arc<Mutex<Option<Vec<u8>>>>,
         trimmed: Arc<Mutex<Option<Vec<u8>>>>,
         back: &std::collections::BTreeMap<String, String>,
+        compact: bool,
     ) -> Target {
         let posted_capture = Arc::clone(&posted);
         let trimmed_body = Arc::clone(&trimmed);
@@ -221,6 +224,9 @@ impl CodexUpstream {
                     return shape::session_headers(body);
                 }
                 let headers = shape::body(body, codex.as_deref());
+                if compact {
+                    append_trigger(body);
+                }
                 let bytes = Value::Object(body.clone()).to_string().into_bytes();
                 *posted_capture
                     .lock()
@@ -247,6 +253,14 @@ fn unreadable_refusal(status: Option<u16>) -> bool {
 impl UpstreamProvider for CodexUpstream {
     fn attempt_base(&self) -> String {
         self.endpoints.base.clone()
+    }
+
+    fn compacts_by_trigger(&self) -> bool {
+        true
+    }
+
+    fn serves_responses(&self, _model: &str) -> bool {
+        true
     }
 
     async fn execute(
@@ -374,6 +388,44 @@ pub(crate) fn token_expired(message: &str) -> bool {
         || lower.contains("authentication token has expired")
         || lower.contains("please try refreshing it")
         || has_word(&lower, "token_expired")
+}
+
+const COMPACT_FLAG: &str = "hofund_responses_compact";
+const COMPACT_BODY: &str = "hofund_responses_compact_body";
+
+fn take_compact(request: &mut Request) -> bool {
+    let flagged = request
+        .extensions
+        .get(COMPACT_FLAG)
+        .and_then(Value::as_bool)
+        == Some(true);
+    request.extensions.remove(COMPACT_FLAG);
+    request.extensions.remove(COMPACT_BODY);
+    flagged
+}
+
+fn append_trigger(body: &mut json::Map<String, Value>) {
+    let input = body
+        .entry("input")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if let Some(text) = input.as_str().map(str::to_owned) {
+        *input = json::json!([{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": text}]
+        }]);
+    }
+    let Some(items) = input.as_array_mut() else {
+        return;
+    };
+    let already = items
+        .last()
+        .and_then(|item| item.get("type"))
+        .and_then(Value::as_str)
+        == Some("compaction_trigger");
+    if !already {
+        items.push(json::json!({"type": "compaction_trigger"}));
+    }
 }
 
 fn has_word(text: &str, word: &str) -> bool {

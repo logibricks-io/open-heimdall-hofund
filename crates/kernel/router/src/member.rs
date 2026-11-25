@@ -201,4 +201,21 @@ pub trait Member: Send + Sync {
     /// After a regional model refusal, the next try must not reuse the
     /// connection the edge refused on.
     fn close_idle_connections(&self) {}
+
+    /// Whether this account compacts by appending a trigger on Responses.
+    ///
+    /// The default is false. A key provider relays `/responses/compact` instead.
+    fn compacts_by_trigger(&self) -> bool {
+        false
+    }
+
+    /// Whether `model` is asked on Responses.
+    ///
+    /// The default is true when this member's protocol, or the wire protocol
+    /// on [`Member::attempt`], is Responses.
+    fn serves_responses(&self, model: &str) -> bool {
+        let _ = model;
+        let responses = hofund_plugin_api::ProtocolId::OPENAI_RESPONSES.as_str();
+        self.protocol() == responses || self.attempt().wire_protocol == responses
+    }
 }

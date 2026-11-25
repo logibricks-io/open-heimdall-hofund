@@ -100,6 +100,14 @@ impl Provider for ProviderAdapter {
         self.inner.rest_probe()
     }
 
+    fn compacts_by_trigger(&self) -> bool {
+        self.inner.compacts_by_trigger()
+    }
+
+    fn serves_responses(&self, model: &str) -> bool {
+        self.inner.serves_responses(model)
+    }
+
     async fn list_for_probe(&self) -> Result<ModelList, PluginError> {
         self.inner.list_for_probe(&ListQuery::new()).await
     }

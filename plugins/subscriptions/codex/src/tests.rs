@@ -1202,6 +1202,51 @@ fn r47c_compaction_trigger_reaches_recorded_upstream_body() {
 }
 
 #[test]
+fn d247_compact_appends_a_trigger_on_responses_and_does_not_post_compact() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    let mut request = streaming_request();
+    request.stream = false;
+    request.messages = vec![Message {
+        role: Role::User,
+        content: vec![ContentPart::Text(TextPart {
+            text: "keep this".to_owned(),
+            extensions: Extensions::new(),
+        })],
+        extensions: Extensions::new(),
+    }];
+    request
+        .extensions
+        .insert("hofund_responses_compact", Value::Bool(true));
+    request.extensions.insert(
+        "hofund_responses_compact_body",
+        Value::String("{\"model\":\"gpt-5\"}".to_owned()),
+    );
+    host.http()
+        .enqueue(b"event: response.completed\ndata: {}\n\n".to_vec());
+    block_on(upstream_for(&host, &id).execute(request, ProtocolId::OPENAI_RESPONSES))
+        .expect("compact");
+    let call = &host.http().calls()[0];
+    assert!(
+        call.uri().contains("/responses") && !call.uri().contains("/responses/compact"),
+        "{}",
+        call.uri()
+    );
+    let body: Value = json::from_slice(call.body()).expect("recorded JSON");
+    let input = body["input"].as_array().expect("input");
+    assert_eq!(
+        input
+            .last()
+            .and_then(|item| item.get("type"))
+            .and_then(Value::as_str),
+        Some("compaction_trigger")
+    );
+    assert_eq!(body["stream"], json!(true));
+    assert!(body.get("hofund_responses_compact").is_none());
+}
+
+#[test]
 fn instructions_ride_first_unless_they_are_codex() {
     let input = json!([{"role": "user", "content": "hi"}]);
     let (out, _) = shaped(

@@ -848,6 +848,14 @@ impl Member for LiveMember {
         })
     }
 
+    fn compacts_by_trigger(&self) -> bool {
+        self.stack.inner.inner.provider.compacts_by_trigger()
+    }
+
+    fn serves_responses(&self, model: &str) -> bool {
+        self.stack.inner.inner.provider.serves_responses(model)
+    }
+
     fn attempt(&self) -> MemberAttempt {
         MemberAttempt {
             provider_id: self.route_id.clone(),

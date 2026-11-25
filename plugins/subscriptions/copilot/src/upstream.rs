@@ -7,6 +7,7 @@ use hofund_plugin_api::{
     AccountId, Completion, ContentPart, CredentialStyle, HostContext, PluginError, ProbeQuery,
     ProbeReport, ProtocolId, Request, Role, UpstreamProvider,
 };
+use hofund_plugin_sdk::json::{self, Value};
 use hofund_plugin_sdk::oauth::{TokenCache, same_secret, secret_text};
 use hofund_plugin_sdk::wire::{self, Target};
 
@@ -102,10 +103,14 @@ impl CopilotUpstream {
         &self,
         session: &Session,
         protocol: ProtocolId,
-        request: Request,
+        mut request: Request,
         inbound: ProtocolId,
         auto: Option<&AutoSession>,
     ) -> Result<Completion, PluginError> {
+        let compact = take_compact(&mut request);
+        if compact {
+            request.stream = true;
+        }
         let request = image_cap::within(&self.book, &self.account, request);
         let mut headers = session_request_headers(&request, session);
         if let Some(token) = auto.and_then(|picked| picked.token.as_ref()) {
@@ -115,6 +120,7 @@ impl CopilotUpstream {
             ));
         }
         if protocol == ProtocolId::OPENAI_RESPONSES
+            && !compact
             && self.book.responses_socket(&self.account, &request.model)
         {
             match crate::socket::try_responses(
@@ -141,6 +147,12 @@ impl CopilotUpstream {
                 reasoning::hooks(&self.book, &self.host, &self.account, &request.model)
         {
             target = target.rewrite(rewrite).observe(observe);
+        }
+        if compact && protocol == ProtocolId::OPENAI_RESPONSES {
+            target = target.rewrite(std::sync::Arc::new(|body| {
+                append_trigger(body);
+                Vec::new()
+            }));
         }
         wire::execute(
             self.host.http(),
@@ -233,6 +245,14 @@ struct Prepared {
 
 #[hofund_plugin_sdk::async_trait]
 impl UpstreamProvider for CopilotUpstream {
+    fn compacts_by_trigger(&self) -> bool {
+        true
+    }
+
+    fn serves_responses(&self, model: &str) -> bool {
+        self.book.serves_responses(&self.account, model)
+    }
+
     async fn execute(
         &self,
         request: Request,
@@ -332,6 +352,44 @@ pub(crate) fn initiator(request: &Request) -> &'static str {
                 .any(|part| matches!(part, ContentPart::ToolResult(_)))
     });
     if typed { "user" } else { "agent" }
+}
+
+const COMPACT_FLAG: &str = "hofund_responses_compact";
+const COMPACT_BODY: &str = "hofund_responses_compact_body";
+
+fn take_compact(request: &mut Request) -> bool {
+    let flagged = request
+        .extensions
+        .get(COMPACT_FLAG)
+        .and_then(Value::as_bool)
+        == Some(true);
+    request.extensions.remove(COMPACT_FLAG);
+    request.extensions.remove(COMPACT_BODY);
+    flagged
+}
+
+fn append_trigger(body: &mut json::Map<String, Value>) {
+    let input = body
+        .entry("input")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if let Some(text) = input.as_str().map(str::to_owned) {
+        *input = json::json!([{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": text}]
+        }]);
+    }
+    let Some(items) = input.as_array_mut() else {
+        return;
+    };
+    let already = items
+        .last()
+        .and_then(|item| item.get("type"))
+        .and_then(Value::as_str)
+        == Some("compaction_trigger");
+    if !already {
+        items.push(json::json!({"type": "compaction_trigger"}));
+    }
 }
 
 /// Whether any message carries an image, including inside a tool result.

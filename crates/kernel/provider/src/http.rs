@@ -466,6 +466,38 @@ pub(crate) fn messages_url(upstream: &Upstream) -> &str {
     &upstream.url
 }
 
+const COMPACT_FLAG: &str = "hofund_responses_compact";
+const COMPACT_ORIGINAL: &str = "hofund_responses_compact_body";
+
+fn compact_url(url: &str, request: &Request) -> String {
+    let compact = request
+        .extensions
+        .get(COMPACT_FLAG)
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+    if compact && url.ends_with("/responses") {
+        format!("{url}/compact")
+    } else {
+        url.to_owned()
+    }
+}
+
+fn relay_compact_body(original: &str, model: Option<&str>) -> Vec<u8> {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(original) else {
+        return original.as_bytes().to_vec();
+    };
+    if let Some(object) = value.as_object_mut() {
+        if let Some(model) = model.filter(|model| !model.is_empty()) {
+            object.insert(
+                "model".to_owned(),
+                serde_json::Value::String(model.to_owned()),
+            );
+        }
+        object.remove("stream");
+    }
+    serde_json::to_vec(&value).unwrap_or_else(|_| original.as_bytes().to_vec())
+}
+
 pub(crate) fn prepare_body(
     upstream: &Upstream,
     codec: &dyn Codec,
@@ -473,6 +505,11 @@ pub(crate) fn prepare_body(
     prepare: Option<Prepare>,
     inbound_protocol: &str,
 ) -> Result<Vec<u8>, ProviderError> {
+    let compact_original = request
+        .extensions
+        .get(COMPACT_ORIGINAL)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
     if let Some(profile) = upstream.quirks {
         hofund_quirks::apply(profile, &mut request);
     }
@@ -511,7 +548,7 @@ pub(crate) fn prepare_body(
         body = prepare(&body).map_err(|error| ProviderError::decode(error.to_string()))?;
     }
     body = hofund_codec::service_tier::adjust_encoded_body(&upstream.base_url, codec.id(), &body);
-    Ok(hofund_quirks::apply_encoded_with_state(
+    body = hofund_quirks::apply_encoded_with_state(
         hofund_quirks::EncodedContext {
             base_url: &upstream.base_url,
             preset: upstream.preset.as_deref(),
@@ -519,7 +556,13 @@ pub(crate) fn prepare_body(
         },
         &upstream.state,
         &body,
-    ))
+    );
+    if codec.id() == hofund_plugin_api::ProtocolId::OPENAI_RESPONSES.as_str()
+        && let Some(original) = compact_original
+    {
+        body = relay_compact_body(&original, model_from_body(&body).as_deref());
+    }
+    Ok(body)
 }
 
 pub(crate) async fn post_json(
@@ -586,7 +629,7 @@ pub(crate) async fn execute(
     prepare: Option<Prepare>,
     inbound_protocol: &str,
 ) -> Result<Completion, ProviderError> {
-    let url = upstream.url.clone();
+    let url = compact_url(&upstream.url, &request);
     execute_at(upstream, &url, codec, request, prepare, inbound_protocol).await
 }
 
@@ -599,7 +642,7 @@ pub(crate) async fn execute_with_attempt(
     route: &crate::AttemptRoute,
     hook: Option<&dyn crate::AttemptHook>,
 ) -> Result<Completion, ProviderError> {
-    let url = upstream.url.clone();
+    let url = compact_url(&upstream.url, &request);
     finish(
         upstream,
         &url,
@@ -1009,7 +1052,7 @@ fn note_dropped(name: &str) -> bool {
 mod tests {
     use std::time::Duration;
 
-    use tokio::io::AsyncReadExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::{
         build_private_client, build_private_client_insecure_for_tests, note_dropped, send_builder,
@@ -1544,5 +1587,86 @@ mod tests {
             prepare_body(&upstream, &OpenAiChat, request, None, OpenAiChat.id()).expect("body");
         let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
         assert_eq!(value["service_tier"], "priority");
+    }
+
+    #[tokio::test]
+    async fn d247_compact_posts_the_original_body_at_responses_compact() {
+        use std::sync::{Arc, Mutex};
+
+        use super::{Credential, Endpoint, Upstream, execute};
+        use hofund_codec::{Codec, OpenAiResponses};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&seen);
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 2048];
+            loop {
+                let read = socket.read(&mut chunk).await.expect("read");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                if complete_request(&request) {
+                    break;
+                }
+            }
+            *recorded.lock().expect("seen") = request;
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}")
+                .await
+                .expect("write");
+        });
+        let endpoint = Endpoint {
+            id: "loop".to_owned(),
+            base_url: format!("http://{address}/v1"),
+            realtime_url: String::new(),
+            preset: None,
+            api_key: String::new(),
+            credential: Credential::Default,
+            headers: Vec::new(),
+            pass_headers: Vec::new(),
+            quirks: None,
+            timeout: Duration::from_secs(2),
+            client: None,
+            client_slot: None,
+            client_refresh: None,
+        };
+        let upstream = Upstream::open(endpoint, "responses", reqwest::header::HeaderMap::new())
+            .expect("upstream");
+        let original = r#"{"model":"fake/m1","stream":true,"input":[{"type":"compaction","encrypted_content":"gAAAAearlier=="}]}"#;
+        let mut request = OpenAiResponses
+            .decode_request(original.as_bytes())
+            .expect("decode");
+        request.model = "m1".to_owned();
+        request
+            .extensions
+            .insert(super::COMPACT_FLAG, serde_json::Value::Bool(true));
+        request.extensions.insert(
+            super::COMPACT_ORIGINAL,
+            serde_json::Value::String(original.to_owned()),
+        );
+        execute(
+            &upstream,
+            &OpenAiResponses,
+            request,
+            None,
+            OpenAiResponses.id(),
+        )
+        .await
+        .expect("post");
+        server.await.expect("server");
+        let request = seen.lock().expect("seen");
+        let text = String::from_utf8_lossy(&request);
+        assert!(text.contains("POST /v1/responses/compact "), "{text}");
+        assert!(text.contains("gAAAAearlier=="), "{text}");
+        assert!(text.contains("\"model\":\"m1\""), "{text}");
+        assert!(!text.contains("\"stream\":true"), "{text}");
+        assert!(!text.contains("fake/m1"), "{text}");
     }
 }

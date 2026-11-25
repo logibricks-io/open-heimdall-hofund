@@ -574,6 +574,24 @@ pub trait UpstreamProvider: Send + Sync + 'static {
     fn remember_listed(&self, models: &[ModelSpec]) {
         let _ = models;
     }
+
+    /// Whether this account compacts by appending a trigger on Responses.
+    ///
+    /// The default is false, so a key provider relays the compact path and an
+    /// account that does not opt in is refused.
+    #[must_use]
+    fn compacts_by_trigger(&self) -> bool {
+        false
+    }
+
+    /// Whether `model` is asked on Responses.
+    ///
+    /// The default is false. An account overrides this from its model list.
+    #[must_use]
+    fn serves_responses(&self, model: &str) -> bool {
+        let _ = model;
+        false
+    }
 }
 
 #[cfg(test)]

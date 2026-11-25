@@ -87,6 +87,10 @@ pub struct Conversation {
     /// A body-hash id is already that history's identity, so it is not
     /// mapped again as a fork of another session.
     pub session_named: bool,
+    /// Whether this call is unary Responses compaction.
+    pub compact: bool,
+    /// Member id that sealed a compaction item in this body, when known.
+    pub only_member: Option<String>,
 }
 
 impl Conversation {
@@ -99,6 +103,8 @@ impl Conversation {
             within,
             body: Vec::new(),
             session_named: false,
+            compact: false,
+            only_member: None,
         }
     }
 
@@ -113,6 +119,20 @@ impl Conversation {
     #[must_use]
     pub fn with_named_session(mut self, named: bool) -> Self {
         self.session_named = named;
+        self
+    }
+
+    /// Marks this call as unary Responses compaction.
+    #[must_use]
+    pub fn with_compact(mut self) -> Self {
+        self.compact = true;
+        self
+    }
+
+    /// Limits later hops to the member that sealed a compaction item.
+    #[must_use]
+    pub fn with_only_member(mut self, member: impl Into<String>) -> Self {
+        self.only_member = Some(member.into());
         self
     }
 }

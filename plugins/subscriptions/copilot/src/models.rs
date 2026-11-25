@@ -126,6 +126,16 @@ impl Book {
         }
     }
 
+    /// Whether `account`'s list asks `model` on Responses.
+    pub(crate) fn serves_responses(&self, account: &AccountId, model: &str) -> bool {
+        self.lock().get(account).is_some_and(|listed| {
+            listed
+                .apis
+                .get(model)
+                .is_some_and(|apis| apis.contains(&ProtocolId::OPENAI_RESPONSES))
+        })
+    }
+
     /// Whether `account`'s list serves `model` on the Responses WebSocket.
     pub(crate) fn responses_socket(&self, account: &AccountId, model: &str) -> bool {
         self.lock()
@@ -411,4 +421,26 @@ fn path_segment(model: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod d247_tests {
+    use super::Book;
+    use hofund_plugin_api::{AccountId, ProtocolId};
+
+    #[test]
+    fn d247_responses_model_is_eligible_and_chat_only_is_not() {
+        let book = Book::default();
+        let account = AccountId::try_from("acct").expect("id");
+        book.see(
+            &account,
+            "m-responses",
+            vec![ProtocolId::OPENAI_RESPONSES],
+            None,
+        );
+        book.see(&account, "m-chat", vec![ProtocolId::OPENAI_CHAT], None);
+        assert!(book.serves_responses(&account, "m-responses"));
+        assert!(!book.serves_responses(&account, "m-chat"));
+        assert!(!book.serves_responses(&account, "missing"));
+    }
 }

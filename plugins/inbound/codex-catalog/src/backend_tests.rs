@@ -648,11 +648,9 @@ fn a_hofund_model_cannot_compact_and_codexs_own_can() {
             r#"{"model":"gpt-5"}"#,
         ),
     );
-    assert_eq!((status, body.as_str()), (200, "compacted"));
-    assert_eq!(
-        stub.sent()[0].uri,
-        "https://backend.test/codex/responses/compact"
-    );
+    assert_eq!(status, 404, "{body}");
+    assert!(body.contains("Not Found"), "{body}");
+    assert!(stub.sent().is_empty());
 }
 
 #[test]
@@ -1283,10 +1281,7 @@ fn a_summary_reply_that_cannot_be_read_is_no_summary() {
 
 #[test]
 fn codexs_own_models_get_their_input_put_right_and_their_trigger_relayed() {
-    let stub = Stub::default()
-        .listing(&[])
-        .sending(answer(200, "relayed"))
-        .sending(answer(200, "compacted"));
+    let stub = Stub::default().listing(&[]).sending(answer(200, "relayed"));
     let body = json!({
         "model": "gpt-5",
         "input": [
@@ -1296,18 +1291,19 @@ fn codexs_own_models_get_their_input_put_right_and_their_trigger_relayed() {
         ],
     })
     .to_string();
-    for (path, said) in [
-        ("/responses", "relayed"),
-        ("/responses/compact", "compacted"),
-    ] {
-        let (status, _, text) = ask(
-            &stub,
-            request("POST", &format!("/backend-api/codex{path}"), &[], &body),
-        );
-        assert_eq!((status, text.as_str()), (200, said));
-    }
+    let (status, _, text) = ask(
+        &stub,
+        request("POST", "/backend-api/codex/responses", &[], &body),
+    );
+    assert_eq!((status, text.as_str()), (200, "relayed"));
+    let (status, _, text) = ask(
+        &stub,
+        request("POST", "/backend-api/codex/responses/compact", &[], &body),
+    );
+    assert_eq!(status, 404, "{text}");
+    assert!(text.contains("Not Found"), "{text}");
     let sent = stub.sent();
-    assert_eq!(sent.len(), 2);
+    assert_eq!(sent.len(), 1);
     for seen in &sent {
         let value: Value = json::from_slice(&seen.body).expect("json");
         assert_eq!(value["input"][0]["id"], "ctc_1");
@@ -1503,8 +1499,9 @@ fn r47a_a3_backend_compact_allows_apikey_sign_in_under_account_holds() {
         ),
     );
     super::official::set_test_codex_home(None);
-    assert_eq!((status, text.as_str()), (200, "compacted"));
-    assert_eq!(stub.sent().len(), 1);
+    assert_eq!(status, 404, "{text}");
+    assert!(text.contains("Not Found"), "{text}");
+    assert!(stub.sent().is_empty());
 }
 
 #[test]
@@ -1522,7 +1519,7 @@ fn an_api_key_and_a_compaction_never_look_for_an_account() {
         ),
     );
     assert_eq!(text, "api");
-    let (_, _, text) = ask(
+    let (status, _, text) = ask(
         &stub,
         request(
             "POST",
@@ -1531,7 +1528,9 @@ fn an_api_key_and_a_compaction_never_look_for_an_account() {
             r#"{"model":"gpt-5"}"#,
         ),
     );
-    assert_eq!(text, "compacted");
+    assert_eq!(status, 404, "{text}");
+    assert!(text.contains("Not Found"), "{text}");
+    assert_eq!(stub.sent().len(), 1);
     assert!(stub.called().is_empty());
 }
 

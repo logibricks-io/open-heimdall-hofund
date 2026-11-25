@@ -264,4 +264,19 @@ pub trait Provider: Send + Sync {
     fn learned_catalog_entry(&self, _model: &str) -> Option<String> {
         None
     }
+
+    /// Whether this account compacts by appending a trigger on Responses.
+    ///
+    /// The default is false. A key provider relays the compact path instead.
+    fn compacts_by_trigger(&self) -> bool {
+        false
+    }
+
+    /// Whether `model` is asked on Responses.
+    ///
+    /// The default follows this adapter's configured wire protocol.
+    fn serves_responses(&self, model: &str) -> bool {
+        let _ = model;
+        self.attempt_route().protocol == hofund_plugin_api::ProtocolId::OPENAI_RESPONSES.as_str()
+    }
 }

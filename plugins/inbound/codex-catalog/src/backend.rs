@@ -221,6 +221,7 @@ pub(crate) async fn serve_with_state(
             {
                 return error(403, &message);
             }
+            return backend_not_found();
         }
         let tool_back = input::tool_names_back(request.body().bytes());
         if let Some(body) = input::for_backend(request.body().bytes()) {
@@ -265,6 +266,11 @@ async fn account_model(kernel: &dyn Kernel, body: &Body) -> Option<Vec<u8>> {
     }
     *value.get_mut("model")? = Value::String(routed);
     Some(value.to_string().into_bytes())
+}
+
+/// The backend answers this path with 404, so the relay does not forward it.
+fn backend_not_found() -> HttpResponse {
+    json_response(404, r#"{"detail":"Not Found"}"#.to_owned())
 }
 
 /// An OpenAI-shaped error with `status`.
