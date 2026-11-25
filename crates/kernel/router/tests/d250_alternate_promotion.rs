@@ -24,6 +24,7 @@ enum Reply {
     Momentary,
     Quota,
     MessagesRefusal,
+    Overflow,
 }
 
 struct Fake {
@@ -74,6 +75,10 @@ impl Member for Fake {
             Reply::Momentary => Err(PluginError::status_error(503, "unavailable")),
             Reply::Quota => Err(PluginError::quota_status(429, "quota exhausted")),
             Reply::MessagesRefusal => Err(PluginError::status_error(403, REFUSAL)),
+            Reply::Overflow => Err(PluginError::status_error(
+                400,
+                "prompt is too long: 300 tokens",
+            )),
         }
     }
 
@@ -171,6 +176,18 @@ async fn d250_hand_on_primary_keeps_chat_until_messages_refuses() {
         seen.lock().expect("seen").as_slice(),
         ["probe:probe", "relay:messages", "relay:chat"]
     );
+
+    seen.lock().expect("seen").clear();
+    *now.lock().expect("clock") += Duration::from_secs(31);
+    let again = router
+        .dispatch(&Request::new("model-a"), "messages")
+        .await
+        .expect("a left-out unfit primary still asks Chat");
+    assert_eq!(again.protocol, "chat");
+    assert_eq!(
+        seen.lock().expect("seen").as_slice(),
+        ["probe:probe", "relay:chat"]
+    );
 }
 
 #[tokio::test]
@@ -205,6 +222,92 @@ async fn d250_over_window_promotion_keeps_chat_after_messages_refuses() {
         seen.lock().expect("seen").as_slice(),
         ["probe:probe", "relay:messages", "relay:chat"]
     );
+
+    seen.lock().expect("seen").clear();
+    let again = router
+        .dispatch(&request, "messages")
+        .await
+        .expect("a left-out unfit primary still asks Chat");
+    assert_eq!(again.protocol, "chat");
+    assert_eq!(
+        seen.lock().expect("seen").as_slice(),
+        ["probe:probe", "relay:chat"]
+    );
+}
+
+#[tokio::test]
+async fn d250_chat_answer_advances_drain_on_the_primary() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut hops = vec![hop("other", "row", "other", Reply::Momentary, None, &seen)];
+    hops.extend(relay_pair(&seen));
+    let router = Router::from_routes(
+        BTreeMap::from([(
+            "model-a".to_owned(),
+            Route::new(hops).with_routing("drain").with_patience(None),
+        )]),
+        FailoverPolicy::default(),
+    );
+
+    router
+        .dispatch(&Request::new("model-a"), "messages")
+        .await
+        .expect("Chat answers after the other member fails");
+    seen.lock().expect("seen").clear();
+    let again = router
+        .dispatch(&Request::new("model-a"), "messages")
+        .await
+        .expect("drain stays on the primary");
+    assert_eq!(again.protocol, "chat");
+    assert_eq!(seen.lock().expect("seen").as_slice(), ["relay:chat"]);
+}
+
+#[tokio::test]
+async fn d250_chat_overflow_is_remembered_on_the_primary() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let other = hop("other", "row", "other", Reply::Unary, None, &seen);
+    let messages = hop(
+        "relay",
+        "messages",
+        "messages",
+        Reply::MessagesRefusal,
+        None,
+        &seen,
+    );
+    let primary = messages.member.id().to_string();
+    let chat = hop(
+        "relay",
+        "chat",
+        "chat",
+        Reply::Overflow,
+        Some(primary),
+        &seen,
+    );
+    let router = Router::from_routes(
+        BTreeMap::from([(
+            "model-a".to_owned(),
+            Route::new(vec![messages, chat, other]).with_patience(None),
+        )]),
+        FailoverPolicy::default(),
+    );
+    let conversation = Conversation::new("model-a|session", 1, false).with_named_session(true);
+    router
+        .dispatch_with_context(
+            &Request::new("model-a"),
+            "messages",
+            Some(&conversation),
+            None,
+        )
+        .await
+        .expect("the other member answers after Chat overflows");
+
+    seen.lock().expect("seen").clear();
+    let next = Conversation::new("model-a|session", 2, false).with_named_session(true);
+    let again = router
+        .dispatch_with_context(&Request::new("model-a"), "messages", Some(&next), None)
+        .await
+        .expect("the primary is asked after the member that fits");
+    assert_eq!(again.protocol, "other");
+    assert_eq!(seen.lock().expect("seen").as_slice(), ["other:other"]);
 }
 
 #[tokio::test]

@@ -2241,6 +2241,15 @@ fn split_protocol_alternates(hops: Vec<Hop>) -> (Vec<Hop>, Vec<Hop>) {
     (routing, alternates)
 }
 
+/// Route member an answer should be charged to. A protocol alternate charges
+/// the primary it stands in for.
+fn routing_member_label(hop: &Hop) -> String {
+    hop.member
+        .stands_in_for()
+        .map(str::to_owned)
+        .unwrap_or_else(|| hop.member.id().to_string())
+}
+
 /// Places each alternate immediately after the member it stands in for.
 fn splice_protocol_alternates(hops: Vec<Hop>, alternates: &[Hop]) -> Vec<Hop> {
     if alternates.is_empty() {
@@ -2421,7 +2430,7 @@ impl DispatchState {
         let tokens = self.input_tokens;
         let apply_window = self.resolved.routing == "fit";
         let position = self.hand_on.iter().position(|hop| {
-            !self.member_skipped(hop)
+            self.askable_left_out(hop)
                 && hand_on_candidate(&cooldowns, hop, &bare, failure, tokens, apply_window, true)
                 && cooldowns
                     .claim_hand_on(hop.member.id(), hop.wire_model.as_deref().unwrap_or(&bare))
@@ -2482,7 +2491,7 @@ impl DispatchState {
                     }
                     if let Some(trace) = self.trace.take() {
                         let hop = &self.resolved.hops[answered.index];
-                        let member = hop.member.id().to_string();
+                        let member = routing_member_label(hop);
                         trace.finish(
                             Some(&member),
                             Some(hop.member.route_id()),
@@ -2682,7 +2691,8 @@ impl DispatchState {
             if self.rest_left
                 && let Some(cooldowns) = &self.cooldowns
             {
-                cooldowns.note_asked_while_cooling(hop.member.id(), &upstream_model);
+                let cooling_id = self.routing_cooldown_id(&hop);
+                cooldowns.note_asked_while_cooling(&cooling_id, &upstream_model);
             }
             match self.quota_hold(asking, index) {
                 QuotaHold::Proceed => {}
@@ -2758,14 +2768,11 @@ impl DispatchState {
                     if let Some(hook) = self.hook.as_ref() {
                         hook.answered(&info);
                     }
-                    let affinity_member = hop
-                        .member
-                        .stands_in_for()
-                        .map_or_else(|| hop.member.id().to_string(), str::to_owned);
+                    let affinity_member = routing_member_label(&hop);
                     if let Some(affinity) = &self.affinity {
                         self.overflow_memory.clear(&affinity.key, &affinity_member);
                     }
-                    let member_id = hop.member.id().to_string();
+                    let member_id = routing_member_label(&hop);
                     for pool_move in &self.drain_moves {
                         if let Some((_, key)) = pool_move
                             .choices
@@ -2887,7 +2894,7 @@ impl DispatchState {
                         if record_overflow && let Some(affinity) = &self.affinity {
                             self.overflow_memory.record(
                                 &affinity.key,
-                                &hop.member.id().to_string(),
+                                &routing_member_label(&hop),
                                 self.input_tokens,
                             );
                         }
@@ -3093,7 +3100,7 @@ impl DispatchState {
         };
         trace.push_try(
             RouteTry::new(
-                hop.member.id().to_string(),
+                routing_member_label(hop),
                 hop.member.route_id(),
                 upstream_model,
                 done,
@@ -3120,7 +3127,7 @@ impl DispatchState {
         let extra: Vec<Hop> = std::mem::take(&mut self.over_window)
             .into_iter()
             .filter(|hop| {
-                !self.member_skipped(hop)
+                self.askable_left_out(hop)
                     && self.cooldowns.as_ref().is_none_or(|cooldowns| {
                         hand_on_candidate(
                             cooldowns,
@@ -3165,7 +3172,7 @@ impl DispatchState {
             self.resolved
                 .hops
                 .get(*later)
-                .is_some_and(|hop| !self.member_skipped(hop))
+                .is_some_and(|hop| self.askable_left_out(hop))
         }) {
             return true;
         }
@@ -3177,7 +3184,7 @@ impl DispatchState {
             return false;
         };
         self.hand_on.iter().any(|hop| {
-            !self.member_skipped(hop)
+            self.askable_left_out(hop)
                 && hand_on_candidate(
                     cooldowns,
                     hop,
@@ -3198,7 +3205,7 @@ impl DispatchState {
             return false;
         };
         self.hand_on.iter().any(|hop| {
-            !self.member_skipped(hop)
+            self.askable_left_out(hop)
                 && hand_on_candidate(
                     cooldowns,
                     hop,
@@ -3211,11 +3218,39 @@ impl DispatchState {
         })
     }
 
-    fn member_skipped(&self, hop: &Hop) -> bool {
+    /// Admits a left-out primary whose only skip is an API refusal when that
+    /// primary still has another API. The alternate itself stays off these
+    /// lists; [`Self::round`] skips the refused hop and calls the alternate.
+    fn askable_left_out(&self, hop: &Hop) -> bool {
+        !self.member_skipped_for(hop, self.has_protocol_alternate(hop))
+    }
+
+    fn has_protocol_alternate(&self, hop: &Hop) -> bool {
+        let id = hop.member.id().to_string();
+        self.protocol_alternates
+            .iter()
+            .any(|alternate| alternate.member.stands_in_for() == Some(id.as_str()))
+    }
+
+    /// Cooldown identity of the route member. A protocol alternate's success,
+    /// failure note, and ask-while-cooling belong to the primary.
+    fn routing_cooldown_id(&self, hop: &Hop) -> MemberId {
+        hop.member
+            .stands_in_for()
+            .and_then(|primary| {
+                self.resolved.hops.iter().find_map(|candidate| {
+                    (candidate.member.id().to_string() == primary)
+                        .then(|| candidate.member.id().clone())
+                })
+            })
+            .unwrap_or_else(|| hop.member.id().clone())
+    }
+
+    fn member_skipped_for(&self, hop: &Hop, ignore_api_refusal: bool) -> bool {
         let upstream_model = hop.wire_model.as_deref().unwrap_or(&self.resolved.bare);
         let plugin_id = hop.member.plugin_id();
         self.refused_providers.contains(hop.member.route_id())
-            || self.api_refused_for(hop)
+            || (!ignore_api_refusal && self.api_refused_for(hop))
             || self.protocol_alternate_idle(hop)
             || (!plugin_id.is_empty() && self.skipped_plugins.contains(plugin_id))
             || self.region_closed_for(hop)

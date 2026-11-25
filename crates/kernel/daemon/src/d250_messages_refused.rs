@@ -168,3 +168,95 @@ async fn d250_real_messages_probe_reports_not_served() {
     );
     server.verify().await;
 }
+
+#[tokio::test]
+async fn d250_chat_success_clears_a_model_rest_on_the_primary() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(403).set_body_string(REFUSAL))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(CHAT_OK))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let (_dir, snapshot, cooldowns) = relay(&server.uri()).await;
+    let primary = super::membership::member_id("relay");
+    cooldowns.record_failure_for_model(
+        &primary,
+        "model-a",
+        &hofund_plugin_api::PluginError::status_error(429, "slow").with_model_scope(),
+    );
+    snapshot
+        .load()
+        .dispatch(&Request::new("model-a"), "anthropic-messages")
+        .await
+        .expect("Chat answers");
+    assert!(cooldowns.cooling_for_model(&primary, "model-a").is_none());
+    let alternate = super::membership::alternate_member_id(&primary, "openai-chat");
+    assert!(cooldowns.cooling_for_model(&alternate, "model-a").is_none());
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn d250_chat_rate_limit_rests_the_primary() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(403).set_body_string(REFUSAL))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(429).set_body_string("slow down"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let (_dir, snapshot, cooldowns) = relay(&server.uri()).await;
+    let primary = super::membership::member_id("relay");
+    match snapshot
+        .load()
+        .dispatch(&Request::new("model-a"), "anthropic-messages")
+        .await
+    {
+        Ok(_) => panic!("Chat is rate limited"),
+        Err(error) => {
+            assert!(matches!(error, hofund_router::RouterError::Upstream { .. }));
+        }
+    }
+    assert!(cooldowns.cooling(&primary).is_some());
+    let alternate = super::membership::alternate_member_id(&primary, "openai-chat");
+    assert!(cooldowns.cooling(&alternate).is_none());
+    server.verify().await;
+}
+
+async fn relay(base_url: &str) -> (tempfile::TempDir, hofund_router::Snapshot, Arc<Cooldowns>) {
+    let config = hofund_config::load(&format!(
+        "[[providers]]\nid = \"relay\"\nprotocol = \"anthropic-messages\"\nbase_url = \"{base_url}\"\napi_key = \"test-key\"\n[[routes]]\nmodel = \"model-a\"\nupstreams = [\"relay\"]\n",
+    ))
+    .expect("config");
+    let registry: Arc<dyn super::DaemonRegistry> = Arc::new(super::RegistryAdapter);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let super::Built { built, limits, .. } = super::providers(
+        &config,
+        &dir.path().join("hofund.toml"),
+        None,
+        super::Mode::Serve,
+        None,
+        None,
+        None,
+        &registry,
+    )
+    .expect("providers");
+    let (routes, policy) = super::route_plan(&config, None, Some(&built), &limits);
+    let cooldowns = Arc::new(Cooldowns::new(CooldownPolicy::default()));
+    let (snapshot, _) =
+        super::membership::open_with_table(&built, routes, policy, Arc::clone(&cooldowns))
+            .expect("router");
+    (dir, snapshot, cooldowns)
+}

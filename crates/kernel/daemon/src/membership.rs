@@ -679,6 +679,11 @@ impl LiveMember {
                     reload.clone(),
                 );
                 member.stands_in_for = Some(primary_id.to_string());
+                // Success, failure, and panic rests follow the routing member.
+                // The alternate keeps its own id so the route can tell the two
+                // APIs apart.
+                member.stack.id = primary_id.clone();
+                member.stack.inner.id = primary_id.clone();
                 Arc::new(member)
             })
             .collect();
