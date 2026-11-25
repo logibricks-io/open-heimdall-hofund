@@ -1205,7 +1205,18 @@ fn note_history(
             None
         };
         if let Some(newest) = newest.filter(|newest| stale_after(newest, &point)) {
-            replace_stale_windows(windows, index, &newest);
+            let current = state
+                .records
+                .iter()
+                .find(|record| quota_key(&record.quota) == quota_key(quota))
+                .and_then(|record| {
+                    record.windows.iter().find(|info| {
+                        info.span.name == name
+                            && info.span.resets_at.as_ref().and_then(parse_quota_time)
+                                == newest.resets_at.as_ref().and_then(parse_quota_time)
+                    })
+                });
+            replace_stale_windows(windows, index, &newest, current);
             continue;
         }
         let points = state
@@ -1257,7 +1268,12 @@ fn without_stale(points: &[QuotaPoint]) -> Vec<QuotaPoint> {
     out
 }
 
-fn replace_stale_windows(windows: &mut [WindowInfo], index: usize, newest: &QuotaPoint) {
+fn replace_stale_windows(
+    windows: &mut [WindowInfo],
+    index: usize,
+    newest: &QuotaPoint,
+    current: Option<&WindowInfo>,
+) {
     let stale = windows[index].clone();
     for (other, info) in windows.iter_mut().enumerate() {
         if other != index && !same_bucket(info, &stale) {
@@ -1266,6 +1282,10 @@ fn replace_stale_windows(windows: &mut [WindowInfo], index: usize, newest: &Quot
         info.span.used = 100.0 - newest.left;
         info.span.remaining = newest.left;
         info.span.resets_at = newest.resets_at.clone();
+        if let Some(current) = current {
+            info.span.amount = current.span.amount;
+            info.span.limit = current.span.limit;
+        }
         info.reset_after = None;
     }
 }
@@ -2352,6 +2372,105 @@ mod tests {
             .find(|quota| quota.provider == "q")
             .expect("q");
         assert_eq!(rolling.windows[0].used, 2.0);
+    }
+
+    #[test]
+    fn d256_digit_pool_with_an_explicit_bucket_span_drops_stale_replicas() {
+        let store = QuotaStore::in_memory();
+        let base = at(1_900_000_000);
+        let week = Duration::from_secs(7 * 24 * 3600);
+        let current_reset = base + Duration::from_secs(1_000) + week;
+        let reading = |used, reset| {
+            vec![
+                info("pool 4 · 7 days", used, Some(reset))
+                    .with_blocking(false)
+                    .with_window_span(week)
+                    .with_stale_replica_quota(true),
+            ]
+        };
+        let current = reading(0.0, current_reset);
+        assert_eq!(window_span(&current[0]), Some(week));
+        store.record_success(quota("p", "a"), current, base + Duration::from_secs(1_000));
+        store.record_success(
+            quota("p", "a"),
+            reading(95.0, base + week),
+            base + Duration::from_secs(1_100),
+        );
+
+        let report = store.report(&[]);
+        assert_eq!(report[0].windows[0].used, 0.0);
+        assert_eq!(
+            report[0].windows[0]
+                .resets_at
+                .as_ref()
+                .and_then(parse_quota_time),
+            Some(current_reset)
+        );
+        let histories = store.histories(None, None, None, base + Duration::from_secs(1_200));
+        assert_eq!(histories[0].lines[0].points.len(), 1);
+        assert_eq!(histories[0].lines[0].points[0].left, 100.0);
+    }
+
+    #[test]
+    fn d256_stale_after_start_slack_is_strict_and_reset_instant_is_kept() {
+        let base = at(1_900_000_000);
+        let week = Duration::from_secs(7 * 24 * 3600);
+        let newest_start = base + Duration::from_secs(1_000);
+        let newest_reset = newest_start + week;
+        let newest = QuotaPoint {
+            at: quota_time(newest_start),
+            left: 100.0,
+            start: Some(quota_time(newest_start)),
+            resets_at: Some(quota_time(newest_reset)),
+        };
+        for earlier in [0, 299, 300] {
+            let point = QuotaPoint {
+                at: quota_time(base + Duration::from_secs(1_100)),
+                left: 5.0,
+                start: Some(quota_time(newest_start - Duration::from_secs(earlier))),
+                resets_at: Some(quota_time(base + week)),
+            };
+            assert!(!stale_after(&newest, &point), "earlier={earlier}");
+        }
+        let stale = QuotaPoint {
+            at: quota_time(base + Duration::from_secs(1_100)),
+            left: 5.0,
+            start: Some(quota_time(newest_start - Duration::from_secs(301))),
+            resets_at: Some(quota_time(base + week)),
+        };
+        assert!(stale_after(&newest, &stale));
+        let at_reset = QuotaPoint {
+            at: quota_time(newest_reset),
+            resets_at: Some(quota_time(newest_reset + Duration::from_secs(60))),
+            ..stale
+        };
+        assert!(!stale_after(&newest, &at_reset));
+    }
+
+    #[test]
+    fn d256_stale_replacement_uses_the_later_windows_provider_counts() {
+        let store = QuotaStore::in_memory();
+        let base = at(1_900_000_000);
+        let week = Duration::from_secs(7 * 24 * 3600);
+        let current_reset = base + Duration::from_secs(1_000) + week;
+        let mut current = d256_windows(25.0, current_reset);
+        for window in &mut current {
+            window.span.amount = 50.0;
+            window.span.limit = 200.0;
+        }
+        store.record_success(quota("p", "a"), current, base + Duration::from_secs(1_000));
+        let mut stale = d256_windows(90.0, base + week);
+        for window in &mut stale {
+            window.span.amount = 90.0;
+            window.span.limit = 100.0;
+        }
+        store.record_success(quota("p", "a"), stale, base + Duration::from_secs(1_100));
+
+        for window in &store.report(&[])[0].windows {
+            assert_eq!(window.used, 25.0);
+            assert_eq!(window.amount, 50.0);
+            assert_eq!(window.limit, 200.0);
+        }
     }
 
     #[test]
