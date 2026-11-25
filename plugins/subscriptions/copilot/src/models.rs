@@ -76,6 +76,9 @@ pub(crate) struct Book {
     pub(crate) refused: Mutex<HashMap<AccountId, HashMap<String, std::time::SystemTime>>>,
     /// Image caps learned from a "too many images" refusal, per model.
     pub(crate) image_caps: Mutex<HashMap<AccountId, HashMap<String, usize>>>,
+    /// When sealed-reasoning files were last pruned. Shared by this book so
+    /// a new upstream does not scan the directory on every call.
+    pub(crate) opaque_pruned_at: Mutex<Option<std::time::SystemTime>>,
     /// Responses sockets kept for each account.
     pub(crate) sockets: crate::socket::Pool,
 }

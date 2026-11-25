@@ -13,6 +13,7 @@ use hofund_plugin_sdk::wire::{self, Target};
 use crate::auto::{self, AutoSession};
 use crate::image_cap;
 use crate::models::{self, Book, Listed};
+use crate::reasoning;
 use crate::session::{self, Session};
 
 /// The GitHub API version Copilot chat calls name.
@@ -132,9 +133,15 @@ impl CopilotUpstream {
                 Err(crate::socket::TurnFail::Fallback) => {}
             }
         }
-        let target = Target::new(protocol, session.base.clone())
+        let mut target = Target::new(protocol, session.base.clone())
             .credential(CredentialStyle::Bearer)
             .headers(headers);
+        if protocol == ProtocolId::OPENAI_CHAT
+            && let Some((rewrite, observe)) =
+                reasoning::hooks(&self.book, &self.host, &self.account, &request.model)
+        {
+            target = target.rewrite(rewrite).observe(observe);
+        }
         wire::execute(
             self.host.http(),
             &target,
