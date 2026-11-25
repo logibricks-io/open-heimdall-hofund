@@ -376,30 +376,42 @@ fn encode_request(request: &Request) -> Result<Vec<u8>, CodecError> {
 }
 
 fn messages_effort(object: &Object) -> Option<Effort> {
+    let thinking = object.get("thinking").and_then(Value::as_object);
+    let kind = thinking
+        .and_then(|thinking| thinking.get("type"))
+        .and_then(Value::as_str);
+    // A level is read only after the caller asked to think. A missing body,
+    // `disabled`, `between_tools`, or any other type leaves effort unset even
+    // when `output_config.effort` names one. The objects stay in the
+    // extension bag, so encode writes them back unchanged.
+    if !matches!(kind, Some("enabled" | "adaptive")) {
+        return None;
+    }
     if let Some(label) = object
         .get("output_config")
         .and_then(Value::as_object)
         .and_then(|config| config.get("effort"))
         .and_then(Value::as_str)
-        && let Some(effort) = Effort::from_label(label)
+        && let Some(effort) = messages_config_effort(label)
     {
         return Some(effort);
     }
-    let thinking = object.get("thinking").and_then(Value::as_object);
-    let kind = thinking
-        .and_then(|thinking| thinking.get("type"))
-        .and_then(Value::as_str);
-    // Enabled and adaptive budgets select a member. Any other thinking body,
-    // including disabled, asks for no level. The object stays in the
-    // extension bag, so encode writes it back unchanged.
-    if matches!(kind, Some("enabled" | "adaptive")) {
-        let budget = thinking
-            .and_then(|thinking| thinking.get("budget_tokens"))
-            .and_then(json_i64)
-            .unwrap_or(0);
-        return effort_of_budget(budget);
+    let budget = thinking
+        .and_then(|thinking| thinking.get("budget_tokens"))
+        .and_then(json_i64)
+        .unwrap_or(0);
+    effort_of_budget(budget)
+}
+
+/// `output_config.effort` once thinking is enabled or adaptive.
+///
+/// `none` and `minimal` select low. An unknown word is not a level, so the
+/// budget is used instead. Chat `reasoning_effort` is not read here.
+fn messages_config_effort(label: &str) -> Option<Effort> {
+    match label.trim().to_ascii_lowercase().as_str() {
+        "none" | "minimal" => Some(Effort::Low),
+        other => Effort::from_label(other),
     }
-    None
 }
 
 fn json_i64(value: &Value) -> Option<i64> {

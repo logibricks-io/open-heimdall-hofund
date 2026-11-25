@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use hofund_codec::{AnthropicMessages, Codec};
+use hofund_codec::{AnthropicMessages, Codec, OpenAiChat};
 use hofund_plugin_api::{Effort, Request};
 use hofund_router::{CooldownPolicy, Cooldowns, Snapshot};
 use wiremock::matchers::{method, path};
@@ -739,4 +739,140 @@ async fn d246_disabled_thinking_uses_the_no_effort_default() {
         body["model"] == "model-4-alpha-medium" && body["thinking"]["type"] == "disabled"
     }));
     server.verify().await;
+}
+
+#[tokio::test]
+async fn d246_output_config_without_enabled_thinking_keeps_the_default() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(MESSAGES_OK))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages/count_tokens"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"input_tokens":7}"#))
+        .mount(&server)
+        .await;
+    let config = messages_config(&server.uri(), "relay");
+    let host = super::ModelsHost::new(
+        std::time::Duration::from_secs(2),
+        std::time::Duration::from_secs(2),
+    );
+    host.seed_models("relay", &source_family());
+    let (_dir, snapshot) = open_routes(&config, &host);
+    for extra in [
+        r#","thinking":{"type":"disabled"},"output_config":{"effort":"high"}"#,
+        r#","output_config":{"effort":"high"}"#,
+    ] {
+        let request = messages_body("model-4-alpha", extra);
+        let dispatched = snapshot
+            .load()
+            .dispatch(&request, "anthropic-messages")
+            .await
+            .expect("dispatch");
+        assert_eq!(
+            (request.params.effort, dispatched.upstream_model.as_str()),
+            (None, "model-4-alpha-medium"),
+            "{extra}"
+        );
+        let counted = snapshot
+            .load()
+            .count(&request, "anthropic-messages")
+            .await
+            .expect("count");
+        assert_eq!(counted.tokens, 7, "{extra}");
+    }
+    let calls = server.received_requests().await.expect("requests");
+    let posted = calls
+        .iter()
+        .filter(|call| call.method.as_str() == "POST")
+        .map(|call| serde_json::from_slice::<serde_json::Value>(&call.body).expect("body"))
+        .collect::<Vec<_>>();
+    assert_eq!(posted.len(), 4);
+    assert!(posted.iter().all(|body| {
+        body["model"] == "model-4-alpha-medium" && body["output_config"]["effort"] == "high"
+    }));
+    assert_eq!(posted[0]["thinking"]["type"], "disabled");
+    assert_eq!(posted[1]["thinking"]["type"], "disabled");
+    assert!(posted[2].get("thinking").is_none());
+    assert!(posted[3].get("thinking").is_none());
+}
+
+#[tokio::test]
+async fn d246_enabled_output_config_none_selects_low_when_minimal_is_listed() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(MESSAGES_OK))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages/count_tokens"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"input_tokens":7}"#))
+        .mount(&server)
+        .await;
+    let config = messages_config(&server.uri(), "relay");
+    let host = super::ModelsHost::new(
+        std::time::Duration::from_secs(2),
+        std::time::Duration::from_secs(2),
+    );
+    let models = [
+        "model-4-alpha-minimal",
+        "model-4-alpha-low",
+        "model-4-alpha-medium",
+        "model-4-alpha-high",
+    ]
+    .into_iter()
+    .map(|id| hofund_plugin_api::ModelSpec::new(id, None).expect("model"))
+    .collect::<Vec<_>>();
+    host.seed_models("relay", &models);
+    let (_dir, snapshot) = open_routes(&config, &host);
+    let messages = messages_body(
+        "model-4-alpha",
+        r#","thinking":{"type":"enabled","budget_tokens":30000},"output_config":{"effort":"none"}"#,
+    );
+    assert_eq!(messages.params.effort, Some(Effort::Low));
+    let dispatched = snapshot
+        .load()
+        .dispatch(&messages, "anthropic-messages")
+        .await
+        .expect("messages dispatch");
+    assert_eq!(dispatched.upstream_model, "model-4-alpha-low");
+    let counted = snapshot
+        .load()
+        .count(&messages, "anthropic-messages")
+        .await
+        .expect("messages count");
+    assert_eq!(counted.tokens, 7);
+    let chat = OpenAiChat
+        .decode_request(
+            br#"{"model":"model-4-alpha","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none"}"#,
+        )
+        .expect("chat decode");
+    assert_eq!(chat.params.effort, Some(Effort::None));
+    let chat_dispatch = snapshot
+        .load()
+        .dispatch(&chat, "openai-chat")
+        .await
+        .expect("chat dispatch");
+    assert_eq!(chat_dispatch.upstream_model, "model-4-alpha-minimal");
+    let chat_count = snapshot
+        .load()
+        .count(&chat, "openai-chat")
+        .await
+        .expect("chat count");
+    assert_eq!(chat_count.tokens, 7);
+    let calls = server.received_requests().await.expect("requests");
+    let posted = calls
+        .iter()
+        .filter(|call| call.method.as_str() == "POST")
+        .map(|call| serde_json::from_slice::<serde_json::Value>(&call.body).expect("body"))
+        .collect::<Vec<_>>();
+    assert_eq!(posted[0]["model"], "model-4-alpha-low");
+    assert_eq!(posted[0]["output_config"]["effort"], "none");
+    assert_eq!(posted[0]["thinking"]["budget_tokens"], 30000);
+    assert_eq!(posted[1]["model"], "model-4-alpha-low");
+    assert_eq!(posted[2]["model"], "model-4-alpha-minimal");
+    assert_eq!(posted[3]["model"], "model-4-alpha-minimal");
 }
