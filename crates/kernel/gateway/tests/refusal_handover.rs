@@ -16,7 +16,7 @@ use hofund_ir::{
     ToolArgumentsDelta, UnknownEvent,
 };
 use hofund_plugin_api::{BodyStream, MemberId, MemberKey, PluginError, PresetId};
-use hofund_router::{Completion, FailoverPolicy, Member, Router, Snapshot};
+use hofund_router::{Completion, FailoverPolicy, Hop, Member, Route, Router, Snapshot};
 use hofund_usage::Ledger;
 use tower::ServiceExt;
 
@@ -28,6 +28,8 @@ enum Reply {
 struct Scripted {
     route_id: &'static str,
     member_id: MemberId,
+    protocol: &'static str,
+    stands_in_for: Option<String>,
     hits: Arc<AtomicUsize>,
     reply: Mutex<Option<Reply>>,
 }
@@ -38,6 +40,25 @@ impl Scripted {
             route_id,
             Reply::Events(events.into_iter().map(Ok).collect()),
         )
+    }
+
+    fn protocol_events(
+        protocol: &'static str,
+        key: &'static str,
+        stands_in_for: Option<String>,
+        events: Vec<StreamEvent>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            route_id: "relay",
+            member_id: MemberId::from_preset(
+                PresetId::from_static("relay"),
+                MemberKey::from_static(key),
+            ),
+            protocol,
+            stands_in_for,
+            hits: Arc::new(AtomicUsize::new(0)),
+            reply: Mutex::new(Some(Reply::Events(events.into_iter().map(Ok).collect()))),
+        })
     }
 
     fn raw(route_id: &'static str, bytes: Vec<u8>) -> Arc<Self> {
@@ -51,6 +72,8 @@ impl Scripted {
                 PresetId::try_from(route_id).expect("preset"),
                 MemberKey::from_static("row"),
             ),
+            protocol: "test",
+            stands_in_for: None,
             hits: Arc::new(AtomicUsize::new(0)),
             reply: Mutex::new(Some(reply)),
         })
@@ -72,7 +95,11 @@ impl Member for Scripted {
     }
 
     fn protocol(&self) -> &str {
-        "test"
+        self.protocol
+    }
+
+    fn stands_in_for(&self) -> Option<&str> {
+        self.stands_in_for.as_deref()
     }
 
     async fn execute(
@@ -410,6 +437,43 @@ async fn b9d_last_member_keeps_the_refusal() {
         "{body}"
     );
     assert_eq!(body.matches("data: [DONE]").count(), 1, "{body}");
+}
+
+#[tokio::test]
+async fn d250_idle_protocol_alternate_keeps_the_pre_content_refusal() {
+    let messages = Scripted::protocol_events("messages", "messages", None, thought_then_refusal(0));
+    let primary = messages.id().to_string();
+    let chat = Scripted::protocol_events("chat", "chat", Some(primary), answer());
+    let route = Route::new(vec![
+        Hop::new(Arc::clone(&messages) as Arc<dyn Member>),
+        Hop::new(Arc::clone(&chat) as Arc<dyn Member>),
+    ]);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let usage = Arc::new(Ledger::open(&dir.path().join("usage.sqlite")).expect("usage"));
+    let codecs: HashMap<String, Arc<dyn Codec>> = HashMap::from([(
+        "/v1/messages".to_owned(),
+        Arc::new(AnthropicMessages) as Arc<dyn Codec>,
+    )]);
+    let app = Gateway::new(
+        Snapshot::new(Router::from_routes(
+            BTreeMap::from([("demo".to_owned(), route)]),
+            FailoverPolicy::default(),
+        )),
+        "secret".to_owned(),
+        codecs,
+        usage,
+    )
+    .into_router();
+
+    let (status, body) = call(app, "/v1/messages", MESSAGES).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body.contains("first thought") && body.contains("refusal"),
+        "{body}"
+    );
+    assert!(!body.contains("no route"), "{body}");
+    assert_eq!((messages.hits(), chat.hits()), (1, 0));
 }
 
 #[tokio::test]

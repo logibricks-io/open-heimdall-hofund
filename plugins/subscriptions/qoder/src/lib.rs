@@ -343,6 +343,8 @@ impl Subscription for Qoder {
 #[cfg(test)]
 mod conformance;
 #[cfg(test)]
+mod d268_tests;
+#[cfg(test)]
 mod r54b_tests;
 #[cfg(test)]
 mod r54c_tests;

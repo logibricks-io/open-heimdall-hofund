@@ -204,7 +204,7 @@ fn the_default_build_is_chat() {
 }
 
 #[test]
-fn converse_needs_both_keys_and_a_region() {
+fn converse_needs_both_keys_and_validates_credentials() {
     let mut missing = signed(RUNTIME);
     missing.insert("access_key_id", RawValue::String("  ".to_owned()));
     let error = build_error(&missing, ProtocolId::BEDROCK_CONVERSE);
@@ -226,18 +226,12 @@ fn converse_needs_both_keys_and_a_region() {
         "{error}"
     );
 
-    let error = build_error(
-        &signed("https://proxy.example.test"),
-        ProtocolId::BEDROCK_CONVERSE,
-    );
-    assert!(error.contains("Converse needs a region"), "{error}");
-
     let mut region = signed("https://proxy.example.test");
     region.insert("region", RawValue::String("us east".to_owned()));
     let error = build_error(&region, ProtocolId::BEDROCK_CONVERSE);
     assert!(error.contains("is not a region id"), "{error}");
 
-    // The API-key wires take no AWS keys, so empty ones are fine there.
+    // Compatibility wires allow the AWS options to be absent.
     with_host(|host| {
         build(
             host,

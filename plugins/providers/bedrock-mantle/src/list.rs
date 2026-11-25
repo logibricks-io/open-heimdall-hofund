@@ -27,6 +27,8 @@ pub(crate) struct Lister<'a> {
     pub(crate) headers: &'a [(String, String)],
     pub(crate) messages: bool,
     pub(crate) secret: Option<&'a SecretString>,
+    pub(crate) signer: Option<&'a hofund_plugin_sdk::sigv4::AwsSigner>,
+    pub(crate) aws_secrets: &'a [String],
 }
 
 /// A list failure carried through [`after_id`].
@@ -113,6 +115,13 @@ impl Lister<'_> {
         for (name, value) in self.headers {
             call = call.sensitive_header(name.to_ascii_lowercase(), value.clone());
         }
+        if self
+            .secret
+            .is_none_or(|secret| secret_text(secret).is_empty())
+            && let Some(signer) = self.signer
+        {
+            call = hofund_plugin_sdk::wire::signed_call(call, signer)?;
+        }
         let mut response = call.open_raw(self.http, 1).await?;
         let status = response.status().as_u16();
         let retry_after =
@@ -157,6 +166,7 @@ impl Lister<'_> {
             .secret
             .map(secret_text)
             .into_iter()
+            .chain(self.aws_secrets.iter().map(String::as_str))
             .chain(self.headers.iter().map(|(_, value)| value.as_str()))
             .filter(|value| !value.is_empty())
         {

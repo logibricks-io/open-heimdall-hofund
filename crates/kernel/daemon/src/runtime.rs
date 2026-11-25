@@ -523,14 +523,24 @@ impl Runtime {
                 .key
                 .as_ref()
                 .map_or_else(|| membership::member_id(id), |key| key.member.clone());
-            // Publication rejects two providers that share a member id; check
-            // here so the candidate fails before anything is written.
-            if let Some(previous) = owners.insert(member.clone(), id) {
-                return Err(DaemonError::new(format!(
-                    "member id `{member}` is shared by `{previous}` and `{id}`"
-                )));
+            let rows = std::iter::once((member.clone(), provider.fingerprint.clone())).chain(
+                provider.alternates.iter().map(|alternate| {
+                    (
+                        membership::alternate_member_id(&member, alternate.protocol),
+                        alternate.fingerprint.clone(),
+                    )
+                }),
+            );
+            for (member, fingerprint) in rows {
+                // Publication rejects two providers that share a member id; check
+                // here so the candidate fails before anything is written.
+                if let Some(previous) = owners.insert(member.clone(), id) {
+                    return Err(DaemonError::new(format!(
+                        "member id `{member}` is shared by `{previous}` and `{id}`"
+                    )));
+                }
+                fingerprints.insert(member, fingerprint);
             }
-            fingerprints.insert(member, provider.fingerprint.clone());
         }
         crate::validate_route_targets(config)?;
         let (routes, policy) = route_plan(
