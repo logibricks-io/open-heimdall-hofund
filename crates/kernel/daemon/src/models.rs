@@ -324,59 +324,45 @@ pub struct Cached {
     pub delisted: Vec<String>,
 }
 
-#[derive(Clone, Default)]
-struct EffortRows {
-    fold: bool,
-    models: Vec<ModelSpec>,
-}
-
-/// Current source rows a folding provider's live members read on each call.
-#[derive(Clone, Default)]
-pub(crate) struct EffortView {
-    inner: Arc<RwLock<HashMap<String, EffortRows>>>,
-}
-
-impl EffortView {
-    fn set_fold(&self, provider: &str, fold: bool) {
-        self.inner
-            .write()
-            .unwrap_or_else(|error| error.into_inner())
-            .entry(provider.to_owned())
-            .or_default()
-            .fold = fold;
-    }
-
-    fn set_models(&self, provider: &str, models: Vec<ModelSpec>) {
-        self.inner
-            .write()
-            .unwrap_or_else(|error| error.into_inner())
-            .entry(provider.to_owned())
-            .or_default()
-            .models = models;
-    }
-
-    fn resolve(&self, provider: &str, model: &str) -> Option<hofund_router::EffortModels> {
-        let guard = self.inner.read().unwrap_or_else(|error| error.into_inner());
-        let rows = guard.get(provider)?;
-        if !rows.fold {
-            return None;
-        }
-        super::effort_variants::resolver(&rows.models, model)
-    }
-}
-
-/// A provider and model whose family is read from the current source list.
+/// A hop's handle onto the host's source list.
+///
+/// The list lives in the host state store. A fetch, a restart load, and a
+/// provider rename all update that store. Dispatch and count read it on each
+/// call, the same way a probe does. There is no second copy to refresh.
 #[derive(Clone)]
 pub(crate) struct EffortLive {
     provider: String,
     model: String,
-    view: EffortView,
+    fold: Arc<RwLock<HashMap<String, bool>>>,
+    state: Arc<Mutex<super::models_state::StateStore>>,
 }
 
 impl EffortLive {
     pub(crate) fn current(&self) -> Option<hofund_router::EffortModels> {
-        self.view.resolve(&self.provider, &self.model)
+        resolve_family(&self.fold, &self.state, &self.provider, &self.model)
     }
+}
+
+fn resolve_family(
+    fold: &RwLock<HashMap<String, bool>>,
+    state: &Mutex<super::models_state::StateStore>,
+    provider: &str,
+    model: &str,
+) -> Option<hofund_router::EffortModels> {
+    let models = {
+        let mut store = state.lock().unwrap_or_else(|error| error.into_inner());
+        super::models_state::models(&store.get(provider).list)
+    };
+    let folds = fold
+        .read()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(provider)
+        .copied()
+        .unwrap_or(false);
+    if !folds {
+        return None;
+    }
+    super::effort_variants::resolver(&models, model)
 }
 
 /// Host-side model list and probe composition, with optional persistent state.
@@ -391,10 +377,9 @@ pub struct ModelsHost {
     instances: RwLock<HashMap<String, RegisteredInstance>>,
     /// Every key instance of a provider, so a list or a saved seed reaches all of them.
     upstreams: RwLock<HashMap<String, Vec<Arc<dyn UpstreamProvider>>>>,
-    fold_efforts: RwLock<HashMap<String, bool>>,
-    effort_view: EffortView,
+    fold_efforts: Arc<RwLock<HashMap<String, bool>>>,
     registry: Arc<dyn DaemonRegistry>,
-    state: Mutex<super::models_state::StateStore>,
+    state: Arc<Mutex<super::models_state::StateStore>>,
     events: OnceLock<Arc<EventBus>>,
 }
 
@@ -422,10 +407,9 @@ impl ModelsHost {
             host_overrides: HashMap::new(),
             instances: RwLock::new(HashMap::new()),
             upstreams: RwLock::new(HashMap::new()),
-            fold_efforts: RwLock::new(HashMap::new()),
-            effort_view: EffortView::default(),
+            fold_efforts: Arc::new(RwLock::new(HashMap::new())),
             registry: Arc::new(RegistryAdapter),
-            state: Mutex::new(super::models_state::StateStore::new(None)),
+            state: Arc::new(Mutex::new(super::models_state::StateStore::new(None))),
             events: OnceLock::new(),
         }
     }
@@ -466,7 +450,9 @@ impl ModelsHost {
     /// passes `.hofund` beside the active configuration file.
     #[must_use]
     pub fn with_state_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {
-        self.state = Mutex::new(super::models_state::StateStore::new(Some(root.into())));
+        self.state = Arc::new(Mutex::new(super::models_state::StateStore::new(Some(
+            root.into(),
+        ))));
         self
     }
 
@@ -477,13 +463,14 @@ impl ModelsHost {
     /// holds the daemon lock, is the only writer and does not.
     #[must_use]
     pub(crate) fn with_shared_state(self, fallback: Option<std::path::PathBuf>) -> Self {
-        let store = self
-            .state
+        let state = Arc::try_unwrap(self.state)
+            .unwrap_or_else(|_| unreachable!("model state is shared before any hop is planned"));
+        let store = state
             .into_inner()
             .unwrap_or_else(|error| error.into_inner())
             .shared(fallback);
         Self {
-            state: Mutex::new(store),
+            state: Arc::new(Mutex::new(store)),
             ..self
         }
     }
@@ -704,25 +691,16 @@ impl ModelsHost {
         provider_id: &str,
         model: &str,
     ) -> Option<hofund_router::EffortModels> {
-        if !self
-            .fold_efforts
-            .read()
-            .unwrap_or_else(|error| error.into_inner())
-            .get(provider_id)
-            .copied()
-            .unwrap_or(false)
-        {
-            return None;
-        }
-        super::effort_variants::resolver(&self.source_cached(provider_id).models, model)
+        resolve_family(&self.fold_efforts, &self.state, provider_id, model)
     }
 
-    /// Handle a hop keeps so a later list changes the id it sends.
+    /// Handle a hop keeps so dispatch reads the same source list as a probe.
     pub(crate) fn effort_live(&self, provider: &str, model: &str) -> EffortLive {
         EffortLive {
             provider: provider.to_owned(),
             model: model.to_owned(),
-            view: self.effort_view.clone(),
+            fold: Arc::clone(&self.fold_efforts),
+            state: Arc::clone(&self.state),
         }
     }
 
@@ -1287,7 +1265,6 @@ impl ModelsHost {
         auto_include: Vec<regex::Regex>,
     ) -> Applied {
         let listed = super::models_state::rows(&fetched.models.models);
-        let listed_models = !listed.is_empty();
         let public = self.fold_models(&provider.id, &fetched.models.models);
         let now_ids = listed
             .iter()
@@ -1383,10 +1360,6 @@ impl ModelsHost {
                     .map(|(base, models)| (base.clone(), super::models_state::rows(models)))
                     .collect();
             });
-        if listed_models {
-            let models = self.source_cached(&provider.id).models;
-            self.effort_view.set_models(&provider.id, models);
-        }
         self.fanout(&provider.id, &fetched.models.models);
         Applied {
             models: fetched.models,
@@ -1851,7 +1824,6 @@ impl ModelsHost {
             .write()
             .unwrap_or_else(|error| error.into_inner())
             .insert(provider.id.clone(), folds);
-        self.effort_view.set_fold(&provider.id, folds);
         Ok(planned)
     }
 

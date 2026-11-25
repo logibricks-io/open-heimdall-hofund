@@ -44,8 +44,17 @@ fn each_codec_reads_its_own_spelling() {
             &AnthropicMessages,
             br#"{"model":"demo","max_tokens":8,"messages":[],"thinking":{"type":"disabled"}}"#
         ),
-        Some(Effort::None)
+        None
     );
+    let disabled = AnthropicMessages
+        .decode_request(
+            br#"{"model":"demo","max_tokens":8,"messages":[],"thinking":{"type":"disabled"}}"#,
+        )
+        .expect("decode");
+    let kept = AnthropicMessages.encode_request(&disabled).expect("encode");
+    let value: serde_json::Value = serde_json::from_slice(&kept).expect("json");
+    assert_eq!(value["thinking"]["type"], json!("disabled"));
+    assert!(value.get("output_config").is_none());
     assert_eq!(
         decode_effort(
             &GenerativeLanguage,

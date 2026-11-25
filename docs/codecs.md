@@ -50,8 +50,9 @@ already hold it. A same-protocol request therefore keeps the caller's object.
 Messages decode reads `output_config.effort` first. When that field is absent
 and `thinking.type` is `enabled` or `adaptive`, a positive `budget_tokens`
 becomes low through 4096, medium through 12000, high through 24000, and xhigh
-above that. The thinking object stays in the extension bag and is written
-back unchanged. Official lists were checked on 2026-10-25.
+above that. A thinking body that is not `enabled` or `adaptive`, including
+`disabled`, asks for no level. The thinking object stays in the extension
+bag and is written back unchanged. Official lists were checked on 2026-10-25.
 
 | Level | Chat and Responses | Messages | Generative Language |
 | --- | --- | --- | --- |

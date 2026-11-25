@@ -99,6 +99,54 @@ async fn relay_snapshot(
     (dir, snapshot, listed)
 }
 
+fn source_family() -> Vec<hofund_plugin_api::ModelSpec> {
+    [
+        "model-4-alpha-low",
+        "model-4-alpha-medium",
+        "model-4-alpha-high",
+    ]
+    .into_iter()
+    .map(|id| hofund_plugin_api::ModelSpec::new(id, None).expect("model"))
+    .collect()
+}
+
+fn open_routes(
+    config: &hofund_config::Config,
+    host: &super::ModelsHost,
+) -> (tempfile::TempDir, Snapshot) {
+    let registry: Arc<dyn super::DaemonRegistry> = Arc::new(super::RegistryAdapter);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("hofund.toml");
+    let super::Built {
+        built,
+        limits,
+        instances,
+    } = super::providers(
+        config,
+        &path,
+        None,
+        super::Mode::Serve,
+        Some(host),
+        None,
+        None,
+        &registry,
+    )
+    .expect("providers");
+    host.install_upstreams(&instances);
+    let (routes, policy) = super::route_plan(config, Some(host), Some(&built), &limits);
+    let cooldowns = Arc::new(Cooldowns::new(CooldownPolicy::default()));
+    let (snapshot, _) =
+        super::membership::open_with_table(&built, routes, policy, cooldowns).expect("router");
+    (dir, snapshot)
+}
+
+fn messages_config(base: &str, provider: &str) -> hofund_config::Config {
+    hofund_config::load(&format!(
+        "[[providers]]\nid = \"{provider}\"\nprotocol = \"anthropic-messages\"\nbase_url = \"{base}\"\napi_key = \"test-key\"\n[[routes]]\nmodel = \"model-4-alpha\"\nupstreams = [\"{provider}\"]\n",
+    ))
+    .expect("config")
+}
+
 fn ask(model: &str, effort: Option<Effort>) -> Request {
     let mut request = Request::new(model);
     request.params.effort = effort;
@@ -500,5 +548,195 @@ async fn d246_family_and_old_member_picks_survive_refresh() {
     assert!(picks.delisted().is_empty());
     assert_eq!(host.source_cached("relay").models.len(), 3);
     assert_eq!(host.cached("relay").models.len(), 1);
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn d246_persisted_source_rows_drive_dispatch_and_count_without_a_list() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(MESSAGES_OK))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages/count_tokens"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"input_tokens":7}"#))
+        .mount(&server)
+        .await;
+    let root = tempfile::tempdir().expect("state dir");
+    let seeded = super::ModelsHost::new(
+        std::time::Duration::from_secs(2),
+        std::time::Duration::from_secs(2),
+    )
+    .with_state_root(root.path().join(".hofund"));
+    seeded.seed_models("relay", &source_family());
+    drop(seeded);
+
+    let config = messages_config(&server.uri(), "relay");
+    let host = super::ModelsHost::new(
+        std::time::Duration::from_secs(2),
+        std::time::Duration::from_secs(2),
+    )
+    .with_state_root(root.path().join(".hofund"));
+    let (_dir, snapshot) = open_routes(&config, &host);
+    assert_eq!(
+        host.cached("relay").models[0].efforts(),
+        ["low", "medium", "high"]
+    );
+    assert_eq!(
+        host.sent_id("relay", "model-4-alpha", None),
+        "model-4-alpha-medium"
+    );
+    let plain = messages_body("model-4-alpha", "");
+    let dispatched = snapshot
+        .load()
+        .dispatch(&plain, "anthropic-messages")
+        .await
+        .expect("dispatch from disk");
+    assert_eq!(dispatched.upstream_model, "model-4-alpha-medium");
+    let counted = snapshot
+        .load()
+        .count(&plain, "anthropic-messages")
+        .await
+        .expect("count from disk");
+    assert_eq!(counted.tokens, 7);
+    let old = messages_body("model-4-alpha-high", "");
+    let old_dispatch = snapshot
+        .load()
+        .dispatch(&old, "anthropic-messages")
+        .await
+        .expect("old id from disk");
+    assert_eq!(old_dispatch.upstream_model, "model-4-alpha-high");
+    let old_count = snapshot
+        .load()
+        .count(&old, "anthropic-messages")
+        .await
+        .expect("old id count from disk");
+    assert_eq!(old_count.tokens, 7);
+    let calls = server.received_requests().await.expect("requests");
+    assert!(
+        calls.iter().all(|call| call.method.as_str() != "GET"),
+        "a restart must not fetch the list"
+    );
+    let posted = calls
+        .iter()
+        .filter(|call| call.method.as_str() == "POST")
+        .map(|call| {
+            serde_json::from_slice::<serde_json::Value>(&call.body)
+                .expect("body")
+                .get("model")
+                .and_then(|model| model.as_str())
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        posted,
+        [
+            "model-4-alpha-medium",
+            "model-4-alpha-medium",
+            "model-4-alpha-high",
+            "model-4-alpha-high"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn d246_renamed_provider_uses_the_moved_source_rows() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(MESSAGES_OK))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages/count_tokens"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"input_tokens":7}"#))
+        .mount(&server)
+        .await;
+    let root = tempfile::tempdir().expect("state dir");
+    let host = super::ModelsHost::new(
+        std::time::Duration::from_secs(2),
+        std::time::Duration::from_secs(2),
+    )
+    .with_state_root(root.path().join(".hofund"));
+    host.seed_models("relay", &source_family());
+    let config = messages_config(&server.uri(), "moved");
+    let (_dir, snapshot) = open_routes(&config, &host);
+    host.rename_provider("relay", "moved").expect("rename");
+    assert_eq!(
+        host.cached("moved").models[0].efforts(),
+        ["low", "medium", "high"]
+    );
+    assert_eq!(
+        host.sent_id("moved", "model-4-alpha", None),
+        "model-4-alpha-medium"
+    );
+    let plain = messages_body("model-4-alpha", "");
+    let dispatched = snapshot
+        .load()
+        .dispatch(&plain, "anthropic-messages")
+        .await
+        .expect("dispatch after rename");
+    assert_eq!(dispatched.upstream_model, "model-4-alpha-medium");
+    let counted = snapshot
+        .load()
+        .count(&plain, "anthropic-messages")
+        .await
+        .expect("count after rename");
+    assert_eq!(counted.tokens, 7);
+    let calls = server.received_requests().await.expect("requests");
+    let posted = calls
+        .iter()
+        .filter(|call| call.method.as_str() == "POST")
+        .map(|call| {
+            serde_json::from_slice::<serde_json::Value>(&call.body)
+                .expect("body")
+                .get("model")
+                .and_then(|model| model.as_str())
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(posted, ["model-4-alpha-medium", "model-4-alpha-medium"]);
+}
+
+#[tokio::test]
+async fn d246_disabled_thinking_uses_the_no_effort_default() {
+    let server = MockServer::start().await;
+    messages_ok(&server, "model-4-alpha-medium", 1).await;
+    count_ok(&server, "model-4-alpha-medium", 1).await;
+    let config = messages_config(&server.uri(), "relay");
+    let host = super::ModelsHost::new(
+        std::time::Duration::from_secs(2),
+        std::time::Duration::from_secs(2),
+    );
+    host.seed_models("relay", &source_family());
+    let (_dir, snapshot) = open_routes(&config, &host);
+    let request = messages_body("model-4-alpha", r#","thinking":{"type":"disabled"}"#);
+    assert!(request.params.effort.is_none());
+    let dispatched = snapshot
+        .load()
+        .dispatch(&request, "anthropic-messages")
+        .await
+        .expect("disabled dispatch");
+    assert_eq!(dispatched.upstream_model, "model-4-alpha-medium");
+    let counted = snapshot
+        .load()
+        .count(&request, "anthropic-messages")
+        .await
+        .expect("disabled count");
+    assert_eq!(counted.tokens, 7);
+    let calls = server.received_requests().await.expect("requests");
+    let posted = calls
+        .iter()
+        .filter(|call| call.method.as_str() == "POST")
+        .map(|call| serde_json::from_slice::<serde_json::Value>(&call.body).expect("body"))
+        .collect::<Vec<_>>();
+    assert_eq!(posted.len(), 2);
+    assert!(posted.iter().all(|body| {
+        body["model"] == "model-4-alpha-medium" && body["thinking"]["type"] == "disabled"
+    }));
     server.verify().await;
 }

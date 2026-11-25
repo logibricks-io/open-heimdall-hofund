@@ -615,16 +615,12 @@ impl Router {
     /// Reasoning levels a listed effort-id family offers for `model`.
     ///
     /// `model` may be the route key or `provider/model`. A qualified id uses
-    /// the hop whose provider and family or wire id match that model.
+    /// only the hop whose provider and family or wire id match that model.
     #[must_use]
     pub fn effort_levels(&self, model: &str) -> Vec<String> {
         let mut levels = Vec::new();
-        let mut collect = |route: &Route| {
-            for family in route
-                .hops
-                .iter()
-                .filter_map(|hop| hop.member.effort_models())
-            {
+        let mut collect = |hop: &Hop| {
+            if let Some(family) = hop.member.effort_models() {
                 for level in family.levels() {
                     if !levels.iter().any(|have| have == level) {
                         levels.push(level.to_owned());
@@ -633,24 +629,25 @@ impl Router {
             }
         };
         if let Some(route) = self.routes.get(model) {
-            collect(route);
+            for hop in &route.hops {
+                collect(hop);
+            }
             return levels;
         }
         let Some((provider, bare)) = model.split_once('/') else {
             return levels;
         };
         for (route_model, route) in &self.routes {
-            let matches = route.hops.iter().any(|hop| {
-                hop.member.route_id() == provider
+            for hop in &route.hops {
+                let named = hop.member.route_id() == provider
                     && (*route_model == bare
                         || hop.wire_model.as_deref() == Some(bare)
-                        || hop
-                            .member
-                            .effort_models()
-                            .is_some_and(|family| family.family() == bare || family.contains(bare)))
-            });
-            if matches {
-                collect(route);
+                        || hop.member.effort_models().is_some_and(|family| {
+                            family.family() == bare || family.contains(bare)
+                        }));
+                if named {
+                    collect(hop);
+                }
             }
         }
         levels

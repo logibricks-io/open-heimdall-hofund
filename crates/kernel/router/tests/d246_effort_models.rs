@@ -12,6 +12,7 @@ use hofund_router::{
 
 struct Fake {
     id: MemberId,
+    provider: &'static str,
     family: EffortModels,
     seen: Arc<Mutex<Vec<String>>>,
 }
@@ -23,7 +24,7 @@ impl Member for Fake {
     }
 
     fn route_id(&self) -> &str {
-        "relay"
+        self.provider
     }
 
     fn protocol(&self) -> &str {
@@ -71,6 +72,7 @@ fn fixture() -> (Router, Arc<Mutex<Vec<String>>>) {
             PresetId::from_static("relay"),
             MemberKey::from_static("row"),
         ),
+        provider: "relay",
         family,
         seen: Arc::clone(&seen),
     };
@@ -202,4 +204,58 @@ async fn d246_old_ids_pass_model_scopes_and_levels_are_listed() {
         ["low", "medium", "high"]
     );
     assert!(router.effort_levels("other/model-4-alpha").is_empty());
+}
+
+#[tokio::test]
+async fn d246_qualified_levels_stay_on_the_named_upstream() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let relay = Fake {
+        id: MemberId::from_preset(
+            PresetId::from_static("relay"),
+            MemberKey::from_static("row"),
+        ),
+        provider: "relay",
+        family: EffortModels::new(
+            "model-4-alpha",
+            "model-4-alpha-medium",
+            vec![
+                ("low".to_owned(), "model-4-alpha-low".to_owned()),
+                ("medium".to_owned(), "model-4-alpha-medium".to_owned()),
+                ("high".to_owned(), "model-4-alpha-high".to_owned()),
+            ],
+        ),
+        seen: Arc::clone(&seen),
+    };
+    let other = Fake {
+        id: MemberId::from_preset(
+            PresetId::from_static("other"),
+            MemberKey::from_static("row"),
+        ),
+        provider: "other",
+        family: EffortModels::new(
+            "model-4-alpha",
+            "model-4-alpha-xhigh",
+            vec![
+                ("minimal".to_owned(), "model-4-alpha-minimal".to_owned()),
+                ("xhigh".to_owned(), "model-4-alpha-xhigh".to_owned()),
+            ],
+        ),
+        seen,
+    };
+    let mut relay_hop = Hop::new(Arc::new(relay));
+    relay_hop.wire_model = Some("model-4-alpha".to_owned());
+    let mut other_hop = Hop::new(Arc::new(other));
+    other_hop.wire_model = Some("model-4-alpha".to_owned());
+    let router = Router::from_hops(
+        BTreeMap::from([("model-4-alpha".to_owned(), vec![relay_hop, other_hop])]),
+        FailoverPolicy::default(),
+    );
+    assert_eq!(
+        router.effort_levels("relay/model-4-alpha"),
+        ["low", "medium", "high"]
+    );
+    assert_eq!(
+        router.effort_levels("other/model-4-alpha"),
+        ["minimal", "xhigh"]
+    );
 }

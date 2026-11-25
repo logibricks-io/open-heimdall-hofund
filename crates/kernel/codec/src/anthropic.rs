@@ -389,11 +389,9 @@ fn messages_effort(object: &Object) -> Option<Effort> {
     let kind = thinking
         .and_then(|thinking| thinking.get("type"))
         .and_then(Value::as_str);
-    if kind == Some("disabled") {
-        return Some(Effort::None);
-    }
-    // An enabled or adaptive budget selects the member id. The object itself
-    // stays in the extension bag, so encode writes it back unchanged.
+    // Enabled and adaptive budgets select a member. Any other thinking body,
+    // including disabled, asks for no level. The object stays in the
+    // extension bag, so encode writes it back unchanged.
     if matches!(kind, Some("enabled" | "adaptive")) {
         let budget = thinking
             .and_then(|thinking| thinking.get("budget_tokens"))
