@@ -270,6 +270,10 @@ pub trait ControlState: Send + Sync {
     fn draining(&self) -> bool;
     /// Lists configured providers.
     fn providers(&self) -> ControlFuture<'_, ProviderListResponse>;
+    /// Looks up every subscription's way out now.
+    fn recheck_way_out(&self) -> ControlFuture<'_, hofund_control_proto::WayOutCheckResponse> {
+        Box::pin(async { Err(unsupported_way_out()) })
+    }
     /// Lists a provider's upstream API keys without their secrets.
     fn provider_keys(&self, _id: String) -> ControlFuture<'_, ProviderKeysResponse> {
         Box::pin(async {
@@ -1033,6 +1037,14 @@ fn unsupported_logs() -> ControlFailure {
     )
     .into()
 }
+fn unsupported_way_out() -> ControlFailure {
+    ControlError::new(
+        ControlErrorKind::Internal,
+        "way-out checks are not implemented by this control state",
+        "control",
+    )
+    .into()
+}
 fn unsupported_accounts() -> ControlFailure {
     ControlError::new(
         ControlErrorKind::Internal,
@@ -1161,6 +1173,7 @@ impl Control {
                     .post(create_provider)
                     .head(method_not_allowed),
             )
+            .route("/v1/hofund/way-out/check", post(recheck_way_out))
             .route(
                 "/v1/hofund/providers/{id}",
                 patch(patch_provider)
@@ -1876,6 +1889,13 @@ async fn remove_account(
 
 async fn providers(State(state): State<HttpState>) -> Response {
     operation_response!(state.control.state.providers().await)
+}
+
+async fn recheck_way_out(State(state): State<HttpState>, body: Bytes) -> Response {
+    if let Err(failure) = decode_body::<hofund_control_proto::WayOutCheckRequest>(&body) {
+        return failure_response(failure);
+    }
+    operation_response!(state.control.state.recheck_way_out().await)
 }
 
 async fn provider_keys(

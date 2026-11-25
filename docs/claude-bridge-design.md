@@ -619,3 +619,11 @@ This design specifies how hofund serves Claude Pro/Max subscription traffic by s
 3. **TUI mode** — Is interactive Claude Code required for any shipped agent, or can R-6 ship `-p` only first?
 4. **Room limit default** — Port memory-based `claudeMemRuns` or start with a conservative fixed cap?
 5. ~~**Callback path on gateway vs sidecar**~~ — **Resolved:** dedicated **127.0.0.1** listener in `plugin-host`; no gateway mux or auth bypass.
+
+## 10. Way out region (D-245)
+
+The subscription plugin reads a trace `loc` through each account's proxy choice at start, when the network or a proxy choice changes, every 15 minutes, and when Check again asks. It does not read on each request, and it reads nothing when no account is stored. The code is compared with the supported-region list effective 2026-11-12, including a territory of a listed country. `XX`, `T1`, and a failed or odd answer are unknown: they warn nothing and hold nothing.
+
+`region-hold` is off unless the subscription options set it. When it is on, a fresh unsupported reading stops the request before Claude Code starts, including a warm-up and a `/usage` read. The held error is HTTP 502 and does not rest the account, so the next account is still asked. `claude auth status` is not held. A reading older than 30 seconds is looked up again first. A choice that has never been looked up is allowed, and a lookup is requested.
+
+The list and the warning text stay in the plugin. The kernel carries a warning string and a generic check. The change check rides the 5 second account tick rather than a 20 second poll. Tests inject the trace or serve it on loopback. They do not contact the trace host.

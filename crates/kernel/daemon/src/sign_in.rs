@@ -283,6 +283,29 @@ impl SubscriptionRisks {
                 .map(|state| state.instance().as_ref()),
         )
     }
+
+    fn warnings(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        for state in self.runtime.subscription_states().values() {
+            if let Some(text) = state.instance().way_out_warning()
+                && !lines.contains(&text)
+            {
+                lines.push(text);
+            }
+        }
+        lines
+    }
+
+    async fn recheck(&self) -> Result<(), DaemonError> {
+        for state in self.runtime.subscription_states().values() {
+            state
+                .instance()
+                .recheck_way_out(state.host())
+                .await
+                .map_err(|_| DaemonError::new("the way out could not be checked"))?;
+        }
+        Ok(())
+    }
 }
 
 /// Risk lines from the daemon that `running` is serving.
@@ -294,6 +317,33 @@ pub fn subscription_risk_lines(running: &crate::Running) -> Vec<String> {
         .resource::<SubscriptionRisks>()
         .map(SubscriptionRisks::lines)
         .unwrap_or_default()
+}
+
+/// Way-out warnings from the daemon that `running` is serving.
+#[must_use]
+pub fn way_out_warnings(running: &crate::Running) -> Vec<String> {
+    running
+        .resource::<SubscriptionRisks>()
+        .map(SubscriptionRisks::warnings)
+        .unwrap_or_default()
+}
+
+/// Looks up every subscription's way out now.
+///
+/// # Errors
+///
+/// Returns [`DaemonError`] when a subscription cannot read what it needs.
+/// The message does not include the plugin error, which can name a proxy.
+pub fn recheck_way_out(
+    running: &crate::Running,
+) -> impl std::future::Future<Output = Result<(), DaemonError>> + Send + 'static {
+    let risks = running.resource::<SubscriptionRisks>().cloned();
+    async move {
+        if let Some(risks) = risks {
+            risks.recheck().await?;
+        }
+        Ok(())
+    }
 }
 
 pub(crate) fn find<'a>(opened: &'a [Opened], id: &str) -> Result<&'a Opened, DaemonError> {
@@ -494,11 +544,17 @@ pub(crate) async fn list_in(opened: &[Opened]) -> Result<Vec<SubscriptionListing
                 needs_sign_in,
             });
         }
-        let notice = entry
+        let mut notice = entry
             .instance
             .account_enrollment()
             .risk()
             .map(str::to_owned);
+        if let Some(warning) = entry.instance.way_out_warning() {
+            notice = Some(match notice {
+                Some(existing) => format!("{existing} {warning}"),
+                None => warning,
+            });
+        }
         listings.push(SubscriptionListing {
             id: entry.id.clone(),
             name: entry.name.clone(),

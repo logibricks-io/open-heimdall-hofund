@@ -32,7 +32,8 @@ use crate::{
     SignInProofRequest, SignInStartRequest, SignInStartResponse, SignInStatusResponse,
     StatusResponse, SubscriptionListResponse, SubscriptionRefreshRequest,
     SubscriptionRefreshResponse, TokenRotateRequest, TokenRotateResponse, UnroutedListResponse,
-    UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse,
+    UsageResponse, WarmupListResponse, WarmupRunRequest, WarmupRunResponse, WayOutCheckRequest,
+    WayOutCheckResponse,
 };
 
 mod sealed {
@@ -238,6 +239,7 @@ request!(ConfigValidateRequest, validate);
 request!(ConfigApplyRequest, validate);
 request!(ReloadRequest, validate);
 request!(ProviderTestRequest, validate);
+request!(WayOutCheckRequest);
 request!(PicksSetRequest, validate);
 request!(ProviderRenameRequest);
 request!(AgentPlanRequest, validate);
@@ -338,6 +340,7 @@ response!(
     ProviderKeysResponse,
     ProviderSpendCapsResponse,
     ProviderTestResponse,
+    WayOutCheckResponse,
     ModelListResponse,
     PicksResponse,
     RouteModelListResponse,

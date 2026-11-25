@@ -69,6 +69,8 @@ pub enum ControlIntent {
         /// Provider id.
         id: String,
     },
+    /// `POST /way-out/check`.
+    RecheckWayOut,
     /// `GET` models and picks, then open the picker.
     OpenModels {
         /// Provider id.
@@ -446,6 +448,7 @@ impl fmt::Debug for ControlIntent {
                 .debug_struct("TestProvider")
                 .field("id", id)
                 .finish(),
+            Self::RecheckWayOut => formatter.write_str("RecheckWayOut"),
             Self::OpenModels {
                 id,
                 generation,

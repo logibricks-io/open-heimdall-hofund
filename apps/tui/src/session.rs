@@ -27,6 +27,8 @@ use crate::redact::redact;
 pub struct ProviderSnapshot {
     /// Configured providers.
     pub providers: Vec<ProviderSummary>,
+    /// Way-out warnings from the provider list. Empty when there are none.
+    pub warnings: Vec<String>,
     /// Preset catalog. Empty when that read failed.
     pub presets: Vec<PresetEntry>,
     /// Disk revision from status, when the read succeeded.
@@ -590,6 +592,7 @@ pub async fn execute(client: &Client, intent: ControlIntent) -> SessionOutcome {
             refresh_models(client, id, generation).await
         }
         ControlIntent::TestProvider { id } => test_provider(client, id).await,
+        ControlIntent::RecheckWayOut => recheck_way_out(client).await,
         ControlIntent::OpenModels {
             id,
             generation,
@@ -1121,6 +1124,7 @@ async fn load_providers(client: &Client) -> Result<ProviderSnapshot, String> {
     };
     Ok(ProviderSnapshot {
         providers: providers.providers,
+        warnings: providers.way_out_warnings,
         presets,
         disk_revision,
         presets_error,
@@ -1235,6 +1239,20 @@ async fn read_models(client: &Client, id: &str, refresh: bool) -> Result<ModelVi
         models: models.models,
         picks,
     })
+}
+
+async fn recheck_way_out(client: &Client) -> SessionOutcome {
+    match client.recheck_way_out().await {
+        Ok(response) => {
+            let text = if response.warnings.is_empty() {
+                "the way out is not outside the supported places".to_owned()
+            } else {
+                response.warnings.join(" ")
+            };
+            finished(text, response.warnings.is_empty(), true, false, None)
+        }
+        Err(error) => finished(explain(error, None), false, false, false, None),
+    }
 }
 
 async fn test_provider(client: &Client, id: String) -> SessionOutcome {

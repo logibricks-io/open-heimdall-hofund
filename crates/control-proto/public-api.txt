@@ -685,6 +685,7 @@ ProviderKeysResponse.version
 ProviderListResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
 ProviderListResponse.providers
 ProviderListResponse.version
+ProviderListResponse.way_out_warnings
 ProviderPatchRequest #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
 ProviderPatchRequest.base_url
 ProviderPatchRequest.enabled
@@ -1466,6 +1467,12 @@ WarmupRunResponse.at_ms
 WarmupRunResponse.detail
 WarmupRunResponse.outcome
 WarmupRunResponse.version
+WayOutCheckRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
+WayOutCheckRequest.version
+WayOutCheckRequest::fn new () -> Self
+WayOutCheckResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+WayOutCheckResponse.version
+WayOutCheckResponse.warnings
 const API_VERSION
 const DEFAULT_SESSION_LIST_LIMIT
 const MAX_BOOT_ID_LEN

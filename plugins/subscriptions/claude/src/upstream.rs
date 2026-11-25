@@ -42,6 +42,7 @@ pub(crate) struct ClaudeUpstream {
     command: Option<PathBuf>,
     bridge: Bridge,
     limits: crate::limits::Store,
+    egress: Arc<crate::egress::Egress>,
     #[cfg(test)]
     runner: Option<TestRunner>,
     #[cfg(test)]
@@ -64,11 +65,19 @@ impl ClaudeUpstream {
             command,
             bridge,
             limits,
+            egress: Arc::new(crate::egress::Egress::new(false)),
             #[cfg(test)]
             runner: None,
             #[cfg(test)]
             async_runner: None,
         }
+    }
+
+    /// Uses `egress` for the opt-in region hold. The default book does not hold.
+    #[must_use]
+    pub(crate) fn with_egress(mut self, egress: Arc<crate::egress::Egress>) -> Self {
+        self.egress = egress;
+        self
     }
 
     /// Overrides the spawn with a test runner (the fake Claude Code helper).
@@ -240,6 +249,7 @@ impl UpstreamProvider for ClaudeUpstream {
         mut request: Request,
         inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
+        crate::egress::guard(&self.egress, &self.host, &self.account).await?;
         reject_non_text(&request)?;
         if let Some(error) =
             crate::said_out::block_request(&self.host, &self.account, &request.model)
@@ -273,6 +283,7 @@ impl UpstreamProvider for ClaudeUpstream {
             self.command.as_ref(),
             &self.account,
             query.model(),
+            &self.egress,
         )
         .await?;
         Ok(ProbeReport::new("ok"))

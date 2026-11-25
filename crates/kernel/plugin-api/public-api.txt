@@ -1297,10 +1297,12 @@ Subscription::async fn health (& self) -> Result < () , PluginError >
 Subscription::async fn import_accounts (& self , text : & str , host : & HostContext ,) -> Result < Vec < AccountId > , PluginError >
 Subscription::async fn import_agent_sign_in (& self , home : & std :: path :: Path , reference : & str , host : & HostContext ,) -> Result < AccountId , PluginError >
 Subscription::async fn list_models (& self , account : & AccountId , host : & HostContext ,) -> Result < ModelList , PluginError >
+Subscription::async fn maintain_way_out (& self , host : & HostContext) -> Result < () , PluginError >
 Subscription::async fn prepare_accounts (& self , config_dir : & std :: path :: Path , host : & HostContext ,) -> Result < () , PluginError >
 Subscription::async fn quota (& self , account : & AccountId , host : & HostContext ,) -> Result < Vec < QuotaWindow > , PluginError >
 Subscription::async fn quota_poll (& self , account : & AccountId , host : & HostContext ,) -> Result < QuotaPoll , PluginError >
 Subscription::async fn quota_reset_credits (& self , account : & AccountId , host : & HostContext ,) -> Result < Option < QuotaResetCredits > , PluginError >
+Subscription::async fn recheck_way_out (& self , host : & HostContext) -> Result < () , PluginError >
 Subscription::async fn refresh (& self , account : & AccountId , host : & HostContext) -> Result < () , PluginError >
 Subscription::async fn remove_account (& self , account : & AccountId , host : & HostContext ,) -> Result < () , PluginError >
 Subscription::async fn serves_routing_label (& self , routing_id : & str , account : & AccountId , host : & HostContext ,) -> Result < bool , PluginError >
@@ -1313,6 +1315,7 @@ Subscription::fn account_enrollment (& self) -> AccountEnrollment
 Subscription::fn flow (& self) -> & SignInFlow
 Subscription::fn id (& self) -> & PluginId
 Subscription::fn upstream (& self , account : & AccountId , host : & HostContext ,) -> Result < Arc < dyn UpstreamProvider > , PluginError >
+Subscription::fn way_out_warning (& self) -> Option < String >
 SubscriptionFactory
 SubscriptionFactory::Config
 SubscriptionFactory::fn build (& self , cfg : & Self :: Config , host : & HostContext ,) -> Result < Arc < dyn Subscription > , BuildError >
@@ -1452,6 +1455,7 @@ const API
 const BRIDGE_CALLBACK_PATH_PREFIX
 const CATALOG_ENTRY_FIELD
 const LOOPBACK_CANCEL_PATH
+const OUTBOUND_PROXY
 const PREFERRED_API_FIELD
 const PROBE_CAP
 fn home_dir () -> PathBuf
