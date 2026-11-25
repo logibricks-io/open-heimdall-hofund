@@ -796,6 +796,61 @@ async fn serve_http2_stream(
     }
 }
 
+/// First bytes of one accepted loopback TCP connection.
+///
+/// After the first read it writes a SOCKS5 "no acceptable method" reply so
+/// the peer returns at once. Tests use this to see which host was dialed.
+pub struct FirstPacket {
+    port: u16,
+    bytes: Arc<Mutex<Vec<u8>>>,
+    task: JoinHandle<()>,
+}
+
+impl FirstPacket {
+    /// Binds an ephemeral loopback port and accepts one connection.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the loopback listener cannot be bound.
+    pub async fn start() -> Self {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind loopback byte recorder");
+        let port = listener.local_addr().expect("loopback address").port();
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&bytes);
+        let task = tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = [0_u8; 64];
+            let n = stream.read(&mut buf).await.unwrap_or(0);
+            *seen.lock().expect("first packet") = buf[..n].to_vec();
+            let _ = stream.write_all(&[5, 0xff]).await;
+        });
+        tokio::task::yield_now().await;
+        Self { port, bytes, task }
+    }
+
+    /// Bound port.
+    #[must_use]
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// Bytes read so far. Empty when nothing has connected.
+    #[must_use]
+    pub fn packet(&self) -> Vec<u8> {
+        self.bytes.lock().expect("first packet").clone()
+    }
+}
+
+impl Drop for FirstPacket {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;

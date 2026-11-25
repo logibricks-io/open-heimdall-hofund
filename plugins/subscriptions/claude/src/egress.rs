@@ -415,15 +415,16 @@ fn judge_loc(loc: &str, now: SystemTime) -> Reading {
 
 fn loc_from_trace(body: &str) -> String {
     let body = body.get(..body.len().min(16 << 10)).unwrap_or(body);
+    let mut found = String::new();
     for line in body.lines() {
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
         if key == "loc" {
-            return value.trim().to_ascii_uppercase();
+            found = value.trim().to_ascii_uppercase();
         }
     }
-    String::new()
+    found
 }
 
 fn warning_text(reading: &Reading, hold: bool) -> String {
@@ -451,42 +452,100 @@ fn held_error(reading: &Reading) -> PluginError {
 }
 
 fn shown(choice: &str) -> String {
-    let choice = choice.trim();
-    match choice {
-        "" | "direct" => choice.to_owned(),
-        other => redact_url(other),
-    }
+    choice_label(choice)
 }
 
 fn redact_url(value: &str) -> String {
-    let Some(rest) = value.split_once("://").map(|(_, rest)| rest) else {
-        return value.to_owned();
-    };
-    let Some((userinfo, host)) = rest.split_once('@') else {
-        return value.to_owned();
-    };
-    if userinfo.contains('/') || userinfo.contains(' ') {
-        return value.to_owned();
+    let value = value.trim();
+    if value.is_empty() {
+        return String::new();
     }
-    let scheme = &value[..value.len() - rest.len()];
-    format!("{scheme}{host}")
+    if value.contains("://") || value.contains('@') {
+        if let Ok(parsed) = hofund_plugin_sdk::netproxy::parse_proxy(value)
+            && !userinfo_was_lost(value, parsed.host_str())
+        {
+            return host_url(parsed.scheme(), parsed.host_str(), parsed.port());
+        }
+        return fail_closed_host(value);
+    }
+    if value.contains('/') {
+        return "unparsed-proxy".to_owned();
+    }
+    value.to_owned()
+}
+
+/// `parse_proxy` can treat a slash inside userinfo as the path and drop the
+/// real host. That parse is not safe to display.
+fn userinfo_was_lost(value: &str, parsed_host: Option<&str>) -> bool {
+    let Some(rest) = value.split_once("://").map(|(_, rest)| rest) else {
+        return false;
+    };
+    let Some(at) = rest.rfind('@') else {
+        return false;
+    };
+    let host = host_portion(&rest[at + 1..]);
+    parsed_host != Some(host.split(':').next().unwrap_or(host))
+}
+
+fn host_url(scheme: &str, host: Option<&str>, port: Option<u16>) -> String {
+    let Some(host) = host else {
+        return "unparsed-proxy".to_owned();
+    };
+    let port = port.map(|port| format!(":{port}")).unwrap_or_default();
+    format!("{scheme}://{host}{port}")
+}
+
+fn fail_closed_host(value: &str) -> String {
+    let (scheme, rest) = value
+        .split_once("://")
+        .map(|(scheme, rest)| (Some(scheme), rest))
+        .unwrap_or((None, value));
+    if let Some(at) = rest.rfind('@') {
+        let host = host_portion(&rest[at + 1..]);
+        if host_ok(host) {
+            return match scheme {
+                Some(scheme) => format!("{scheme}://{host}"),
+                None => host.to_owned(),
+            };
+        }
+    }
+    "unparsed-proxy".to_owned()
+}
+
+fn host_portion(value: &str) -> &str {
+    value.split(['/', '?', ' ', '#']).next().unwrap_or("")
+}
+
+fn host_ok(host: &str) -> bool {
+    !host.is_empty() && !host.contains(' ') && !host.contains('/') && !host.contains('@')
 }
 
 pub(crate) fn redact_error(text: &str, choice: &str) -> String {
     let mut out = text.to_owned();
     let choice = choice.trim();
-    if !choice.is_empty() && choice != "direct" {
+    if !choice.is_empty() && !choice.eq_ignore_ascii_case("direct") {
         out = out.replace(choice, &shown(choice));
     }
-    if let Some(start) = out.find("://") {
-        let after = start + 3;
-        if let Some(at) = out[after..].find('@') {
-            let userinfo = &out[after..after + at];
-            if !userinfo.contains(' ') && !userinfo.contains('/') {
-                out.replace_range(after..after + at + 1, "");
-            }
-        }
+    redact_embedded_urls(&out)
+}
+
+fn redact_embedded_urls(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("://") {
+        let scheme_start = rest[..start]
+            .rfind(|ch: char| ch.is_whitespace())
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        out.push_str(&rest[..scheme_start]);
+        let tail = &rest[scheme_start..];
+        let end = tail
+            .find(|ch: char| ch.is_whitespace())
+            .unwrap_or(tail.len());
+        out.push_str(&redact_url(&tail[..end]));
+        rest = &tail[end..];
     }
+    out.push_str(rest);
     out
 }
 
@@ -494,45 +553,116 @@ fn age(now: SystemTime, earlier: SystemTime) -> Duration {
     now.duration_since(earlier).unwrap_or_default()
 }
 
-/// Addresses and proxy choices. A change of either makes the next pass look up.
+/// Addresses, the process proxy, and proxy choices.
 ///
-/// Local addresses come from `/proc` on Linux. When that is unreadable the
-/// fingerprint is only the proxy choices, and a network change waits for the
-/// 15 minute pass.
+/// A change of any of them makes the next pass look up. Interface addresses
+/// come from `netproxy::interface_addrs` (Linux, macOS,
+/// and Windows). The process proxy is the effective `HTTPS_PROXY`,
+/// `HTTP_PROXY`, `ALL_PROXY`, and `NO_PROXY` value, each taking the uppercase
+/// name before the lowercase one. Values are redacted before they are stored.
 #[must_use]
 pub(crate) fn fingerprint(choices: &[String]) -> String {
-    let mut addrs = local_addrs();
-    addrs.sort();
-    addrs.dedup();
-    let mut out = addrs.join(",");
+    let owned = capture_proxy_env();
+    let env: Vec<(&str, &str)> = owned
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
+    fingerprint_from(
+        choices,
+        &env,
+        &hofund_plugin_sdk::netproxy::interface_addrs(),
+    )
+}
+
+/// Fingerprint from an injected proxy environment and address list.
+///
+/// Tests pass dummy values. This does not read the process environment.
+#[must_use]
+pub(crate) fn fingerprint_from(
+    choices: &[String],
+    env: &[(&str, &str)],
+    addrs: &[String],
+) -> String {
+    let mut addresses = addrs.to_vec();
+    addresses.sort();
+    addresses.dedup();
+    let mut out = addresses.join(",");
+    for (label, keys) in [
+        ("https", &["HTTPS_PROXY", "https_proxy"][..]),
+        ("http", &["HTTP_PROXY", "http_proxy"][..]),
+        ("all", &["ALL_PROXY", "all_proxy"][..]),
+        ("no", &["NO_PROXY", "no_proxy"][..]),
+    ] {
+        out.push('|');
+        out.push_str(label);
+        out.push('=');
+        out.push_str(&redact_proxy_env(env_slot(env, keys)));
+    }
     for choice in choices {
         out.push('|');
-        out.push_str(choice.trim());
+        out.push_str(&choice_label(choice));
     }
     out
 }
 
-fn local_addrs() -> Vec<String> {
-    let mut out = Vec::new();
-    if let Ok(text) = std::fs::read_to_string("/proc/net/fib_trie") {
-        let mut previous = "";
-        for line in text.lines() {
-            if line.contains("host LOCAL")
-                && let Some(addr) = previous.split_whitespace().last()
-            {
-                out.push(addr.to_owned());
-            }
-            previous = line;
+fn capture_proxy_env() -> Vec<(String, String)> {
+    [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
+    ]
+    .into_iter()
+    .filter_map(|key| {
+        let value = std::env::var(key).ok()?;
+        if value.is_empty() {
+            None
+        } else {
+            Some((key.to_owned(), value))
+        }
+    })
+    .collect()
+}
+
+/// First non-empty value whose name equals a key, in key order.
+///
+/// Uppercase is listed before lowercase, so it wins when both are set even
+/// if the lowercase entry appears earlier in `env`.
+fn env_slot<'a>(env: &'a [(&'a str, &'a str)], keys: &[&str]) -> &'a str {
+    for key in keys {
+        if let Some((_, value)) = env
+            .iter()
+            .find(|(name, value)| *name == *key && !value.is_empty())
+        {
+            return value;
         }
     }
-    if let Ok(text) = std::fs::read_to_string("/proc/net/if_inet6") {
-        for line in text.lines() {
-            if let Some(hex) = line.split_whitespace().next() {
-                out.push(hex.to_owned());
-            }
-        }
+    ""
+}
+
+fn redact_proxy_env(value: &str) -> String {
+    if value.is_empty() {
+        return String::new();
     }
-    out
+    if value.contains("://") || value.contains('@') || value.contains('/') {
+        return redact_url(value);
+    }
+    value.to_owned()
+}
+
+fn choice_label(choice: &str) -> String {
+    let choice = choice.trim();
+    if choice.is_empty() {
+        return String::new();
+    }
+    if choice.eq_ignore_ascii_case("direct") {
+        return "direct".to_owned();
+    }
+    redact_url(choice)
 }
 
 async fn account_choices(host: &HostContext) -> Result<Vec<String>, PluginError> {
@@ -559,15 +689,20 @@ async fn proxy_of(host: &HostContext, account: &AccountId) -> Result<String, Plu
 
 /// Reads the trace at `url` through `choice`.
 ///
-/// `direct` uses no proxy. An empty choice uses the process proxy. Any other
-/// choice is that proxy URL. The proxy header is not forwarded.
+/// `direct` uses no proxy. An empty choice uses the process proxy. A SOCKS
+/// choice uses the same loopback HTTP bridge URL the process path uses.
+/// Any other choice is that proxy URL. The proxy header is not forwarded.
 pub(crate) async fn fetch_trace(host: &HostContext, choice: &str, url: &str) -> TraceAnswer {
     let mut call = Call::get(url).read_timeout(TIMEOUT);
     let trimmed = choice.trim();
     if trimmed.eq_ignore_ascii_case("direct") {
         call = call.header(OUTBOUND_PROXY, "direct");
     } else if !trimmed.is_empty() {
-        call = call.sensitive_header(OUTBOUND_PROXY, trimmed);
+        let proxy = match hofund_plugin_sdk::netproxy::for_bun(trimmed) {
+            Ok(value) => value,
+            Err(error) => return TraceAnswer::failed(redact_error(&error.to_string(), trimmed)),
+        };
+        call = call.sensitive_header(OUTBOUND_PROXY, proxy);
     }
     match call.fetch(host.http()).await {
         Ok(reply) => {
@@ -803,11 +938,12 @@ mod tests {
 
     #[test]
     fn d245_fingerprint_is_stable_and_includes_the_choice() {
-        let one = fingerprint(&["direct".to_owned()]);
-        let two = fingerprint(&["direct".to_owned()]);
+        let addrs = ["203.0.113.10".to_owned()];
+        let one = fingerprint_from(&["direct".to_owned()], &[], &addrs);
+        let two = fingerprint_from(&["direct".to_owned()], &[], &addrs);
         assert_eq!(one, two);
-        assert!(one.ends_with("|direct"), "{one}");
-        assert_ne!(one, fingerprint(&[String::new()]));
+        assert!(one.ends_with("|direct"));
+        assert_ne!(one, fingerprint_from(&[String::new()], &[], &addrs));
     }
 
     #[test]
@@ -894,6 +1030,201 @@ mod tests {
             "{}",
             refresh.message()
         );
+    }
+
+    #[test]
+    fn d245_socks_trace_dials_the_sdk_bridge_with_fake_auth() {
+        hofund_kit_subscription::block_on(async {
+            let socks = hofund_kit_subscription::FirstPacket::start().await;
+            let origin = hofund_kit_subscription::Http1Server::start(vec![
+                hofund_kit_subscription::Http1Response::new(200).body(b"loc=CN\n".to_vec()),
+            ])
+            .await;
+            let password = "d245-fake-secret";
+            let choice = format!("socks5://alice:{password}@127.0.0.1:{}", socks.port());
+            let bridged = hofund_plugin_sdk::netproxy::for_bun(&choice).expect("bridge url");
+            assert!(
+                bridged.starts_with("127.0.0.1:"),
+                "bridge url is the loopback HTTP listener"
+            );
+            assert!(!bridged.to_ascii_lowercase().contains("socks"));
+            assert!(!bridged.contains(password));
+            let dir = tempfile::tempdir().expect("dir");
+            let host =
+                hofund_kit_subscription::TestHost::open_for_with_pooled_http_and_tokio_monotonic(
+                    PluginKind::Subscription,
+                    PluginId::from_static("claude"),
+                    dir.path(),
+                );
+            let answer = fetch_trace(
+                host.context(),
+                &choice,
+                &format!("{}/cdn-cgi/trace", origin.base_url()),
+            )
+            .await;
+            let packet = socks.packet();
+            assert!(
+                !packet
+                    .windows(password.len())
+                    .any(|window| window == password.as_bytes()),
+                "fake password must stay off the recorded dial"
+            );
+            assert!(
+                !answer.error.contains(password),
+                "error text must not contain the fake password"
+            );
+            assert!(
+                !answer.body.contains(password),
+                "response body must not contain the fake password"
+            );
+            assert_eq!(
+                packet.first().copied(),
+                Some(5),
+                "the dial must be a SOCKS greeting from the HTTP bridge, not a raw socks URL"
+            );
+            assert!(
+                packet.len() >= 4 && packet[2] == 0 && packet[3] == 2,
+                "fake user and password must be offered as a SOCKS method"
+            );
+            assert!(
+                origin.requests().is_empty(),
+                "the trace host must not be dialed directly"
+            );
+            assert!(!answer.error.contains(password));
+            assert!(!answer.error.to_ascii_lowercase().contains("socks5://"));
+        });
+    }
+
+    #[test]
+    fn d245_env_or_address_change_is_due_before_fifteen_minutes() {
+        let choices = vec!["direct".to_owned()];
+        let start = epoch() + Duration::from_secs(100);
+        let base = fingerprint_from(&choices, &[], &["203.0.113.10".to_owned()]);
+        let other_addr = fingerprint_from(&choices, &[], &["203.0.113.11".to_owned()]);
+        let lower = fingerprint_from(
+            &choices,
+            &[("https_proxy", "http://10.9.9.9:8080")],
+            &["203.0.113.10".to_owned()],
+        );
+        let upper = fingerprint_from(
+            &choices,
+            &[("HTTPS_PROXY", "http://10.9.9.8:8080")],
+            &["203.0.113.10".to_owned()],
+        );
+        let same_either_case = fingerprint_from(
+            &choices,
+            &[("https_proxy", "http://10.9.9.9:8080")],
+            &["203.0.113.10".to_owned()],
+        );
+        let upper_same = fingerprint_from(
+            &choices,
+            &[("HTTPS_PROXY", "http://10.9.9.9:8080")],
+            &["203.0.113.10".to_owned()],
+        );
+        let secret = fingerprint_from(
+            &choices,
+            &[("https_proxy", "http://bob:d245-fake/secret@10.9.9.9:8080")],
+            &["203.0.113.10".to_owned()],
+        );
+        let http_slot = fingerprint_from(
+            &choices,
+            &[("HTTP_PROXY", "http://10.8.8.8:8080")],
+            &["203.0.113.10".to_owned()],
+        );
+        let all_slot = fingerprint_from(
+            &choices,
+            &[("all_proxy", "http://10.7.7.7:8080")],
+            &["203.0.113.10".to_owned()],
+        );
+        let no_slot = fingerprint_from(
+            &choices,
+            &[("NO_PROXY", "localhost,127.0.0.1")],
+            &["203.0.113.10".to_owned()],
+        );
+        assert_ne!(base, other_addr, "address change");
+        assert_ne!(base, lower, "lowercase proxy env");
+        assert_ne!(base, upper, "uppercase proxy env");
+        assert_ne!(base, http_slot, "HTTP_PROXY");
+        assert_ne!(base, all_slot, "all_proxy");
+        assert_ne!(base, no_slot, "NO_PROXY");
+        assert_eq!(
+            same_either_case, upper_same,
+            "case of the name is one variable"
+        );
+        let both = fingerprint_from(
+            &choices,
+            &[
+                ("https_proxy", "http://10.1.1.1:8080"),
+                ("HTTPS_PROXY", "http://10.2.2.2:8080"),
+            ],
+            &["203.0.113.10".to_owned()],
+        );
+        let upper_wins = fingerprint_from(
+            &choices,
+            &[("HTTPS_PROXY", "http://10.2.2.2:8080")],
+            &["203.0.113.10".to_owned()],
+        );
+        assert_eq!(both, upper_wins, "uppercase proxy name wins");
+        assert!(!both.contains("10.1.1.1"));
+        assert!(
+            !secret.contains("d245-fake"),
+            "fingerprint stores no password"
+        );
+        assert_ne!(base, secret);
+        let egress = Egress::new(true);
+        egress.mark(&choices, &base, start);
+        let soon = start + Duration::from_secs(20);
+        assert!(!egress.due(&choices, &base, soon));
+        assert!(egress.due(&choices, &other_addr, soon));
+        assert!(egress.due(&choices, &lower, soon));
+    }
+
+    #[test]
+    fn d245_malformed_userinfo_never_echoes_a_password() {
+        let password = "d245-fake/secret word";
+        let raw = format!("http://bob:{password}@10.0.0.1:8080");
+        let via = shown(&raw);
+        assert!(!via.contains(password), "shown");
+        assert!(!via.contains("d245-fake"), "shown fragment");
+        let err = redact_error(&format!("dial {raw} refused"), &raw);
+        assert!(!err.contains(password), "redact_error");
+        assert!(!err.contains("d245-fake"), "redact_error fragment");
+        let reading = Reading {
+            state: State::Unsupported,
+            loc: "CN".to_owned(),
+            via,
+            at: Some(epoch()),
+            error: String::new(),
+        };
+        let held = held_error(&reading);
+        assert!(!held.message().contains(password), "held");
+        assert!(!held.message().contains("d245-fake"), "held fragment");
+        let broken = format!("not a url {password}");
+        assert!(!redact_url(&broken).contains(password));
+        assert!(!redact_error(&broken, &broken).contains("d245-fake"));
+    }
+
+    #[test]
+    fn d245_last_trace_loc_wins() {
+        let loc = loc_from_trace("loc=US\nloc=CN\n");
+        assert_eq!(loc, "CN");
+    }
+
+    #[test]
+    fn d245_direct_any_case_is_going_direct() {
+        let reading = Reading {
+            state: State::Unsupported,
+            loc: "CN".to_owned(),
+            via: shown("Direct"),
+            at: Some(epoch()),
+            error: String::new(),
+        };
+        let message = held_error(&reading).message().to_owned();
+        assert!(
+            message.contains("going direct"),
+            "held text should say going direct"
+        );
+        assert!(!message.contains("through Direct"));
     }
 
     fn text_request() -> hofund_plugin_api::Request {

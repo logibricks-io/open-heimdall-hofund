@@ -415,7 +415,10 @@ fn build_client(key: &ClientKey) -> Result<reqwest::Client, PluginError> {
             }
         },
     }
-    if key.profile.no_env_proxy {
+    if key.profile.no_env_proxy || key.profile.proxy.is_some() {
+        // An explicit proxy is the way out for every host. The process
+        // NO_PROXY list must not skip it, or a loopback trace target and a
+        // host named in that list would leave by another path.
         builder = builder.no_proxy();
     }
     if let Some(proxy) = &key.profile.proxy {
@@ -556,8 +559,9 @@ fn profile_for_request(
     else {
         return Ok(base.clone());
     };
-    let text = value
-        .to_str()
+    // `to_str` refuses a sensitive value. The proxy URL is sensitive when it
+    // can carry a password, and the bytes are still the address to dial.
+    let text = std::str::from_utf8(value.as_bytes())
         .map_err(|_| PluginError::internal("outbound proxy header is not text"))?;
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -809,6 +813,27 @@ mod tests {
         );
         assert!(PooledHttp::direct().send(missed).await.is_err());
         assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn d245_sensitive_proxy_header_is_dialed_not_ignored() {
+        let _guard = exclusive().await;
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let port = listener.local_addr().expect("addr").port();
+        let mut request = HttpRequest::builder()
+            .method("GET")
+            .uri(format!("http://127.0.0.1:{port}/cdn-cgi/trace"))
+            .body(Body::empty())
+            .expect("request");
+        let mut proxy = http::HeaderValue::from_static("http://127.0.0.1:1");
+        proxy.set_sensitive(true);
+        request
+            .headers_mut()
+            .insert(hofund_plugin_api::OUTBOUND_PROXY, proxy);
+        assert!(PooledHttp::direct().send(request).await.is_err());
+        let missed = listener.accept().expect_err("origin must not be dialed");
+        assert_eq!(missed.kind(), std::io::ErrorKind::WouldBlock);
     }
 
     #[tokio::test]

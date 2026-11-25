@@ -20,8 +20,8 @@ pub use hofund_plugin_host::{
     RecordingSecrets, TestHost, test_host,
 };
 pub use servers::{
-    HeaderPark, Http1Response, Http1Server, Http2Response, Http2Server, RecordedHttp1Request,
-    header_park,
+    FirstPacket, HeaderPark, Http1Response, Http1Server, Http2Response, Http2Server,
+    RecordedHttp1Request, header_park,
 };
 pub use websocket::{LoopbackSocket, SocketHit, SocketScript};
 
