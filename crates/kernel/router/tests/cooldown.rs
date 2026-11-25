@@ -25,6 +25,7 @@ struct Fake {
 
 enum Behavior {
     Fail,
+    CountQuota,
     RefuseCredit,
     RefuseQuota,
     Unary,
@@ -70,6 +71,8 @@ impl Member for Fake {
         self.seen.lock().expect("seen").push(self.id);
         match self.behavior {
             Behavior::Fail => Err(PluginError::status_error(503, "down")),
+            Behavior::CountQuota => Err(PluginError::quota_status(429, "allowance exhausted")
+                .with_reset_after(Duration::from_secs(6 * 60 * 60))),
             Behavior::Count(tokens) => Ok(CountOutcome::Counted(tokens)),
             _ => Ok(CountOutcome::Unsupported),
         }
@@ -477,7 +480,7 @@ async fn d251_7_ready_sibling_answers_before_the_renewal_probe() {
     book.record_failure(&id, &refusal)
         .expect("vendor-timed rest");
     book.observe_credit_window(&id, &[reading(8)]);
-    assert!(book.cooling(&id).expect("renewed rest").renewal_probe());
+    assert!(book.renewal_probe(&id));
     let router = router(
         vec![
             fake("first", &seen, Behavior::RefuseQuota),
@@ -492,6 +495,45 @@ async fn d251_7_ready_sibling_answers_before_the_renewal_probe() {
         .expect("ready sibling");
     assert_eq!(routed.upstream_id, "second");
     assert_eq!(seen.lock().expect("seen").as_slice(), ["second"]);
+}
+
+#[tokio::test]
+async fn d251_11_count_can_use_then_close_the_renewal_probe() {
+    let (book, seen) = fixture();
+    let id = member_id("first");
+    book.configure_credit_window(&id);
+    let reset = SystemTime::now() + Duration::from_secs(3 * 60 * 60);
+    let reading = |used| QuotaWindow::new("window", used, Some(10), Some(reset)).expect("window");
+    let refusal = || {
+        PluginError::quota_status(429, "allowance exhausted")
+            .with_reset_after(Duration::from_secs(6 * 60 * 60))
+    };
+    book.observe_credit_window(&id, &[reading(10)]);
+    book.record_failure(&id, &refusal())
+        .expect("vendor-timed rest");
+    book.observe_credit_window(&id, &[reading(8)]);
+    assert!(book.renewal_probe(&id));
+    let router = router(vec![fake("first", &seen, Behavior::CountQuota)], &book);
+
+    let counted = router.count(&Request::new("demo"), "inbound").await;
+    assert_eq!(seen.lock().expect("seen").as_slice(), ["first"]);
+    let Err(RouterError::Upstream { error, .. }) = counted else {
+        panic!("expected the count refusal");
+    };
+    assert_eq!(error.status(), Some(429));
+    book.record_failure(&id, &refusal())
+        .expect("same-time count refusal");
+    assert!(!book.renewal_probe(&id));
+
+    seen.lock().expect("seen").clear();
+    book.observe_credit_window(&id, &[reading(10)]);
+    book.observe_credit_window(&id, &[reading(8)]);
+    let held = router.dispatch(&Request::new("demo"), "inbound").await;
+    assert!(seen.lock().expect("seen").is_empty());
+    let Err(RouterError::Upstream { error, .. }) = held else {
+        panic!("expected the held refusal");
+    };
+    assert_eq!(error.status(), Some(429));
 }
 
 #[tokio::test]

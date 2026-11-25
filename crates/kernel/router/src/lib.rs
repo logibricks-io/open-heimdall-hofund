@@ -2964,7 +2964,7 @@ fn vendor_timed_quota_rest(cooldowns: &Cooldowns, hop: &Hop, model: &str) -> Opt
                 cooling.cause(),
                 CooldownCause::Quota | CooldownCause::Credit
             ) && cooling.vendor_timed()
-                && !cooling.renewal_probe()
+                && !cooldowns.renewal_probe_for_model(hop.member.id(), model)
         })
 }
 

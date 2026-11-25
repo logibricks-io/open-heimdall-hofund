@@ -462,9 +462,11 @@ flat at 30 minutes, while a named reset wins. Windowed subscription accounts
 use body reset, header reset, full-window reset, a retry hint longer than five
 hours, then five hours. A renewed window lifts a rest whose deadline was not
 vendor-named. A vendor-timed quota or credit rest instead opens one upstream
-probe while keeping the rest; a refusal at that named time closes the probe
-despite later renewed readings. When every remaining candidate is held, routing
-returns the first stored refusal and soonest reset without calling upstream.
+probe while keeping the rest. Only a vendor-timed refusal within one second of
+that deadline closes it; a guessed or farther refusal leaves it open. A real
+answer clears the open rest and retains its asked deadline. When every remaining
+candidate is held, routing returns the first stored refusal and soonest reset
+without calling upstream.
 Other subscription accounts stay at 30 minutes. Named credit resets cap at 35
 days, generic/rate/quota header hints cap at one hour, and passive window resets
 cap at eight days. New events never shorten a longer active rest. A vendor-restricted account,
