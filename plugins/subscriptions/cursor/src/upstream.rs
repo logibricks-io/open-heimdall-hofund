@@ -650,8 +650,8 @@ mod tests {
 
     use hofund_kit_subscription::{
         Http1Response, Http1Server, Http2Response, Http2Server, TestHost, advance_time, block_on,
-        block_on_paused, drive_to_completion, drive_until_http1_response,
-        drive_until_http2_opening, drive_until_http2_request, yield_times,
+        block_on_paused, drive_to_completion, drive_until_http2_opening, drive_until_http2_request,
+        wait_for_http1_request, yield_times,
     };
     use hofund_plugin_api::{
         AccountId, BlockStart, Completion, ContentBlockStart, ContentBlockStop, Extensions,
@@ -826,6 +826,10 @@ mod tests {
 
     fn empty_usage_events_body() -> Vec<u8> {
         br#"{"usageEvents":[]}"#.to_vec()
+    }
+
+    fn delayed_usage_reply(body: Vec<u8>) -> Http1Response {
+        Http1Response::new(200).body(body).yield_before_write(32)
     }
 
     fn usage_events_dual_same_timestamp(
@@ -2379,26 +2383,69 @@ mod tests {
             .count()
     }
 
-    async fn release_usage_sleep_without_io<F>(
-        mut attempt: Pin<&mut F>,
+    #[derive(Clone, Copy)]
+    enum UsageWait {
+        PrePoll,
+        Retry,
+    }
+
+    fn usage_wait_count(ledger: &crate::usage_ledger::UsageLedger, kind: UsageWait) -> usize {
+        match kind {
+            UsageWait::PrePoll => ledger.pre_poll_waits(),
+            UsageWait::Retry => ledger.retry_waits(),
+        }
+    }
+
+    async fn drive_until_usage_wait<F>(
+        attempt: Pin<&mut F>,
+        ledger: &crate::usage_ledger::UsageLedger,
         h1: &Http1Server,
+        kind: UsageWait,
+        wait_goal: usize,
         poll_goal: usize,
-        duration: Duration,
     ) where
         F: Future<Output = Result<Vec<StreamEvent>, PluginError>> + ?Sized,
     {
-        loop {
-            if usage_poll_count(h1) == poll_goal {
-                return;
+        let control = async {
+            while usage_wait_count(ledger, kind) < wait_goal {
+                yield_times(1).await;
             }
-            let Race::Right(()) = race(attempt.as_mut(), yield_times(2)).await else {
-                panic!("usage stream finished before the next poll");
-            };
-            if usage_poll_count(h1) == poll_goal {
-                return;
+        };
+        let Race::Right(()) = race(attempt, control).await else {
+            assert_eq!(
+                usage_poll_count(h1),
+                poll_goal,
+                "usage stream finished early"
+            );
+            panic!("usage stream finished before the next poll");
+        };
+        assert_eq!(
+            usage_poll_count(h1),
+            poll_goal,
+            "the sleep signal precedes any new usage fetch"
+        );
+    }
+
+    async fn wait_for_usage_poll<F>(
+        attempt: Pin<&mut F>,
+        h1: &Http1Server,
+        poll_goal: usize,
+    ) -> Option<Result<Vec<StreamEvent>, PluginError>>
+    where
+        F: Future<Output = Result<Vec<StreamEvent>, PluginError>> + ?Sized,
+    {
+        match race(attempt, wait_for_http1_request(h1, poll_goal + 1)).await {
+            Race::Left(result) => {
+                assert_eq!(
+                    usage_poll_count(h1),
+                    poll_goal,
+                    "usage stream finished early"
+                );
+                Some(result)
             }
-            if h1.open_responses() == 0 {
-                advance_time(duration).await;
+            Race::Right(()) => {
+                assert_eq!(usage_poll_count(h1), poll_goal);
+                None
             }
         }
     }
@@ -2422,8 +2469,8 @@ mod tests {
             let hit = usage_events_body(TEST_CONVERSATION, 2_000_000_000_000, 30, 8, 12, 7, 3);
             let h1 = Http1Server::start(vec![
                 config_reply(h2.base_url()),
-                Http1Response::new(200).body(br#"{"usageEvents":[]}"#.to_vec()),
-                Http1Response::new(200).body(hit),
+                delayed_usage_reply(br#"{"usageEvents":[]}"#.to_vec()),
+                delayed_usage_reply(hit),
             ])
             .await;
             let host = pooled_host();
@@ -2432,6 +2479,8 @@ mod tests {
             restore_production_usage_limits(&mut upstream);
             let first_delay = upstream.limits.usage_first_wait;
             let retry_delay = upstream.limits.usage_interval;
+            let pre_poll_goal = upstream.usage_ledger.pre_poll_waits() + 1;
+            let retry_goal = upstream.usage_ledger.retry_waits() + 1;
             let attempt = async {
                 let completion = upstream
                     .execute(tool_request(), ProtocolId::OPENAI_CHAT)
@@ -2440,10 +2489,36 @@ mod tests {
             };
             let mut attempt = std::pin::pin!(attempt);
             drive_until_http2_opening(attempt.as_mut(), &h2, 1).await;
-            release_usage_sleep_without_io(attempt.as_mut(), &h1, 1, first_delay).await;
-            drive_until_http1_response(attempt.as_mut(), &h1, 2).await;
-            release_usage_sleep_without_io(attempt.as_mut(), &h1, 2, retry_delay).await;
-            let events = drive_to_completion(attempt).await.expect("stream");
+            drive_until_usage_wait(
+                attempt.as_mut(),
+                &upstream.usage_ledger,
+                &h1,
+                UsageWait::PrePoll,
+                pre_poll_goal,
+                0,
+            )
+            .await;
+            advance_time(first_delay + Duration::from_millis(1)).await;
+            assert!(
+                wait_for_usage_poll(attempt.as_mut(), &h1, 1)
+                    .await
+                    .is_none(),
+                "usage stream finished after the first poll"
+            );
+            drive_until_usage_wait(
+                attempt.as_mut(),
+                &upstream.usage_ledger,
+                &h1,
+                UsageWait::Retry,
+                retry_goal,
+                1,
+            )
+            .await;
+            advance_time(retry_delay + Duration::from_millis(1)).await;
+            let events = match wait_for_usage_poll(attempt.as_mut(), &h1, 2).await {
+                Some(result) => result.expect("stream"),
+                None => drive_to_completion(attempt).await.expect("stream"),
+            };
             let usage = last_message_usage(&events).expect("usage");
             assert_eq!(
                 usage,
@@ -2541,11 +2616,9 @@ mod tests {
                 Http2Response::new(200).data(tool_step_body()).hold_open(),
             ])
             .await;
-            let h1 = Http1Server::start(vec![
-                config_reply(h2.base_url()),
-                Http1Response::new(200).body(hit),
-            ])
-            .await;
+            let h1 =
+                Http1Server::start(vec![config_reply(h2.base_url()), delayed_usage_reply(hit)])
+                    .await;
             let account = store_account(&host).await;
             let mut upstream = upstream(&host, &h1, h2.base_url(), account);
             apply_r9k_cross_step_limits(&mut upstream);
@@ -2622,11 +2695,9 @@ mod tests {
                 Http2Response::new(200).data(tool_step_body()).hold_open(),
             ])
             .await;
-            let h1 = Http1Server::start(vec![
-                config_reply(h2.base_url()),
-                Http1Response::new(200).body(hit),
-            ])
-            .await;
+            let h1 =
+                Http1Server::start(vec![config_reply(h2.base_url()), delayed_usage_reply(hit)])
+                    .await;
             let host = pooled_host();
             let id = AccountId::from_static("a-00000000000000f4");
             let account = host
@@ -3051,15 +3122,27 @@ mod tests {
         poll_goal: usize,
         request: Request,
     ) -> Vec<StreamEvent> {
+        let pre_poll_goal = upstream.usage_ledger.pre_poll_waits() + 1;
         let attempt = async {
             let completion = upstream.execute(request, ProtocolId::OPENAI_CHAT).await?;
             collect(completion).await
         };
         let mut attempt = std::pin::pin!(attempt);
         drive_until_http2_opening(attempt.as_mut(), h2, http2_opening).await;
-        release_usage_sleep_without_io(attempt.as_mut(), h1, poll_goal, Duration::from_millis(1))
-            .await;
-        let events = drive_to_completion(attempt).await.expect("stream");
+        drive_until_usage_wait(
+            attempt.as_mut(),
+            &upstream.usage_ledger,
+            h1,
+            UsageWait::PrePoll,
+            pre_poll_goal,
+            poll_goal - 1,
+        )
+        .await;
+        advance_time(Duration::from_millis(1)).await;
+        let events = match wait_for_usage_poll(attempt.as_mut(), h1, poll_goal).await {
+            Some(result) => result.expect("stream"),
+            None => drive_to_completion(attempt).await.expect("stream"),
+        };
         assert_eq!(usage_poll_count(h1), poll_goal);
         events
     }
@@ -3084,11 +3167,9 @@ mod tests {
                 Http2Response::new(200).data(tool_step_body()).hold_open(),
             ])
             .await;
-            let h1 = Http1Server::start(vec![
-                config_reply(h2.base_url()),
-                Http1Response::new(200).body(hit),
-            ])
-            .await;
+            let h1 =
+                Http1Server::start(vec![config_reply(h2.base_url()), delayed_usage_reply(hit)])
+                    .await;
             let account = store_account(&host).await;
             let mut upstream = upstream(&host, &h1, h2.base_url(), account);
             apply_r9k_cross_step_limits(&mut upstream);
@@ -3141,7 +3222,7 @@ mod tests {
             let empty = empty_usage_events_body();
             let h1_first = Http1Server::start(vec![
                 config_reply(h2_first.base_url()),
-                Http1Response::new(200).body(empty),
+                delayed_usage_reply(empty),
             ])
             .await;
             let account = store_account(&host).await;
@@ -3174,7 +3255,7 @@ mod tests {
             );
             let h1_second = Http1Server::start(vec![
                 config_reply(h2_second.base_url()),
-                Http1Response::new(200).body(hit),
+                delayed_usage_reply(hit),
             ])
             .await;
             let mut second =
@@ -3235,7 +3316,7 @@ mod tests {
 
             let h1_a = Http1Server::start(vec![
                 config_reply(h2_a.base_url()),
-                Http1Response::new(200).body(empty.clone()),
+                delayed_usage_reply(empty.clone()),
             ])
             .await;
 
@@ -3255,7 +3336,7 @@ mod tests {
             crate::http2_memory::reset_for_tests();
             let h1_bill = Http1Server::start(vec![
                 config_reply(h2_bill.base_url()),
-                Http1Response::new(200).body(summed_hit.clone()),
+                delayed_usage_reply(summed_hit.clone()),
             ])
             .await;
             let mut step_bill = upstream_with_ledger(
@@ -3286,7 +3367,7 @@ mod tests {
             crate::http2_memory::reset_for_tests();
             let h1_verify = Http1Server::start(vec![
                 config_reply(h2_verify.base_url()),
-                Http1Response::new(200).body(summed_hit),
+                delayed_usage_reply(summed_hit),
             ])
             .await;
             let mut step_verify =
