@@ -17,6 +17,7 @@ mod attempt;
 mod cooldown;
 pub mod credits_mode;
 mod decision;
+mod effort_models;
 mod member;
 mod overflow_memory;
 mod patience;
@@ -42,7 +43,7 @@ use hofund_codec::responses_empty::{
     relayed_sse_has_content, relayed_sse_has_opaque_content, relayed_sse_lifecycle_only,
 };
 use hofund_control_proto::{RouteTry, SkipReason};
-use hofund_ir::{StreamEvent, estimate_input_tokens};
+use hofund_ir::{Effort, StreamEvent, estimate_input_tokens};
 use hofund_plugin_api::{BodyStream, CountOutcome, Forward, PluginErrorKind, RawAnswer};
 use tracing::Instrument;
 
@@ -51,6 +52,7 @@ pub use attempt::{Attempt, AttemptError, AttemptHook, MemberAttempt};
 use cooldown::HandOnRest;
 pub use cooldown::{CooldownCause, CooldownPolicy, Cooldowns, Cooling, PersistedRest};
 pub use decision::{region_agent_note, with_region_agent_note};
+pub use effort_models::EffortModels;
 pub use hofund_plugin_api::{Completion, MemberId, PluginError, Request};
 pub use member::{Member, ModelListAnswer};
 pub use overflow_memory::OverflowMemory;
@@ -625,6 +627,47 @@ impl Router {
         }
     }
 
+    /// Reasoning levels a listed effort-id family offers for `model`.
+    ///
+    /// `model` may be the route key or `provider/model`. A qualified id uses
+    /// only the hop whose provider and family or wire id match that model.
+    #[must_use]
+    pub fn effort_levels(&self, model: &str) -> Vec<String> {
+        let mut levels = Vec::new();
+        let mut collect = |hop: &Hop| {
+            if let Some(family) = hop.member.effort_models() {
+                for level in family.levels() {
+                    if !levels.iter().any(|have| have == level) {
+                        levels.push(level.to_owned());
+                    }
+                }
+            }
+        };
+        if let Some(route) = self.routes.get(model) {
+            for hop in &route.hops {
+                collect(hop);
+            }
+            return levels;
+        }
+        let Some((provider, bare)) = model.split_once('/') else {
+            return levels;
+        };
+        for (route_model, route) in &self.routes {
+            for hop in &route.hops {
+                let named = hop.member.route_id() == provider
+                    && (*route_model == bare
+                        || hop.wire_model.as_deref() == Some(bare)
+                        || hop.member.effort_models().is_some_and(|family| {
+                            family.family() == bare || family.contains(bare)
+                        }));
+                if named {
+                    collect(hop);
+                }
+            }
+        }
+        levels
+    }
+
     /// Short name of the API `/v1/models` should name for `model`.
     ///
     /// A preference a member learned from a remote list wins. A route whose id
@@ -755,7 +798,7 @@ impl Router {
         let Ok(resolved) = self.resolve(model) else {
             return Vec::new();
         };
-        self.order_for(&resolved, None)
+        self.order_for(&resolved, None, None)
             .reserves
             .into_iter()
             .collect()
@@ -981,7 +1024,7 @@ impl Router {
         }
         self.refresh_free(&mut resolved).await;
         let input_tokens = estimate_input_tokens(request);
-        let ordered = self.order_for(&resolved, conversation);
+        let ordered = self.order_for(&resolved, conversation, Some(request.params.effort));
         let rest_left = resolved.pool_asked && !ordered.hand_on.is_empty();
         let hand_on = ordered.hand_on;
         resolved.hops = ordered.hops;
@@ -1000,12 +1043,14 @@ impl Router {
         let (fitting, hand_on, over_window) = if apply_window {
             let cooldowns = self.cooldowns.clone();
             let bare = resolved.bare.clone();
+            let effort = request.params.effort;
             split_over_window(resolved.hops, hand_on, input_tokens, |hop, apply_window| {
                 cooldowns.as_ref().is_some_and(|cooldowns| {
+                    let model = sent_model(hop, &bare, effort);
                     hand_on_candidate(
                         cooldowns,
                         hop,
-                        &bare,
+                        &model,
                         HandOnFailure::Momentary,
                         input_tokens,
                         apply_window,
@@ -1018,7 +1063,7 @@ impl Router {
         };
         let protocol_alternates = ordered.protocol_alternates;
         resolved.hops = splice_protocol_alternates(fitting, &protocol_alternates);
-        resolved.spent = self.spent(&resolved);
+        resolved.spent = self.spent(&resolved, request.params.effort);
         if let Some(trace) = trace.as_mut() {
             trace.set_routing(&resolved.routing);
             if resolved.pool_asked {
@@ -1027,7 +1072,7 @@ impl Router {
             if let Some(affinity) = &ordered.affinity {
                 trace.set_affinity_decision(affinity.reason);
             }
-            let cooling = cooling_labels(self.cooldowns.as_ref(), &resolved);
+            let cooling = cooling_labels(self.cooldowns.as_ref(), &resolved, request.params.effort);
             trace.set_candidates(candidates_from_hops(
                 &resolved.hops,
                 &resolved.bare,
@@ -1053,14 +1098,16 @@ impl Router {
             hand_on: if resolved.pool_asked {
                 let cooldowns = self.cooldowns.clone();
                 let bare = resolved.bare.clone();
+                let effort = request.params.effort;
                 hand_on
                     .into_iter()
                     .filter(|hop| {
                         cooldowns.as_ref().is_some_and(|cooldowns| {
+                            let model = sent_model(hop, &bare, effort);
                             hand_on_candidate(
                                 cooldowns,
                                 hop,
-                                &bare,
+                                &model,
                                 HandOnFailure::Momentary,
                                 input_tokens,
                                 apply_window,
@@ -1118,13 +1165,18 @@ impl Router {
 
     /// Whether hop `index` has a vendor-timed quota or credit rest without an
     /// open renewal probe.
-    fn vendor_timed_quota_at(&self, resolved: &Resolved, index: usize) -> bool {
+    fn vendor_timed_quota_at(
+        &self,
+        resolved: &Resolved,
+        index: usize,
+        effort: Option<Effort>,
+    ) -> bool {
         let Some(cooldowns) = &self.cooldowns else {
             return false;
         };
         let hop = &resolved.hops[index];
-        let model = hop.wire_model.as_deref().unwrap_or(&resolved.bare);
-        vendor_timed_quota_rest(cooldowns, hop, model).is_some()
+        let model = sent_model(hop, &resolved.bare, effort);
+        vendor_timed_quota_rest(cooldowns, hop, &model).is_some()
     }
 
     /// Counts input tokens for `request`.
@@ -1185,7 +1237,7 @@ impl Router {
         resolved.hops = scoped_hops(&request.model, &resolved, scope)?;
         resolved.hops = self.without_skipped_hops(&request.model, &resolved);
         self.refresh_free(&mut resolved).await;
-        resolved.hops = self.order_hops(&resolved);
+        resolved.hops = self.order_hops(&resolved, Some(request.params.effort));
         if resolved.stays == affinity::Stays::Strict
             && let Some(conversation) = conversation
             && let Some(member) = self
@@ -1229,10 +1281,10 @@ impl Router {
             {
                 continue;
             }
-            if self.vendor_timed_quota_at(&resolved, index) {
+            if self.vendor_timed_quota_at(&resolved, index, request.params.effort) {
                 let later_open = (index + 1..resolved.hops.len()).any(|later| {
                     let hop = &resolved.hops[later];
-                    !self.vendor_timed_quota_at(&resolved, later)
+                    !self.vendor_timed_quota_at(&resolved, later, request.params.effort)
                         && !self
                             .api_fitness
                             .is_refused(hop.member.route_id(), hop.member.protocol())
@@ -1323,7 +1375,7 @@ impl Router {
         resolved.hops = scoped_hops(call.model(), &resolved, scope)?;
         resolved.hops = self.without_skipped_hops(call.model(), &resolved);
         self.refresh_free(&mut resolved).await;
-        resolved.hops = self.order_hops(&resolved);
+        resolved.hops = self.order_hops(&resolved, None);
         let mut last = None;
         for (index, hop) in resolved.hops.iter().enumerate() {
             if self
@@ -1381,15 +1433,15 @@ impl Router {
     /// Which ordered hops already rest out of their allowance, quota or
     /// credit, before this request asks them (`reference:
     /// internal/gateway/fallback.go:1230-1241`, `spentAfter`).
-    fn spent(&self, resolved: &Resolved) -> Vec<bool> {
+    fn spent(&self, resolved: &Resolved, effort: Option<Effort>) -> Vec<bool> {
         resolved
             .hops
             .iter()
             .map(|hop| {
-                let model = hop.wire_model.as_deref().unwrap_or(&resolved.bare);
+                let model = sent_model(hop, &resolved.bare, effort);
                 self.cooldowns.as_ref().is_some_and(|cooldowns| {
                     cooldowns
-                        .cooling_for_model(hop.member.id(), model)
+                        .cooling_for_model(hop.member.id(), &model)
                         .is_some_and(|cooling| {
                             matches!(
                                 cooling.cause(),
@@ -1414,8 +1466,8 @@ impl Router {
         }
     }
 
-    fn order_hops(&self, resolved: &Resolved) -> Vec<Hop> {
-        let ordered = self.order_for(resolved, None);
+    fn order_hops(&self, resolved: &Resolved, selection: Option<Option<Effort>>) -> Vec<Hop> {
+        let ordered = self.order_for(resolved, None, selection);
         splice_protocol_alternates(ordered.hops, &ordered.protocol_alternates)
     }
 
@@ -1435,12 +1487,13 @@ impl Router {
         &self,
         resolved: &Resolved,
         conversation: Option<&affinity::Conversation>,
+        selection: Option<Option<Effort>>,
     ) -> Ordered {
         let mut moves = PoolMoves::default();
         let (routing_hops, protocol_alternates) = split_protocol_alternates(resolved.hops.clone());
-        let ordered = self.order_level(resolved, 0, routing_hops, &mut moves);
+        let ordered = self.order_level(resolved, 0, routing_hops, &mut moves, selection);
         let (ordered, left) = if let Some(cooldowns) = &self.cooldowns {
-            order_hops(ordered, cooldowns, &resolved.bare)
+            order_hops(ordered, cooldowns, &resolved.bare, selection)
         } else {
             (ordered, Vec::new())
         };
@@ -1451,10 +1504,10 @@ impl Router {
         let resting = ordered
             .iter()
             .map(|hop| {
-                let model = hop.wire_model.as_deref().unwrap_or(&resolved.bare);
+                let model = hop_model(hop, &resolved.bare, selection);
                 self.cooldowns.as_ref().is_some_and(|cooldowns| {
                     cooldowns
-                        .cooling_for_model(hop.member.id(), model)
+                        .cooling_for_model(hop.member.id(), &model)
                         .is_some()
                 })
             })
@@ -1497,6 +1550,7 @@ impl Router {
                 .iter()
                 .map(|hop| {
                     let model = hop.wire_model.as_deref().unwrap_or(&resolved.bare);
+                    let sent = hop_model(hop, &resolved.bare, selection);
                     let member = hop.member.id().to_string();
                     let allowance = allowances.iter().find(|entry| entry.member == member);
                     let mode = self
@@ -1521,15 +1575,16 @@ impl Router {
                     };
                     let group_member = group_member(hop);
                     let reserve = reserves.get(&member).copied().unwrap_or(0);
+                    let resting = self.cooldowns.as_ref().is_some_and(|cooldowns| {
+                        cooldowns
+                            .cooling_for_model(hop.member.id(), &sent)
+                            .is_some()
+                    });
                     affinity::Candidate {
                         member,
-                        model: model.to_owned(),
+                        model: sent,
                         effort: hop.effort.clone(),
-                        resting: self.cooldowns.as_ref().is_some_and(|cooldowns| {
-                            cooldowns
-                                .cooling_for_model(hop.member.id(), model)
-                                .is_some()
-                        }),
+                        resting,
                         reserve,
                         nearly_spent: {
                             let spent_by_use = used.is_some_and(|used| {
@@ -1587,7 +1642,7 @@ impl Router {
         } else if let Some(cooldowns) = &self.cooldowns {
             let mut candidates = ordered;
             candidates.extend(left);
-            order_hops(candidates, cooldowns, &resolved.bare)
+            order_hops(candidates, cooldowns, &resolved.bare, selection)
         } else {
             (ordered, Vec::new())
         };
@@ -1616,6 +1671,7 @@ impl Router {
         depth: usize,
         hops: Vec<Hop>,
         moves: &mut PoolMoves,
+        selection: Option<Option<Effort>>,
     ) -> Vec<Hop> {
         let mut groups: Vec<(String, u64, Vec<Hop>)> = Vec::new();
         for hop in hops {
@@ -1632,7 +1688,8 @@ impl Router {
         for (_, _, group) in &mut groups {
             let nested = group[0].units.get(depth + 1).is_some();
             if nested {
-                *group = self.order_level(resolved, depth + 1, std::mem::take(group), moves);
+                *group =
+                    self.order_level(resolved, depth + 1, std::mem::take(group), moves, selection);
                 continue;
             }
             let (pool, routing, sink) = group[0].units.get(depth).map_or_else(
@@ -1646,7 +1703,7 @@ impl Router {
                     (key, hop.weight, vec![hop])
                 })
                 .collect();
-            *group = self.order_units(resolved, &pool, &routing, sink, leaves, moves);
+            *group = self.order_units(resolved, &pool, &routing, sink, leaves, moves, selection);
         }
         let (pool, routing, sink) = if depth == 0 {
             (
@@ -1658,9 +1715,10 @@ impl Router {
             let unit = &groups[0].2[0].units[depth - 1];
             (unit.pool.clone(), unit.routing.clone(), unit.sink)
         };
-        self.order_units(resolved, &pool, &routing, sink, groups, moves)
+        self.order_units(resolved, &pool, &routing, sink, groups, moves, selection)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn order_units(
         &self,
         resolved: &Resolved,
@@ -1669,12 +1727,13 @@ impl Router {
         sink: bool,
         groups: Vec<(String, u64, Vec<Hop>)>,
         moves: &mut PoolMoves,
+        selection: Option<Option<Effort>>,
     ) -> Vec<Hop> {
         let heads = groups
             .iter()
             .map(|(_, _, group)| group[0].clone())
             .collect::<Vec<_>>();
-        let mut seats = self.seats(resolved, &heads, pool, routing);
+        let mut seats = self.seats(resolved, &heads, pool, routing, selection);
         for ((key, weight, _), seat) in groups.iter().zip(&mut seats) {
             seat.key.clone_from(key);
             seat.weight = *weight;
@@ -1724,9 +1783,9 @@ impl Router {
             && let Some(cooldowns) = &self.cooldowns
         {
             ordered.sort_by_key(|hop| {
-                let model = hop.wire_model.as_deref().unwrap_or(&resolved.bare);
+                let model = hop_model(hop, &resolved.bare, selection);
                 cooldowns
-                    .sunk_at(hop.member.id(), model)
+                    .sunk_at(hop.member.id(), &model)
                     .map_or((0, 0), |sequence| (1, sequence))
             });
         }
@@ -1739,6 +1798,7 @@ impl Router {
         hops: &[Hop],
         pool: &str,
         routing: &str,
+        selection: Option<Option<Effort>>,
     ) -> Vec<strategy::Seat> {
         let needs = self.strategies.needs(routing);
         let mut seats = hops
@@ -1752,10 +1812,10 @@ impl Router {
                 if needs.window {
                     seat.window = hop.context_window.filter(|window| *window > 0).unwrap_or(0);
                 }
-                let model = hop.wire_model.as_deref().unwrap_or(&resolved.bare);
+                let model = hop_model(hop, &resolved.bare, selection);
                 seat.resting = self.cooldowns.as_ref().is_some_and(|cooldowns| {
                     cooldowns
-                        .cooling_for_model(hop.member.id(), model)
+                        .cooling_for_model(hop.member.id(), &model)
                         .is_some()
                 });
                 seat
@@ -1766,11 +1826,7 @@ impl Router {
         {
             let models = hops
                 .iter()
-                .map(|hop| {
-                    hop.wire_model
-                        .clone()
-                        .unwrap_or_else(|| resolved.bare.clone())
-                })
+                .map(|hop| hop_model(hop, &resolved.bare, selection))
                 .collect::<Vec<_>>();
             measurements.weigh(&mut seats, &models, pool, needs, SystemTime::now());
         }
@@ -1876,7 +1932,13 @@ impl Router {
         {
             let found = self.matching(|route_model, hop| {
                 hop.member.route_id() == provider_id
-                    && (route_model == model || hop.wire_model.as_deref() == Some(model))
+                    && (route_model == model
+                        || hop.wire_model.as_deref() == Some(model)
+                        || (hop.member.stands_in_for().is_none()
+                            && hop
+                                .member
+                                .effort_models()
+                                .is_some_and(|family| family.contains(model))))
             });
             if found.len() == 1
                 && let Some((route_model, primary, stays, _)) = found.first()
@@ -1905,12 +1967,15 @@ impl Router {
             resolved.patience = patience;
             return Ok(resolved);
         }
-        let found = self.matching(|_, hop| hop.wire_model.as_deref() == Some(asked));
-        let bare = found
-            .first()
-            .and_then(|(_, hop, ..)| hop.wire_model.clone())
-            .unwrap_or_else(|| asked.to_owned());
-        self.one(asked, &bare, found)
+        let found = self.matching(|_, hop| {
+            hop.wire_model.as_deref() == Some(asked)
+                || (hop.member.stands_in_for().is_none()
+                    && hop
+                        .member
+                        .effort_models()
+                        .is_some_and(|family| family.contains(asked)))
+        });
+        self.one(asked, asked, found)
     }
 
     fn matching(
@@ -2160,8 +2225,7 @@ fn hand_on_eligible(
     }
 }
 
-fn hand_on_seat(cooldowns: &Cooldowns, hop: &Hop, bare: &str) -> HandOnSeat {
-    let model = hop.wire_model.as_deref().unwrap_or(bare);
+fn hand_on_seat(cooldowns: &Cooldowns, hop: &Hop, model: &str) -> HandOnSeat {
     match cooldowns.cooling_for_model(hop.member.id(), model) {
         Some(cooling) => match cooling.hand_on() {
             Some(HandOnRest::Rate) => HandOnSeat::Rate,
@@ -2176,7 +2240,7 @@ fn hand_on_seat(cooldowns: &Cooldowns, hop: &Hop, bare: &str) -> HandOnSeat {
 fn hand_on_candidate(
     cooldowns: &Cooldowns,
     hop: &Hop,
-    bare: &str,
+    model: &str,
     failure: HandOnFailure,
     tokens: u64,
     apply_window: bool,
@@ -2187,7 +2251,7 @@ fn hand_on_candidate(
             .context_window
             .is_some_and(|window| window > 0 && tokens >= window);
     hand_on_eligible(
-        hand_on_seat(cooldowns, hop, bare),
+        hand_on_seat(cooldowns, hop, model),
         failure,
         window_blocks,
         honor_guard && cooldowns.hand_on_asked_recently(hop.member.id()),
@@ -2362,7 +2426,6 @@ impl DispatchState {
             return true;
         }
         for hop in self.resolved.hops.iter().skip(index + 1) {
-            let upstream_model = hop.wire_model.as_deref().unwrap_or(&self.resolved.bare);
             let plugin_id = hop.member.plugin_id();
             if self.refused_providers.contains(hop.member.route_id())
                 || self.api_refused_for(hop)
@@ -2376,10 +2439,11 @@ impl DispatchState {
             if self.region_closed_for(hop) {
                 continue;
             }
+            let sent = self.sent_for(hop);
             if self
                 .outgrown
                 .iter()
-                .any(|(route, model)| route == hop.member.route_id() && *model == upstream_model)
+                .any(|(route, model)| route == hop.member.route_id() && *model == sent)
             {
                 continue;
             }
@@ -2404,15 +2468,20 @@ impl DispatchState {
         protocol_alternate_idle(&self.resolved.hops, &self.api_fitness, hop)
     }
 
+    /// The id [`apply_wire`] will send for this request's effort.
+    fn sent_for(&self, hop: &Hop) -> String {
+        sent_model(hop, &self.resolved.bare, self.request.params.effort)
+    }
+
     fn region_closed_for(&self, hop: &Hop) -> bool {
-        let model = hop.wire_model.as_deref().unwrap_or(&self.resolved.bare);
-        let key = region_key(hop.member.scope_provider(), model);
+        let model = self.sent_for(hop);
+        let key = region_key(hop.member.scope_provider(), &model);
         self.region_closed.contains_key(&key)
     }
 
     fn region_closed_status(&self, hop: &Hop) -> Option<u16> {
-        let model = hop.wire_model.as_deref().unwrap_or(&self.resolved.bare);
-        let key = region_key(hop.member.scope_provider(), model);
+        let model = self.sent_for(hop);
+        let key = region_key(hop.member.scope_provider(), &model);
         self.region_closed.get(&key).copied()
     }
 
@@ -2471,11 +2540,12 @@ impl DispatchState {
         let bare = self.resolved.bare.clone();
         let tokens = self.input_tokens;
         let apply_window = self.resolved.routing == "fit";
+        let effort = self.request.params.effort;
         let position = self.hand_on.iter().position(|hop| {
+            let model = sent_model(hop, &bare, effort);
             self.askable_left_out(hop)
-                && hand_on_candidate(&cooldowns, hop, &bare, failure, tokens, apply_window, true)
-                && cooldowns
-                    .claim_hand_on(hop.member.id(), hop.wire_model.as_deref().unwrap_or(&bare))
+                && hand_on_candidate(&cooldowns, hop, &model, failure, tokens, apply_window, true)
+                && cooldowns.claim_hand_on(hop.member.id(), &model)
         })?;
         let hop = self.hand_on.remove(position);
         Some(self.push_primary_with_alternates(hop))
@@ -2921,11 +2991,7 @@ impl DispatchState {
                                     self.cooldowns.as_ref().is_some_and(|cooldowns| {
                                         self.resolved.hops.iter().any(|hop| {
                                             hop.member.id().to_string() == candidate.member
-                                                && hop
-                                                    .wire_model
-                                                    .as_deref()
-                                                    .unwrap_or(&self.resolved.bare)
-                                                    == candidate.model
+                                                && self.sent_for(hop) == candidate.model
                                                 && cooldowns
                                                     .cooling_for_model(
                                                         hop.member.id(),
@@ -2993,8 +3059,7 @@ impl DispatchState {
                             let has_mate = self.resolved.hops.iter().enumerate().any(|(j, h)| {
                                 j > index
                                     && h.member.scope_provider() == hop.member.scope_provider()
-                                    && h.wire_model.as_deref().unwrap_or(&self.resolved.bare)
-                                        == upstream_model
+                                    && self.sent_for(h) == upstream_model
                             });
                             if !has_mate {
                                 self.region_reask.push(index);
@@ -3131,12 +3196,7 @@ impl DispatchState {
             .copied()
             .filter(|candidate| *candidate >= index)
         {
-            let model = {
-                let hop = &self.resolved.hops[candidate];
-                hop.wire_model
-                    .clone()
-                    .unwrap_or_else(|| self.resolved.bare.clone())
-            };
+            let model = self.sent_for(&self.resolved.hops[candidate]);
             if self.index_left_out(candidate, &model) {
                 continue;
             }
@@ -3198,17 +3258,14 @@ impl DispatchState {
                 hop.member.plugin_id().to_owned(),
                 hop.context_window,
                 hop.member.scope_provider().to_owned(),
-                hop.wire_model.clone(),
+                model.to_owned(),
             )
         };
-        let region_model = wire.as_deref().unwrap_or(&self.resolved.bare);
         self.refused_providers.contains(&route)
             || self.api_refused_for(&self.resolved.hops[index])
             || self.protocol_alternate_idle(&self.resolved.hops[index])
             || (!plugin.is_empty() && self.skipped_plugins.contains(&plugin))
-            || self
-                .region_closed
-                .contains_key(&region_key(&scope, region_model))
+            || self.region_closed.contains_key(&region_key(&scope, &wire))
             || self
                 .outgrown
                 .iter()
@@ -3261,10 +3318,12 @@ impl DispatchState {
             .filter(|hop| {
                 self.askable_left_out(hop)
                     && self.cooldowns.as_ref().is_none_or(|cooldowns| {
+                        let model =
+                            sent_model(hop, &self.resolved.bare, self.request.params.effort);
                         hand_on_candidate(
                             cooldowns,
                             hop,
-                            &self.resolved.bare,
+                            &model,
                             HandOnFailure::LastResort,
                             self.input_tokens,
                             false,
@@ -3316,11 +3375,12 @@ impl DispatchState {
             return false;
         };
         self.hand_on.iter().any(|hop| {
+            let model = sent_model(hop, &self.resolved.bare, self.request.params.effort);
             self.askable_left_out(hop)
                 && hand_on_candidate(
                     cooldowns,
                     hop,
-                    &self.resolved.bare,
+                    &model,
                     failure,
                     self.input_tokens,
                     self.resolved.routing == "fit",
@@ -3337,11 +3397,12 @@ impl DispatchState {
             return false;
         };
         self.hand_on.iter().any(|hop| {
+            let model = sent_model(hop, &self.resolved.bare, self.request.params.effort);
             self.askable_left_out(hop)
                 && hand_on_candidate(
                     cooldowns,
                     hop,
-                    &self.resolved.bare,
+                    &model,
                     failure,
                     self.input_tokens,
                     self.resolved.routing == "fit",
@@ -3379,7 +3440,7 @@ impl DispatchState {
     }
 
     fn member_skipped_for(&self, hop: &Hop, ignore_api_refusal: bool) -> bool {
-        let upstream_model = hop.wire_model.as_deref().unwrap_or(&self.resolved.bare);
+        let upstream_model = self.sent_for(hop);
         let plugin_id = hop.member.plugin_id();
         self.refused_providers.contains(hop.member.route_id())
             || (!ignore_api_refusal && self.api_refused_for(hop))
@@ -3389,7 +3450,7 @@ impl DispatchState {
             || self
                 .outgrown
                 .iter()
-                .any(|(route, model)| route == hop.member.route_id() && model == upstream_model)
+                .any(|(route, model)| route == hop.member.route_id() && model == &upstream_model)
             || self.needs_room.is_some_and(|tokens| {
                 hop.context_window
                     .is_some_and(|window| window > 0 && tokens >= window)
@@ -3580,15 +3641,19 @@ fn compact_carrier(hop: &Hop, model: &str) -> bool {
     }
 }
 
-fn cooling_labels(cooldowns: Option<&Arc<Cooldowns>>, resolved: &Resolved) -> Vec<Option<String>> {
+fn cooling_labels(
+    cooldowns: Option<&Arc<Cooldowns>>,
+    resolved: &Resolved,
+    effort: Option<Effort>,
+) -> Vec<Option<String>> {
     resolved
         .hops
         .iter()
         .map(|hop| {
-            let model = hop.wire_model.as_deref().unwrap_or(&resolved.bare);
+            let model = sent_model(hop, &resolved.bare, effort);
             cooldowns.and_then(|cooldowns| {
                 cooldowns
-                    .cooling_for_model(hop.member.id(), model)
+                    .cooling_for_model(hop.member.id(), &model)
                     .map(|state| state.cause().as_str().to_owned())
             })
         })
@@ -3609,12 +3674,17 @@ fn vendor_timed_quota_rest(cooldowns: &Cooldowns, hop: &Hop, model: &str) -> Opt
         })
 }
 
-fn order_hops(hops: Vec<Hop>, cooldowns: &Cooldowns, bare: &str) -> (Vec<Hop>, Vec<Hop>) {
+fn order_hops(
+    hops: Vec<Hop>,
+    cooldowns: &Cooldowns,
+    bare: &str,
+    selection: Option<Option<Effort>>,
+) -> (Vec<Hop>, Vec<Hop>) {
     let mut ready = Vec::with_capacity(hops.len());
     let mut cooling = Vec::new();
     for hop in hops {
-        let model = hop.wire_model.as_deref().unwrap_or(bare);
-        if let Some(state) = cooldowns.cooling_for_model(hop.member.id(), model) {
+        let model = hop_model(&hop, bare, selection);
+        if let Some(state) = cooldowns.cooling_for_model(hop.member.id(), &model) {
             cooling.push((hop, state.until()));
         } else {
             ready.push(hop);
@@ -3648,8 +3718,33 @@ fn order_hops(hops: Vec<Hop>, cooldowns: &Cooldowns, bare: &str) -> (Vec<Hop>, V
     (ready, left.into_iter().map(|(hop, _)| hop).collect())
 }
 
+/// The model id a dispatch or count sends for this hop.
+///
+/// A missing family keeps the hop wire id. A concrete member id is kept.
+/// The family id becomes the member for `effort`, or the family's default
+/// when no effort was requested. Failures are stored under this same id.
+fn sent_model(hop: &Hop, bare: &str, effort: Option<Effort>) -> String {
+    let mut model = hop.wire_model.clone().unwrap_or_else(|| bare.to_owned());
+    let Some(family) = hop.member.effort_models() else {
+        return model;
+    };
+    if bare != family.family() && family.contains(bare) {
+        model = bare.to_owned();
+    }
+    family.at(&model, effort)
+}
+
+/// `Some` selects [`sent_model`]. `None` keeps the hop wire id, which is what
+/// a forwarded call sends.
+fn hop_model(hop: &Hop, bare: &str, selection: Option<Option<Effort>>) -> String {
+    match selection {
+        Some(effort) => sent_model(hop, bare, effort),
+        None => hop.wire_model.clone().unwrap_or_else(|| bare.to_owned()),
+    }
+}
+
 fn apply_wire(request: &mut Request, hop: &Hop, bare: &str, served: &[hofund_codec::ServedModel]) {
-    request.model = hop.wire_model.clone().unwrap_or_else(|| bare.to_owned());
+    request.model = sent_model(hop, bare, request.params.effort);
     if request.params.max_tokens.is_none() {
         request.params.max_tokens = hop.max_output_tokens;
     }

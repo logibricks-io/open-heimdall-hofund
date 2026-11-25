@@ -100,7 +100,13 @@ impl Measurements for DaemonMeasurements {
                 seat.tps = speed.tps;
             }
             let listed = if (needs.free || needs.price) && !seat.account {
-                crate::listed_model(self.models.cached(&seat.key).models, &wire_models[index])
+                crate::listed_model(
+                    self.models.source_cached(&seat.key).models,
+                    &wire_models[index],
+                )
+                .or_else(|| {
+                    crate::listed_model(self.models.cached(&seat.key).models, &wire_models[index])
+                })
             } else {
                 None
             };
