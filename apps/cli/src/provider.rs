@@ -253,29 +253,7 @@ pub(crate) async fn test(config: &Path, id: &str, models: &[String]) -> Result<S
     let client = client(config).await?;
     let request = ProviderTestRequest::new((!models.is_empty()).then(|| models.to_vec()));
     let response = client.test_provider(id, request).await.map_err(failure)?;
-    let mut out = String::new();
-    let mut failed = 0_usize;
-    for result in &response.results {
-        if result.ok {
-            out.push_str(&format!(
-                "ok\t{}\t{} ms\n",
-                result.model,
-                result.latency_ms.unwrap_or_default()
-            ));
-        } else {
-            failed += 1;
-            let message = result
-                .error
-                .as_ref()
-                .map_or("probe failed", |error| error.message.as_str());
-            let detail = match result.status {
-                Some(status) => format!("{status} {message}"),
-                None => message.to_owned(),
-            };
-            out.push_str(&format!("fail\t{}\t{detail}\n", result.model));
-        }
-    }
-    let out = out.trim_end_matches('\n').to_owned();
+    let (out, failed) = test_lines(&response);
     if response.results.is_empty() {
         return Err(format!("{id}: no model was probed"));
     }
@@ -287,6 +265,39 @@ pub(crate) async fn test(config: &Path, id: &str, models: &[String]) -> Result<S
         "{id}: {failed} of {} probes failed",
         response.results.len()
     ))
+}
+
+fn test_lines(
+    response: &hofund_control_client::hofund_control_proto::ProviderTestResponse,
+) -> (String, usize) {
+    let mut out = String::new();
+    let mut failed = 0_usize;
+    for result in &response.results {
+        if result.ok {
+            out.push_str(&format!(
+                "ok\t{}\t{} ms\n",
+                result.model,
+                result.latency_ms.unwrap_or_default()
+            ));
+            continue;
+        }
+        let message = result
+            .error
+            .as_ref()
+            .map_or("probe failed", |error| error.message.as_str());
+        let detail = match result.status {
+            Some(status) => format!("{status} {message}"),
+            None => message.to_owned(),
+        };
+        let label = if result.unserved {
+            "not served"
+        } else {
+            failed += 1;
+            "fail"
+        };
+        out.push_str(&format!("{label}\t{}\t{detail}\n", result.model));
+    }
+    (out.trim_end_matches('\n').to_owned(), failed)
 }
 
 /// `hofund provider refresh <id>` (also `fetch`, and `models <id>` with no
@@ -721,6 +732,36 @@ mod tests {
         );
         assert!(rendered.contains("rate_limit until 1234"), "{rendered}");
         assert!(!rendered.contains("secret"), "{rendered}");
+    }
+
+    #[test]
+    fn d250_unserved_api_is_not_a_failed_provider_test() {
+        let mut response =
+            hofund_control_client::hofund_control_proto::ProviderTestResponse::default();
+        let mut ok = hofund_control_client::hofund_control_proto::ProviderTestResult::default();
+        ok.model = "chat-model".to_owned();
+        ok.ok = true;
+        ok.latency_ms = Some(12);
+        response.results.push(ok);
+        let mut unserved =
+            hofund_control_client::hofund_control_proto::ProviderTestResult::default();
+        unserved.model = "messages-model".to_owned();
+        unserved.unserved = true;
+        unserved.status = Some(403);
+        unserved.error = Some(
+            hofund_control_client::hofund_control_proto::ControlError::new(
+                hofund_control_client::hofund_control_proto::ControlErrorKind::Upstream,
+                "This group does not allow /v1/messages dispatch",
+                "request-1",
+            ),
+        );
+        response.results.push(unserved);
+        let (lines, failed) = super::test_lines(&response);
+        assert_eq!(failed, 0);
+        assert_eq!(
+            lines,
+            "ok\tchat-model\t12 ms\nnot served\tmessages-model\t403 This group does not allow /v1/messages dispatch"
+        );
     }
 
     #[test]

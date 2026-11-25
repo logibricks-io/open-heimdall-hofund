@@ -756,6 +756,7 @@ ProviderTestResult.latency_ms
 ProviderTestResult.model
 ProviderTestResult.ok
 ProviderTestResult.status
+ProviderTestResult.unserved
 ProviderWriteResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
 ProviderWriteResponse.disk_revision
 ProviderWriteResponse.pending_restart

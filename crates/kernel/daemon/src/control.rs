@@ -1995,7 +1995,7 @@ fn daemon_failure(error: DaemonError) -> ControlFailure {
     }
 }
 
-fn test_result(timed: Timed) -> ProviderTestResult {
+pub(crate) fn test_result(timed: Timed) -> ProviderTestResult {
     let mut result = ProviderTestResult::default();
     result.model = timed.model;
     result.latency_ms = Some(u64::try_from(timed.latency.as_millis()).unwrap_or(u64::MAX));
@@ -2007,6 +2007,8 @@ fn test_result(timed: Timed) -> ProviderTestResult {
         Err(error) => {
             if let ErrorKind::Upstream { status, .. } = error.kind() {
                 result.status = status;
+                result.unserved = status
+                    .is_some_and(|status| hofund_provider::api_refused(status, &error.message));
             }
             result.error = Some(daemon_failure(error).error);
         }
