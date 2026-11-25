@@ -47,8 +47,9 @@
 //!   until its first content event so an in-band failure is still an error.
 //! - [`send`] stops before the body: [`Sent::headers`] reads the reply
 //!   headers, [`Sent::watch`] shows the stream's `data:` lines within a byte
-//!   limit to a callback while passing the bytes through unchanged, and
-//!   [`Sent::fold`] assembles a stream into one response for a client that
+//!   limit to a callback while passing the bytes through unchanged,
+//!   [`Target::observe`] sees each chunk of a 200 body and then its end,
+//!   and [`Sent::fold`] assembles a stream into one response for a client that
 //!   asked for one when the upstream only streams.
 
 use std::collections::{HashSet, VecDeque};
@@ -109,6 +110,13 @@ pub type StatusClassify =
 /// look; the rest of the stream is not shown to it.
 pub type Watch = Arc<dyn Fn(&[u8]) -> bool + Send + Sync>;
 
+/// A look at each chunk of a 200 body, set by [`Target::observe`].
+///
+/// `Some` is one chunk as it is read. `None` is the end of the body, including
+/// a unary body. The bytes pass on unchanged. A stream that is not read to its
+/// end does not get the final `None`.
+pub type Observe = Arc<dyn Fn(Option<&[u8]>) + Send + Sync>;
+
 /// Where a protocol's calls go under the base URL.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Path {
@@ -148,6 +156,7 @@ pub struct Target {
     allocation_quota_rate: bool,
     chatgpt_codex_zstd: bool,
     request_body_gzip: bool,
+    observe: Option<Observe>,
 }
 
 impl Target {
@@ -173,6 +182,7 @@ impl Target {
             allocation_quota_rate: false,
             chatgpt_codex_zstd: false,
             request_body_gzip: false,
+            observe: None,
         }
     }
 
@@ -298,6 +308,15 @@ impl Target {
         self.classify = Some(classify);
         self
     }
+
+    /// Shows `observe` each chunk of a 200 body, then `None` at its end,
+    /// before [`Unwrap`] and [`Sent::watch`]. The bytes pass on unchanged.
+    /// Other statuses are not shown. [`execute`] honors this.
+    #[must_use]
+    pub fn observe(mut self, observe: Observe) -> Self {
+        self.observe = Some(observe);
+        self
+    }
 }
 
 impl fmt::Debug for Target {
@@ -322,6 +341,7 @@ impl fmt::Debug for Target {
             .field("allocation_quota_rate", &self.allocation_quota_rate)
             .field("chatgpt_codex_zstd", &self.chatgpt_codex_zstd)
             .field("request_body_gzip", &self.request_body_gzip)
+            .field("observe", &self.observe.is_some())
             .finish()
     }
 }
@@ -390,6 +410,7 @@ pub struct Sent {
     streaming: bool,
     unwrap: Option<Unwrap>,
     watch: Option<(usize, Watch)>,
+    observe: Option<Observe>,
     allocation_quota_rate: bool,
     /// Configured Messages base, so an in-band error can be host-scoped.
     messages_base: Option<String>,
@@ -405,6 +426,7 @@ impl fmt::Debug for Sent {
             .field("streaming", &self.streaming)
             .field("unwrap", &self.unwrap.is_some())
             .field("watch", &self.watch.as_ref().map(|(limit, _)| *limit))
+            .field("observe", &self.observe.is_some())
             .field("allocation_quota_rate", &self.allocation_quota_rate)
             .field("messages_base", &self.messages_base)
             .finish()
@@ -475,9 +497,12 @@ impl Sent {
         Ok(tag_codec(codec, Completion::Unary(Box::new(response))))
     }
 
-    /// The body with the watch and the unwrap applied, in that order.
+    /// The body with the observe, the watch, and the unwrap applied, in that order.
     fn into_body(self) -> BodyStream {
         let mut body = self.response.into_body();
+        if let Some(observe) = self.observe {
+            body = observed(body, observe);
+        }
         if self.streaming
             && let Some((limit, watch)) = self.watch
         {
@@ -582,6 +607,47 @@ impl Watcher {
     }
 }
 
+/// `body` passed on unchanged while `observe` sees each chunk, then `None`.
+fn observed(body: BodyStream, observe: Observe) -> BodyStream {
+    BodyStream::unfold(ObserveState::new(body, observe), |mut state| async move {
+        if state.ended {
+            return None;
+        }
+        match state.body.next_chunk().await {
+            Some(Ok(chunk)) => {
+                (state.observe)(Some(&chunk));
+                let bytes = chunk.to_vec();
+                Some((Ok(bytes), state))
+            }
+            Some(Err(error)) => {
+                state.ended = true;
+                Some((Err(error), state))
+            }
+            None => {
+                state.ended = true;
+                (state.observe)(None);
+                None
+            }
+        }
+    })
+}
+
+struct ObserveState {
+    body: BodyStream,
+    observe: Observe,
+    ended: bool,
+}
+
+impl ObserveState {
+    fn new(body: BodyStream, observe: Observe) -> Self {
+        Self {
+            body,
+            observe,
+            ended: false,
+        }
+    }
+}
+
 /// Encodes and posts `request` as [`execute`] does and stops at the status.
 ///
 /// A caller that retries elsewhere on a refused call can tell a refusal (an
@@ -667,6 +733,11 @@ pub async fn send(
         )
         .await);
     }
+    let observe = if response.status() == http::StatusCode::OK {
+        target.observe.clone()
+    } else {
+        None
+    };
     Ok(Sent {
         response,
         codec,
@@ -674,6 +745,7 @@ pub async fn send(
         streaming,
         unwrap: target.unwrap.clone(),
         watch: None,
+        observe,
         allocation_quota_rate: target.allocation_quota_rate,
         messages_base: (target.protocol == ProtocolId::ANTHROPIC_MESSAGES)
             .then(|| target.base_url.clone()),
@@ -1216,7 +1288,8 @@ fn prepare_body(
 }
 
 /// `body` after `rewrite`, and the headers the rewrite adds. A body that is
-/// not a JSON object is left as it is.
+/// not a JSON object is left as it is. A rewrite that leaves the object
+/// unchanged leaves the encoded bytes unchanged.
 fn rewritten(rewrite: Option<&Rewrite>, body: Vec<u8>) -> (Vec<u8>, Vec<(String, String)>) {
     let Some(rewrite) = rewrite else {
         return (body, Vec::new());
@@ -1224,7 +1297,11 @@ fn rewritten(rewrite: Option<&Rewrite>, body: Vec<u8>) -> (Vec<u8>, Vec<(String,
     let Ok(serde_json::Value::Object(mut object)) = serde_json::from_slice(&body) else {
         return (body, Vec::new());
     };
+    let before = object.clone();
     let added = rewrite(&mut object);
+    if object == before {
+        return (body, added);
+    }
     match serde_json::to_vec(&object) {
         Ok(out) => (out, added),
         Err(_) => (body, Vec::new()),
@@ -1956,6 +2033,7 @@ pub async fn decode_upstream_response(
         streaming: true,
         unwrap: None,
         watch: None,
+        observe: None,
         allocation_quota_rate: false,
         messages_base: None,
     };
@@ -1973,16 +2051,44 @@ mod tests {
         BilledUsage, CredentialStyle, PluginErrorKind, ProtocolId, Request, StreamEvent,
     };
 
+    use std::sync::Arc;
+
     use super::{
-        AwsSigner, Events, Method, Path, Target, classify_count, consume_fields, converse_call,
-        encode_outbound, endpoint_unsupported, failure_of, host_header, message_from,
-        model_segment, omit_max_tokens, path_segment, rewritten, route, strip_billing_header,
-        url_for,
+        AwsSigner, Events, Method, Path, Rewrite, Target, classify_count, consume_fields,
+        converse_call, encode_outbound, endpoint_unsupported, failure_of, host_header,
+        message_from, model_segment, omit_max_tokens, path_segment, rewritten, route,
+        strip_billing_header, url_for,
     };
     use hofund_plugin_api::CountOutcome;
 
     const LINE: &str =
         "x-anthropic-billing-header: cc_version=2.1.197; cc_entrypoint=cli; cch=abc;";
+
+    #[test]
+    fn d262_unchanged_rewrite_keeps_encoded_bytes() {
+        let body = br#"{"z":1,"a":{"k":"v"}}"#.to_vec();
+        let rewrite: Rewrite = Arc::new(|object| {
+            let _ = object.get("a");
+            Vec::new()
+        });
+        let (out, added) = rewritten(Some(&rewrite), body.clone());
+        assert_eq!(added, Vec::<(String, String)>::new());
+        assert_eq!(out, body);
+    }
+
+    #[test]
+    fn d262_changed_rewrite_writes_the_edited_object() {
+        let body = br#"{"z":1}"#.to_vec();
+        let rewrite: Rewrite = Arc::new(|object| {
+            object.insert("a".to_owned(), serde_json::Value::from(2));
+            vec![("X-Test".to_owned(), "1".to_owned())]
+        });
+        let (out, added) = rewritten(Some(&rewrite), body);
+        assert_eq!(added, vec![("X-Test".to_owned(), "1".to_owned())]);
+        let value: serde_json::Value = serde_json::from_slice(&out).expect("json");
+        assert_eq!(value["a"], 2);
+        assert_eq!(value["z"], 1);
+    }
 
     fn messages_request(system: &str, user: &str) -> Request {
         let body = serde_json::json!({
@@ -2817,7 +2923,7 @@ mod tests {
         use std::sync::{Arc, Mutex};
 
         use bytes::Bytes;
-        use hofund_codec::OpenAiResponses;
+        use hofund_codec::{OpenAiChat, OpenAiResponses};
         use hofund_plugin_api::{BodyStream, Completion, ContentPart, PluginErrorKind};
 
         use super::super::Sent;
@@ -2853,6 +2959,7 @@ mod tests {
                 streaming: true,
                 unwrap: None,
                 watch: None,
+                observe: None,
                 allocation_quota_rate: false,
                 messages_base: None,
             }
@@ -2988,6 +3095,42 @@ mod tests {
                 assert_eq!(read(completion).await, STREAM.as_bytes());
                 assert_eq!(*seen.lock().expect("lock"), 2, "{size}");
             }
+        }
+
+        #[tokio::test]
+        async fn d262_observe_sees_each_chunk_then_the_end_without_changing_bytes() {
+            let raw = r#"{"id":"a","choices":[{"index":0,"message":{"role":"assistant","content":"hi"}}]}"#;
+            let (left, right) = raw.split_at(11);
+            let body = BodyStream::resume(
+                Bytes::from(left.to_owned()),
+                BodyStream::from_bytes(Bytes::from(right.to_owned())),
+            );
+            let response = http::Response::builder().body(body).expect("response");
+            let seen = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
+            let into = Arc::clone(&seen);
+            let completion = Sent {
+                response,
+                codec: &OpenAiChat,
+                cross_protocol: false,
+                streaming: false,
+                unwrap: None,
+                watch: None,
+                observe: Some(Arc::new(move |chunk| {
+                    into.lock()
+                        .expect("lock")
+                        .push(chunk.map(|bytes| String::from_utf8_lossy(bytes).into_owned()));
+                })),
+                allocation_quota_rate: false,
+                messages_base: None,
+            }
+            .complete()
+            .await
+            .expect("complete");
+            assert_eq!(read(completion).await, raw.as_bytes());
+            assert_eq!(
+                seen.lock().expect("lock").as_slice(),
+                [Some(left.to_owned()), Some(right.to_owned()), None]
+            );
         }
     }
 
