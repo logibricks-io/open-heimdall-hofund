@@ -771,11 +771,29 @@ impl Gateway {
     /// The returned server can move to another address with
     /// [`Running::relisten`].
     pub async fn bind(self, listen: SocketAddr) -> Result<Running, GatewayError> {
+        self.bind_with_listener(listen, None).await
+    }
+
+    /// Binds `listen`, or serves `prepared` when a test already holds that socket.
+    ///
+    /// A prepared socket whose port is not `listen`'s port is rejected, unless
+    /// `listen` uses port 0. Production callers use [`Self::bind`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GatewayError`] when the address cannot be bound or the
+    /// prepared socket does not match `listen`.
+    #[doc(hidden)]
+    pub async fn bind_with_listener(
+        self,
+        listen: SocketAddr,
+        prepared: Option<std::net::TcpListener>,
+    ) -> Result<Running, GatewayError> {
         let sockets = Arc::clone(&self.inner.sockets);
         let realtimes = Arc::clone(&self.inner.realtimes);
         let prune = self.inner.keys.clone().map(issue_keys::prune_task);
         let mut running =
-            serve_relistenable(self.into_router(), listen, sockets, realtimes).await?;
+            serve_relistenable(self.into_router(), listen, prepared, sockets, realtimes).await?;
         if let Some(task) = prune {
             running = running.with_task(task);
         }
@@ -787,12 +805,17 @@ impl Gateway {
 async fn serve_relistenable(
     router: axum::Router,
     listen: SocketAddr,
+    prepared: Option<std::net::TcpListener>,
     sockets: Arc<responses_ws::SocketRegistry>,
     realtimes: Arc<realtime::Registry>,
 ) -> Result<Running, GatewayError> {
-    let listener = TcpListener::bind(listen)
-        .await
-        .map_err(|source| GatewayError::Bind { listen, source })?;
+    let listener = match prepared {
+        Some(prepared) => relisten::adopt_std_listener(listen, prepared)
+            .map_err(|source| GatewayError::Bind { listen, source })?,
+        None => TcpListener::bind(listen)
+            .await
+            .map_err(|source| GatewayError::Bind { listen, source })?,
+    };
     let local_addr = listener
         .local_addr()
         .map_err(|source| GatewayError::Bind { listen, source })?;
@@ -879,6 +902,19 @@ impl Running {
             handle.set_hook(hook);
         }
         self
+    }
+
+    /// Keeps `listener` bound until a relisten asks for its address.
+    ///
+    /// The socket is installed in place of a fresh bind, so the port is never
+    /// released for another process to take. The server must be one that can
+    /// relisten.
+    #[doc(hidden)]
+    pub fn hold_for_relisten(&self, listener: std::net::TcpListener) {
+        self.relisten
+            .as_ref()
+            .expect("this server cannot relisten")
+            .hold_for_relisten(listener);
     }
 
     /// Attaches the channel on which the daemon reports a fatal error. A

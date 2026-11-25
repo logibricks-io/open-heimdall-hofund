@@ -1784,13 +1784,24 @@ fn offline_provider_set_id_renames_one_shot() {
 
 #[test]
 fn offline_provider_set_id_with_daemon() {
-    let scratch = Scratch::new(&format!("127.0.0.1:{}", free_port()), ROUTED);
+    // The daemon binds port 0 itself. Probing a port and dropping it first
+    // races with anything else that binds loopback. Status reads the bound
+    // address from the running daemon; healthcheck would dial the configured
+    // port 0 and never connect.
+    let scratch = Scratch::new("127.0.0.1:0", ROUTED);
     let mut daemon_command = scratch.command(hofundd(), &[]);
     daemon_command.stdout(Stdio::null()).stderr(Stdio::null());
     let mut daemon = Daemon(Some(spawn(&mut daemon_command)));
     let started = Instant::now();
-    while scratch.hofund_with(hofund(), &["healthcheck"]).code != Some(0) {
-        assert!(started.elapsed() < DEADLINE, "daemon never answered");
+    loop {
+        let out = scratch.hofund(&["status"]);
+        if out.code == Some(0) && out.stdout.starts_with("daemon running") {
+            break;
+        }
+        assert!(
+            started.elapsed() < DEADLINE,
+            "daemon never answered: {out:#?}"
+        );
         std::thread::sleep(Duration::from_millis(100));
     }
     let out = scratch.hofund(&["provider", "set", "chat", "max_output_tokens=9"]);
