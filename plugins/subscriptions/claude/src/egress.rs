@@ -539,14 +539,63 @@ fn redact_embedded_urls(text: &str) -> String {
             .unwrap_or(0);
         out.push_str(&rest[..scheme_start]);
         let tail = &rest[scheme_start..];
-        let end = tail
-            .find(|ch: char| ch.is_whitespace())
-            .unwrap_or(tail.len());
+        let end = url_span_end(tail);
         out.push_str(&redact_url(&tail[..end]));
         rest = &tail[end..];
     }
     out.push_str(rest);
     out
+}
+
+/// End of one proxy URL inside an error string.
+///
+/// A space inside userinfo ends the first token before `@host`. When that
+/// token is not a numeric `host:port`, the following tokens through the one
+/// that contains `@` are part of the same URL.
+fn url_span_end(tail: &str) -> usize {
+    let first_end = tail
+        .find(|ch: char| ch.is_whitespace())
+        .unwrap_or(tail.len());
+    let token = &tail[..first_end];
+    if token.contains('@') || !truncated_userinfo(token) {
+        return first_end;
+    }
+    let mut cursor = first_end;
+    for _ in 0..8 {
+        let rest = &tail[cursor..];
+        let Some(body_off) = rest.find(|ch: char| !ch.is_whitespace()) else {
+            break;
+        };
+        let body = &rest[body_off..];
+        let token_end = body
+            .find(|ch: char| ch.is_whitespace())
+            .unwrap_or(body.len());
+        let next = &body[..token_end];
+        if next.contains("://") {
+            break;
+        }
+        let absolute = cursor + body_off + token_end;
+        if next.contains('@') {
+            return absolute;
+        }
+        cursor = absolute;
+    }
+    first_end
+}
+
+/// `scheme://user:secret` with no `@` and a non-numeric tail. A `host:port`
+/// has a numeric port and is left as one token.
+fn truncated_userinfo(token: &str) -> bool {
+    let Some((_, rest)) = token.split_once("://") else {
+        return false;
+    };
+    if rest.is_empty() || rest.contains('@') {
+        return false;
+    }
+    let Some((_, after_colon)) = rest.rsplit_once(':') else {
+        return false;
+    };
+    !after_colon.is_empty() && !after_colon.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn age(now: SystemTime, earlier: SystemTime) -> Duration {
@@ -1202,6 +1251,26 @@ mod tests {
         let broken = format!("not a url {password}");
         assert!(!redact_url(&broken).contains(password));
         assert!(!redact_error(&broken, &broken).contains("d245-fake"));
+    }
+
+    #[test]
+    fn d245_spaced_userinfo_differs_from_the_stored_choice() {
+        let tail = "d245-fake-tail";
+        let choice = format!("socks5://alice:prefix {tail}@10.0.0.1:1080");
+        let observed = format!("connect to http://alice:prefix {tail}@10.0.0.1:1080 failed");
+        let out = redact_error(&observed, &choice);
+        assert!(
+            !out.contains(tail),
+            "redact_error left a userinfo tail from a url that is not the stored choice"
+        );
+        assert!(
+            !out.contains("prefix"),
+            "redact_error left userinfo from a url that is not the stored choice"
+        );
+        assert!(
+            out.contains("10.0.0.1"),
+            "the host of a split userinfo url stays visible"
+        );
     }
 
     #[test]
