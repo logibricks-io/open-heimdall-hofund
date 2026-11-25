@@ -32,7 +32,10 @@ pub(crate) const USAGE_ARGS: [&str; 12] = [
 ];
 
 /// How long `/usage` gets to finish.
-pub(crate) const USAGE_WAIT: Duration = Duration::from_secs(30);
+///
+/// The read has this deadline of its own. A refresh or other caller with a
+/// shorter budget does not cut it; dropping that caller still drops the read.
+pub(crate) const USAGE_WAIT: Duration = Duration::from_secs(45);
 
 /// Setup-token runs pass the token in this variable (value is never logged).
 pub(crate) const OAUTH_TOKEN_VAR: &str = "CLAUDE_CODE_OAUTH_TOKEN";
@@ -53,9 +56,35 @@ pub(crate) fn configured_dir() -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
 }
 
+/// One agent home for the in-use check and the `projects/` scan.
+///
+/// `CLAUDE_CONFIG_DIR` wins when it is set. Otherwise the home is
+/// `~/.claude` under `HOME`, or under `USERPROFILE` when `HOME` is empty.
+pub(crate) fn agent_home() -> Option<std::path::PathBuf> {
+    if let Some(dir) = configured_dir() {
+        return Some(dir);
+    }
+    default_agent_home()
+}
+
+#[cfg(test)]
+fn default_agent_home() -> Option<std::path::PathBuf> {
+    TEST_DEFAULT_HOME.with(|slot| slot.borrow().clone())
+}
+
+#[cfg(not(test))]
+fn default_agent_home() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .or_else(|| std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()))?;
+    Some(std::path::PathBuf::from(home).join(".claude"))
+}
+
 #[cfg(test)]
 thread_local! {
     static TEST_CONFIGURED_DIR: std::cell::RefCell<Option<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+    static TEST_DEFAULT_HOME: std::cell::RefCell<Option<std::path::PathBuf>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -63,6 +92,15 @@ thread_local! {
 #[cfg(test)]
 pub(crate) fn test_configured_dir(path: Option<std::path::PathBuf>) {
     TEST_CONFIGURED_DIR.with(|slot| *slot.borrow_mut() = path);
+}
+
+/// Injects the default agent home for this test thread.
+///
+/// `None` makes the default lookup miss. Tests never read `HOME` or
+/// `USERPROFILE`, so they cannot touch a real `~/.claude`.
+#[cfg(test)]
+pub(crate) fn test_default_home(path: Option<std::path::PathBuf>) {
+    TEST_DEFAULT_HOME.with(|slot| *slot.borrow_mut() = path);
 }
 
 /// How much of a printed line an error quotes.
@@ -237,6 +275,11 @@ mod tests {
                 "--no-session-persistence",
             ]
         );
+    }
+
+    #[test]
+    fn d254_usage_wait_is_forty_five_seconds() {
+        assert_eq!(super::USAGE_WAIT, std::time::Duration::from_secs(45));
     }
 
     #[test]

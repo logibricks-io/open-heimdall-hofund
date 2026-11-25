@@ -106,6 +106,7 @@ pub struct QuotaWindow {
     limit: Option<u64>,
     resets_at: Option<SystemTime>,
     blocking: bool,
+    trial_credits: bool,
     scope_model: Option<String>,
     models: Vec<String>,
     excluded_models: Vec<String>,
@@ -116,6 +117,8 @@ pub struct QuotaWindow {
     runs_out_at: Option<SystemTime>,
     runs_out: Option<f64>,
     window_span: Option<Duration>,
+    /// The vendor refused further use of this window until it resets.
+    held: bool,
 }
 
 /// Account-level labels and windows from one quota poll.
@@ -198,6 +201,7 @@ impl QuotaWindow {
             limit,
             resets_at,
             blocking: true,
+            trial_credits: false,
             scope_model: None,
             models: Vec::new(),
             excluded_models: Vec::new(),
@@ -208,7 +212,16 @@ impl QuotaWindow {
             runs_out_at: None,
             runs_out: None,
             window_span: None,
+            held: false,
         })
+    }
+
+    /// The vendor refused further use until reset, so a sign-in switch must
+    /// not choose this account while the window stands.
+    #[must_use]
+    pub const fn with_held(mut self, held: bool) -> Self {
+        self.held = held;
+        self
     }
 
     /// Whether an exhausted window stops routing to the account. The default is `true`.
@@ -218,6 +231,13 @@ impl QuotaWindow {
     #[must_use]
     pub const fn with_blocking(mut self, blocking: bool) -> Self {
         self.blocking = blocking;
+        self
+    }
+
+    /// Marks a remaining trial or bonus credit window, as distinct from bought credit.
+    #[must_use]
+    pub const fn with_trial_credits(mut self, trial_credits: bool) -> Self {
+        self.trial_credits = trial_credits;
         self
     }
 
@@ -313,6 +333,18 @@ impl QuotaWindow {
     #[must_use]
     pub const fn blocking(&self) -> bool {
         self.blocking
+    }
+
+    /// Whether this is a remaining trial or bonus credit window.
+    #[must_use]
+    pub const fn trial_credits(&self) -> bool {
+        self.trial_credits
+    }
+
+    /// Whether the vendor refused further use until this window resets.
+    #[must_use]
+    pub const fn held(&self) -> bool {
+        self.held
     }
 
     /// The one model this window covers, when it is not account-wide.
@@ -3586,6 +3618,13 @@ mod tests {
         assert_eq!(window.models(), ["model-a"]);
         assert_eq!(window.excluded_models(), ["model-b"]);
         assert_eq!(window.display(), "$1.25");
+    }
+
+    #[test]
+    fn d255_trial_credit_window_mark_defaults_off() {
+        let window = QuotaWindow::new("credits", 1, Some(10), None).expect("window");
+        assert!(!window.trial_credits());
+        assert!(window.with_trial_credits(true).trial_credits());
     }
 
     #[test]
