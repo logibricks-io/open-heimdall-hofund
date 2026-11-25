@@ -313,6 +313,7 @@ fn router_with_windows(members: Vec<(Arc<dyn Member>, Option<u64>)>) -> Router {
             member,
             wire_model: None,
             max_output_tokens: None,
+            catalog_output_tokens: None,
             context_window,
             patience: Some(std::time::Duration::from_secs(60)),
             weight: 1,

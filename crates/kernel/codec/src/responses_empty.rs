@@ -1,10 +1,15 @@
 //! Detects empty Responses and Chat replies for failover.
 
-use hofund_ir::{ContentPart, Response, StreamEvent, Usage};
+use hofund_ir::{ContentPart, Response, StopReason, StreamEvent, Usage};
 use serde_json::{Map, Value};
 
 /// Router and gateway treat this as a shape failure that does not rest the member.
 pub const EMPTY_REPLY_MESSAGE: &str = "an empty reply (the model answered nothing; try again)";
+
+/// Why a length cut without text or a tool call is not a completed reply.
+pub const CUT_VOID_WORDS: &str = "cut at its length, the whole output spent on reasoning";
+
+const CUT_VOID_TOKENS: u64 = 1024;
 
 /// Formats an empty-reply failure with the output and reasoning tokens counted.
 #[must_use]
@@ -39,6 +44,8 @@ pub fn empty_reply_message(usage: &Usage) -> String {
 pub struct ChatStreamCheck {
     pending: Vec<u8>,
     reply: bool,
+    said: bool,
+    length: bool,
     terminal: bool,
     ended: bool,
     opaque: bool,
@@ -87,6 +94,12 @@ impl ChatStreamCheck {
         self.reply
     }
 
+    /// Whether the stream carried text, a refusal, or a tool call.
+    #[must_use]
+    pub const fn has_said(&self) -> bool {
+        self.said
+    }
+
     /// Whether `[DONE]` has arrived.
     #[must_use]
     pub const fn is_terminal(&self) -> bool {
@@ -103,6 +116,17 @@ impl ChatStreamCheck {
     #[must_use]
     pub fn empty_usage(&self) -> Option<Usage> {
         ((self.terminal || self.ended) && !self.reply && !self.opaque).then(|| self.usage.clone())
+    }
+
+    /// Usage for a terminal length cut without text or a tool call.
+    #[must_use]
+    pub fn cut_void_usage(&self, named_limit: Option<u64>) -> Option<Usage> {
+        ((self.terminal || self.ended)
+            && self.length
+            && !self.said
+            && !self.opaque
+            && cut_void_size(self.usage.output_tokens.unwrap_or(0), named_limit))
+        .then(|| self.usage.clone())
     }
 
     fn line(&mut self, line: &[u8]) {
@@ -138,14 +162,17 @@ impl ChatStreamCheck {
             self.opaque = true;
             return;
         }
+        self.object(object);
+    }
+
+    fn object(&mut self, object: &Map<String, Value>) {
         if let Some(choices) = object.get("choices").and_then(Value::as_array) {
             for choice in choices {
-                if choice
-                    .get("finish_reason")
-                    .and_then(Value::as_str)
-                    .is_some_and(|reason| !reason.is_empty())
+                if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str)
+                    && !reason.is_empty()
                 {
                     self.reply = true;
+                    self.length |= reason == "length";
                 }
                 for key in ["delta", "message"] {
                     if let Some(delta) = choice.get(key).and_then(Value::as_object) {
@@ -161,6 +188,7 @@ impl ChatStreamCheck {
 
     fn delta(&mut self, delta: &Map<String, Value>) {
         self.reply |= map_says(delta);
+        self.said |= map_said(delta);
     }
 
     fn note_usage(&mut self, usage: &Map<String, Value>) {
@@ -198,6 +226,43 @@ fn map_says(delta: &Map<String, Value>) -> bool {
                 .and_then(Value::as_array)
                 .is_some_and(|items| !items.is_empty())
         })
+}
+
+fn map_said(delta: &Map<String, Value>) -> bool {
+    ["content", "refusal", "function_call"]
+        .into_iter()
+        .any(|key| raw_says(delta.get(key)))
+        || delta
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .is_some_and(|items| !items.is_empty())
+}
+
+fn cut_void_size(spent: u64, named_limit: Option<u64>) -> bool {
+    spent > CUT_VOID_TOKENS || named_limit.is_none_or(|limit| limit == 0 || limit > CUT_VOID_TOKENS)
+}
+
+/// The failure for a length cut without text or a tool call.
+#[must_use]
+pub fn cut_void_message(named_limit: Option<u64>) -> String {
+    let mut message = format!("{EMPTY_REPLY_MESSAGE} — {CUT_VOID_WORDS}");
+    if let Some(limit) = named_limit.filter(|limit| *limit > 0) {
+        message.push_str(&format!(
+            " (the request's limit was {limit} tokens: raise max_tokens in the agent, or ask for less reasoning)"
+        ));
+    }
+    message
+}
+
+/// Whether a whole relayed Chat response is a void length cut.
+#[must_use]
+pub fn relayed_chat_response_cut_void(body: &[u8], named_limit: Option<u64>) -> Option<Usage> {
+    let value = serde_json::from_slice::<Value>(body).ok()?;
+    let object = value.as_object()?;
+    let mut check = ChatStreamCheck::default();
+    check.object(object);
+    check.ended = true;
+    check.cut_void_usage(named_limit)
 }
 
 /// Whether `pending` can still become a Chat SSE field line.
@@ -262,6 +327,60 @@ pub fn decoded_chat_stream_empty(events: &[StreamEvent]) -> Option<Usage> {
     (!reply).then_some(usage)
 }
 
+/// Whether decoded Chat events contain text, a refusal, or a tool call.
+#[must_use]
+pub fn decoded_chat_stream_said(events: &[StreamEvent]) -> bool {
+    events.iter().any(|event| match event {
+        StreamEvent::TextDelta(delta) => !delta.text.is_empty(),
+        StreamEvent::ToolArgumentsDelta(delta) => !delta.partial_json.is_empty(),
+        StreamEvent::ContentBlockStart(start) => {
+            matches!(start.block, hofund_ir::BlockStart::ToolCall { .. })
+        }
+        StreamEvent::MessageDelta(delta) => map_said(delta.extensions.as_map()),
+        _ => false,
+    })
+}
+
+/// Usage for a decoded Chat stream cut at its length without text or a call.
+#[must_use]
+pub fn decoded_chat_stream_cut_void(
+    events: &[StreamEvent],
+    named_limit: Option<u64>,
+) -> Option<Usage> {
+    let mut said = false;
+    let mut length = false;
+    let mut usage = Usage::default();
+    for event in events {
+        match event {
+            StreamEvent::TextDelta(delta) if !delta.text.is_empty() => said = true,
+            StreamEvent::ToolArgumentsDelta(delta) if !delta.partial_json.is_empty() => said = true,
+            StreamEvent::ContentBlockStart(start)
+                if matches!(start.block, hofund_ir::BlockStart::ToolCall { .. }) =>
+            {
+                said = true;
+            }
+            StreamEvent::MessageStart(start) => {
+                if let Some(patch) = &start.usage {
+                    usage.merge_from(patch);
+                }
+            }
+            StreamEvent::MessageDelta(delta) => {
+                said |= map_said(delta.extensions.as_map());
+                length |= delta
+                    .stop
+                    .as_ref()
+                    .is_some_and(|stop| stop.reason == StopReason::MaxTokens);
+                if let Some(patch) = &delta.usage {
+                    usage.merge_from(patch);
+                }
+            }
+            _ => {}
+        }
+    }
+    (length && !said && cut_void_size(usage.output_tokens.unwrap_or(0), named_limit))
+        .then_some(usage)
+}
+
 /// Whether a whole Chat response has no output and no finish reason.
 #[must_use]
 pub fn chat_response_empty(response: &Response) -> bool {
@@ -274,6 +393,23 @@ pub fn chat_response_empty(response: &Response) -> bool {
             ContentPart::Unknown(_) => false,
             _ => true,
         })
+}
+
+/// Usage for a whole Chat response cut at its length without text or a call.
+#[must_use]
+pub fn chat_response_cut_void(response: &Response, named_limit: Option<u64>) -> Option<Usage> {
+    let length = response
+        .stop
+        .as_ref()
+        .is_some_and(|stop| stop.reason == StopReason::MaxTokens);
+    let said = response.message.content.iter().any(|part| match part {
+        ContentPart::Text(text) => !text.text.is_empty(),
+        ContentPart::Thinking(_) => false,
+        _ => true,
+    });
+    let usage = response.usage.clone().unwrap_or_default();
+    (length && !said && cut_void_size(usage.output_tokens.unwrap_or(0), named_limit))
+        .then_some(usage)
 }
 
 /// Whether a `response.completed` event object names empty output and zero

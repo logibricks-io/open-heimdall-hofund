@@ -26,6 +26,7 @@ mod scope;
 mod snapshot;
 pub mod strategy;
 pub mod view;
+mod void_room;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -34,10 +35,11 @@ use std::time::{Duration, Instant, SystemTime};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use hofund_codec::responses_empty::{
-    ChatStreamCheck, EMPTY_REPLY_MESSAGE, chat_response_empty, decoded_chat_stream_empty,
-    decoded_stream_empty, empty_reply_message, relayed_sse_empty_without_content,
-    relayed_sse_event_boundary, relayed_sse_has_content, relayed_sse_has_opaque_content,
-    relayed_sse_lifecycle_only,
+    ChatStreamCheck, EMPTY_REPLY_MESSAGE, chat_response_cut_void, chat_response_empty,
+    cut_void_message, decoded_chat_stream_cut_void, decoded_chat_stream_empty,
+    decoded_chat_stream_said, decoded_stream_empty, empty_reply_message,
+    relayed_chat_response_cut_void, relayed_sse_empty_without_content, relayed_sse_event_boundary,
+    relayed_sse_has_content, relayed_sse_has_opaque_content, relayed_sse_lifecycle_only,
 };
 use hofund_control_proto::{RouteTry, SkipReason};
 use hofund_ir::{StreamEvent, estimate_input_tokens};
@@ -60,6 +62,7 @@ pub use view::{
     UNROUTED_PHASE_MASKING, UNROUTED_SHOW, UNROUTED_UNKNOWN, UnroutedHold, UnroutedTimeout,
     candidates_from_hops, fail_text, try_status, unrouted_timeout_status,
 };
+pub use void_room::VoidRooms;
 
 /// Returns `true` when a hop should be skipped (for example a disabled model
 /// or a key that has reached its spend cap).
@@ -189,6 +192,8 @@ pub struct Hop {
     pub wire_model: Option<String>,
     /// Output cap applied when the request omitted one.
     pub max_output_tokens: Option<u64>,
+    /// Published output limit for the model, when its catalog knows it.
+    pub catalog_output_tokens: Option<u64>,
     /// Input context window, when the route or catalog knows it.
     pub context_window: Option<u64>,
     /// Retry budget for a direct request to this member's provider. Absent
@@ -234,6 +239,7 @@ impl Hop {
             member,
             wire_model: None,
             max_output_tokens: None,
+            catalog_output_tokens: None,
             context_window: None,
             patience: Some(Duration::from_secs(60)),
             weight: 1,
@@ -333,6 +339,7 @@ pub struct Router {
     sealed: affinity::sealed::SealedState,
     overflow: OverflowMemory,
     api_fitness: ApiFitness,
+    void_rooms: VoidRooms,
     measurements: Option<Arc<dyn strategy::Measurements>>,
     member_skip: Option<MemberSkipFn>,
     spend_cap_exhausted: Option<SpendCapExhaustedFn>,
@@ -462,6 +469,7 @@ impl Router {
             sealed: affinity::sealed::SealedState::default(),
             overflow: OverflowMemory::in_memory(),
             api_fitness: ApiFitness::default(),
+            void_rooms: VoidRooms::default(),
             measurements: None,
             member_skip: None,
             spend_cap_exhausted: None,
@@ -509,6 +517,13 @@ impl Router {
     #[must_use]
     pub fn with_api_fitness(mut self, fitness: ApiFitness) -> Self {
         self.api_fitness = fitness;
+        self
+    }
+
+    /// Shares learned reply room with later snapshots of this route table.
+    #[must_use]
+    pub fn with_void_rooms(mut self, rooms: VoidRooms) -> Self {
+        self.void_rooms = rooms;
         self
     }
 
@@ -1058,6 +1073,7 @@ impl Router {
             affinity_state: self.affinity.clone(),
             overflow_memory: self.overflow.clone(),
             api_fitness: self.api_fitness.clone(),
+            void_rooms: self.void_rooms.clone(),
             cooldowns: self.cooldowns.clone(),
             trace,
             strategies: Arc::clone(&self.strategies),
@@ -2048,6 +2064,7 @@ struct DispatchState {
     affinity_state: affinity::AffinityState,
     overflow_memory: OverflowMemory,
     api_fitness: ApiFitness,
+    void_rooms: VoidRooms,
     cooldowns: Option<Arc<Cooldowns>>,
     trace: Option<RouteTraceHandle>,
     strategies: Arc<strategy::StrategyState>,
@@ -2621,6 +2638,7 @@ impl DispatchState {
             if self.protocol_alternate_idle(&hop) {
                 continue;
             }
+            let client_limit = self.request.params.max_tokens.filter(|limit| *limit > 0);
             let mut attempt = self.request.clone();
             apply_wire(&mut attempt, &hop, &self.resolved.bare, &self.served);
             self.tier_sent = hofund_codec::service_tier::extension_tier(&attempt.extensions);
@@ -2628,6 +2646,16 @@ impl DispatchState {
                 &hop.member.attempt().base_url,
             );
             let upstream_model = attempt.model.clone();
+            let mut void_roomed = false;
+            if client_limit.is_none()
+                && let Some(room) = self.void_rooms.get(hop.member.route_id(), &upstream_model)
+            {
+                let room = void_room::fitted_room(room, hop.context_window, self.input_tokens);
+                if room > 0 {
+                    attempt.params.max_tokens = Some(room);
+                    void_roomed = true;
+                }
+            }
             let plugin_id = hop.member.plugin_id();
             if self.refused_providers.contains(hop.member.route_id())
                 || self.api_refused_for(&hop)
@@ -2738,16 +2766,71 @@ impl DispatchState {
                 });
             }
             let mut empty_retried = false;
+            let mut void_retried = false;
+            let mut refusal_retried = false;
             let result = loop {
-                let (chat, result) = call_member(
+                let (chat, result, void) = call_member(
                     &hop,
                     index,
                     &self.inbound_protocol,
                     attempt.clone(),
                     self.hook.clone(),
+                    client_limit,
                 )
                 .await;
+                if void_roomed
+                    && !refusal_retried
+                    && let Err(error) = &result
+                    && output_field_refused(error)
+                {
+                    self.note_try(
+                        index,
+                        &hop,
+                        &upstream_model,
+                        true,
+                        try_status(error),
+                        fail_text(error),
+                    );
+                    self.void_rooms
+                        .forget(hop.member.route_id(), &upstream_model);
+                    attempt.params.max_tokens = None;
+                    void_roomed = false;
+                    refusal_retried = true;
+                    continue;
+                }
                 if chat
+                    && client_limit.is_none()
+                    && !void_roomed
+                    && !void_retried
+                    && let Some(spent) = void
+                    && let Some(room) = self.void_rooms.learn(
+                        hop.member.route_id(),
+                        &upstream_model,
+                        hop.catalog_output_tokens,
+                        spent,
+                    )
+                {
+                    if let Err(error) = &result {
+                        self.note_try(
+                            index,
+                            &hop,
+                            &upstream_model,
+                            true,
+                            try_status(error),
+                            fail_text(error),
+                        );
+                    }
+                    attempt.params.max_tokens = Some(void_room::fitted_room(
+                        room,
+                        hop.context_window,
+                        self.input_tokens,
+                    ));
+                    void_roomed = true;
+                    void_retried = true;
+                    continue;
+                }
+                if chat
+                    && void.is_none()
                     && !empty_retried
                     && let Err(error) = &result
                     && error.message().contains(EMPTY_REPLY_MESSAGE)
@@ -3545,7 +3628,34 @@ fn label_model(completion: Completion, model: String) -> Completion {
     }
 }
 
-async fn accept(completion: Completion, chat: bool) -> Result<Completion, PluginError> {
+struct AcceptFailure {
+    error: Box<PluginError>,
+    void: Option<u64>,
+}
+
+impl From<PluginError> for AcceptFailure {
+    fn from(error: PluginError) -> Self {
+        Self {
+            error: Box::new(error),
+            void: None,
+        }
+    }
+}
+
+fn cut_void_failure(usage: hofund_ir::Usage, named_limit: Option<u64>) -> AcceptFailure {
+    AcceptFailure {
+        error: Box::new(
+            PluginError::status_error(502, cut_void_message(named_limit)).without_cooldown(),
+        ),
+        void: Some(usage.output_tokens.unwrap_or(0)),
+    }
+}
+
+async fn accept(
+    completion: Completion,
+    chat: bool,
+    named_limit: Option<u64>,
+) -> Result<Completion, AcceptFailure> {
     let empty = || PluginError::status_error(502, EMPTY_REPLY_MESSAGE).without_cooldown();
     match completion {
         Completion::Stream(mut stream) => {
@@ -3556,29 +3666,38 @@ async fn accept(completion: Completion, chat: bool) -> Result<Completion, Plugin
                 let terminal = matches!(&event, StreamEvent::MessageStop(_));
                 held.push(event);
                 if chat {
+                    if let Some(usage) = decoded_chat_stream_cut_void(&held, named_limit) {
+                        return Err(cut_void_failure(usage, named_limit));
+                    }
                     if let Some(usage) = decoded_chat_stream_empty(&held) {
                         if terminal {
-                            return Err(empty_with_usage(usage));
+                            return Err(empty_with_usage(usage).into());
                         }
                         continue;
                     }
-                    let head = futures_util::stream::iter(held.into_iter().map(Ok));
-                    return Ok(Completion::Stream(Box::pin(head.chain(stream))));
+                    if decoded_chat_stream_said(&held) {
+                        let head = futures_util::stream::iter(held.into_iter().map(Ok));
+                        return Ok(Completion::Stream(Box::pin(head.chain(stream))));
+                    }
+                    continue;
                 }
                 if commits {
                     if decoded_stream_empty(&held) {
-                        return Err(empty());
+                        return Err(empty().into());
                     }
                     let head = futures_util::stream::iter(held.into_iter().map(Ok));
                     return Ok(Completion::Stream(Box::pin(head.chain(stream))));
                 }
             }
             if chat {
+                if let Some(usage) = decoded_chat_stream_cut_void(&held, named_limit) {
+                    return Err(cut_void_failure(usage, named_limit));
+                }
                 if let Some(usage) = decoded_chat_stream_empty(&held) {
-                    return Err(empty_with_usage(usage));
+                    return Err(empty_with_usage(usage).into());
                 }
             } else if decoded_stream_empty(&held) {
-                return Err(empty());
+                return Err(empty().into());
             }
             Ok(Completion::Stream(Box::pin(futures_util::stream::iter(
                 held.into_iter().map(Ok),
@@ -3607,12 +3726,20 @@ async fn accept(completion: Completion, chat: bool) -> Result<Completion, Plugin
                 match next {
                     None => {
                         if chat {
+                            if let Some(usage) =
+                                relayed_chat_response_cut_void(&buffered, named_limit)
+                            {
+                                return Err(cut_void_failure(usage, named_limit));
+                            }
                             chat_check.finish();
+                            if let Some(usage) = chat_check.cut_void_usage(named_limit) {
+                                return Err(cut_void_failure(usage, named_limit));
+                            }
                             if let Some(usage) = chat_check.empty_usage() {
-                                return Err(empty_with_usage(usage));
+                                return Err(empty_with_usage(usage).into());
                             }
                         } else if relayed_sse_empty_without_content(&buffered) {
-                            return Err(empty());
+                            return Err(empty().into());
                         }
                         // the upstream has ended: hand back only what was read,
                         // never the finished stream (it must not be polled again)
@@ -3622,7 +3749,7 @@ async fn accept(completion: Completion, chat: bool) -> Result<Completion, Plugin
                             Completion::Raw(BodyStream::from_bytes(Bytes::from(buffered)))
                         });
                     }
-                    Some(Err(error)) if buffered.is_empty() => return Err(error),
+                    Some(Err(error)) if buffered.is_empty() => return Err(error.into()),
                     Some(Err(error)) => {
                         // a stream severed after some bytes keeps them, then
                         // carries the error, as an unheld stream would
@@ -3635,19 +3762,28 @@ async fn accept(completion: Completion, chat: bool) -> Result<Completion, Plugin
                         buffered.extend_from_slice(&chunk);
                         if chat {
                             chat_check.observe(&chunk);
-                            if chat_check.is_terminal()
-                                && let Some(usage) = chat_check.empty_usage()
+                            if chat_check.is_opaque()
+                                && buffered.iter().find(|byte| !byte.is_ascii_whitespace())
+                                    == Some(&b'{')
                             {
-                                return Err(empty_with_usage(usage));
+                                continue;
                             }
-                            if chat_check.has_reply() || chat_check.is_opaque() {
+                            if chat_check.is_terminal() {
+                                if let Some(usage) = chat_check.cut_void_usage(named_limit) {
+                                    return Err(cut_void_failure(usage, named_limit));
+                                }
+                                if let Some(usage) = chat_check.empty_usage() {
+                                    return Err(empty_with_usage(usage).into());
+                                }
+                            }
+                            if chat_check.has_said() || chat_check.is_opaque() {
                                 let head = Bytes::from(std::mem::take(&mut buffered));
                                 return Ok(Completion::Raw(BodyStream::resume(head, body)));
                             }
                             continue;
                         }
                         if relayed_sse_empty_without_content(&buffered) {
-                            return Err(empty());
+                            return Err(empty().into());
                         }
                         if relayed_sse_has_content(&buffered)
                             || relayed_sse_has_opaque_content(&buffered)
@@ -3662,8 +3798,11 @@ async fn accept(completion: Completion, chat: bool) -> Result<Completion, Plugin
             }
         }
         Completion::Unary(response) => {
+            if chat && let Some(usage) = chat_response_cut_void(&response, named_limit) {
+                return Err(cut_void_failure(usage, named_limit));
+            }
             if chat && chat_response_empty(&response) {
-                return Err(empty_with_usage(response.usage.clone().unwrap_or_default()));
+                return Err(empty_with_usage(response.usage.clone().unwrap_or_default()).into());
             }
             if !chat
                 && response.usage.as_ref().is_some_and(|usage| {
@@ -3671,7 +3810,7 @@ async fn accept(completion: Completion, chat: bool) -> Result<Completion, Plugin
                 })
                 && response.message.content.is_empty()
             {
-                return Err(empty());
+                return Err(empty().into());
             }
             Ok(Completion::Unary(response))
         }
@@ -3713,11 +3852,12 @@ async fn call_member(
     inbound_protocol: &str,
     attempt: Request,
     hook: Option<Arc<dyn AttemptHook>>,
-) -> (bool, Result<Completion, PluginError>) {
+    named_limit: Option<u64>,
+) -> (bool, Result<Completion, PluginError>, Option<u64>) {
     let span = member_span(hop, index, inbound_protocol);
     let started = Instant::now();
     let member_chat = member_speaks_chat(hop);
-    let (chat, result) = async {
+    let (chat, result, void) = async {
         match hop
             .member
             .execute_with_attempt(attempt, inbound_protocol, hook)
@@ -3726,15 +3866,33 @@ async fn call_member(
             Ok(completion) => {
                 let (codec, completion) = completion.split_produced();
                 let chat = member_chat || produced_chat(codec);
-                (chat, accept(completion, chat).await)
+                match accept(completion, chat, named_limit).await {
+                    Ok(completion) => (chat, Ok(completion), None),
+                    Err(failure) => (chat, Err(*failure.error), failure.void),
+                }
             }
-            Err(error) => (member_chat, Err(error)),
+            Err(error) => (member_chat, Err(error), None),
         }
     }
     .instrument(span.clone())
     .await;
     record_call(&span, &result_status(result.as_ref().err()), started);
-    (chat, result)
+    (chat, result, void)
+}
+
+fn output_field_refused(error: &PluginError) -> bool {
+    if !matches!(error.status(), Some(400 | 422)) {
+        return false;
+    }
+    let text = hofund_ir::words_of(error.message()).to_ascii_lowercase();
+    [
+        "max_tokens",
+        "max_output_tokens",
+        "max_completion_tokens",
+        "maxoutputtokens",
+    ]
+    .into_iter()
+    .any(|field| text.contains(field))
 }
 
 fn member_span(hop: &Hop, index: usize, inbound_protocol: &str) -> tracing::Span {

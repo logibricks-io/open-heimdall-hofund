@@ -112,6 +112,7 @@ Per vendor (magpie `internal/gateway` unless noted):
 - Strict Chat validators refuse `strict: false`: retry without it (`strict_refused.go`).
 - Undeclared tools in history (tool_search agents) for Anthropic: declare or convert (`undeclared_tools.go`).
 - Max output lowered to the model or user limit (`maxoutput.go`); thinking turned back on for a model that refused "off" (`wire_effort.go`, `effort_update.go`).
+- Chat length cuts with no text or tool call: D-97 fails a void under a client-named limit without an in-place retry or rest, while allowing the next member. D-252 handles a void with no client limit by learning the catalog output room above what was spent, or 32768 when unknown, fitting it to context, re-asking once, and reusing it across router snapshots. A refused output field is retried without the learned room and tombstoned. Small probes and cuts with visible output pass unchanged (`crates/kernel/codec/src/responses_empty.rs`, `crates/kernel/router/src/void_room.rs`, `crates/kernel/router/tests/d252_void_room.rs`, `crates/kernel/gateway/tests/d252_void_room.rs`).
 - Native compaction pass-through (`native_compaction.go`), Codex compaction guard (`codex_compact_guard.go`).
 - Zhipu/Z.ai 1113 retry at `/api/coding/paas/v4` (`internal/provider/zhipu_coding.go`).
 - Cline API: desktop headers, `{success,data}` envelope, upstream pin (`internal/provider/cline.go`, `cline_envelope.go`, `cline_pin.go`).
