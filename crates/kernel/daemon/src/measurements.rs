@@ -440,6 +440,53 @@ mod tests {
     }
 
     #[test]
+    fn d255_spent_month_with_trial_credits_reaches_the_routing_seat() {
+        let dir = tempfile::tempdir().expect("dir");
+        let now = 1_900_000_000;
+        let (measurements, quotas, _) = fixture(dir.path());
+        quotas.record_success(
+            Quota {
+                provider: "p".to_owned(),
+                name: "p".to_owned(),
+                kind: QuotaKind::Subscription,
+                user: "a".to_owned(),
+                ..Quota::default()
+            },
+            vec![
+                WindowInfo::new(QuotaSpan {
+                    name: "month".to_owned(),
+                    used: 100.0,
+                    remaining: 0.0,
+                    resets_at: Some(quota_time(at(now + 3600))),
+                    ..QuotaSpan::default()
+                })
+                .with_blocking(false),
+                WindowInfo::new(QuotaSpan {
+                    name: "bonus".to_owned(),
+                    used: 2.0,
+                    remaining: 98.0,
+                    ..QuotaSpan::default()
+                })
+                .with_blocking(false)
+                .with_trial_credits(true),
+            ],
+            at(now),
+        );
+        let mut seats = vec![Seat::new("account:p:a")];
+        seats[0].account = true;
+        measurements.weigh(
+            &mut seats,
+            &["demo".to_owned()],
+            "demo",
+            Needs::default(),
+            at(now),
+        );
+        assert_eq!(seats[0].used, 100.0);
+        assert!(seats[0].credits);
+        assert!(seats[0].trial_credits);
+    }
+
+    #[test]
     fn d6_provider_free_flags_follow_each_model_cache_read() {
         let dir = tempfile::tempdir().expect("dir");
         let quotas = Arc::new(QuotaStore::new(dir.path()));

@@ -516,6 +516,10 @@ pub trait UpstreamProvider: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Marks the provider as stopping before in-flight requests are drained.
+    /// The default does nothing.
+    fn stopping(&self) {}
+
     /// Stops background work before `deadline`. The default does nothing.
     ///
     /// # Errors
