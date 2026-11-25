@@ -29,10 +29,15 @@
 //! evicts expired entries, then the least-recently-touched idle entry, on
 //! insertion.
 //!
-//! Routing keeps ready members first in configured order, then keeps only the
+//! Routing keeps ready members first in configured order, then keeps the
 //! cooling member/model pair whose rest ends soonest as a probe. Configured
-//! order breaks a tie and other cooling pairs are skipped for that request. A
-//! route with one member tries that member, including a guessed quota rest.
+//! order breaks a tie, and a route with one member tries that member, including
+//! a guessed quota rest. Other cooling pairs start left out. In a group, when
+//! the last asked member fails before content, a left-out guessed rate, outage,
+//! slow-start, or overload rest may be asked next, soonest first. Rate rests
+//! accept any own failure allowed for failover; the others accept only momentary
+//! failures. Quota, credit, key, and vendor-timed rests stay out. A member asked
+//! while resting receives no other hand-on for 30 seconds unless it answers.
 //! A vendor-timed quota rest is not asked: when every member still to be asked
 //! rests that way, the stored refusal is returned with the soonest reset and
 //! nobody is called. If every member is cooling for the requested model, only
@@ -46,6 +51,7 @@ use hofund_plugin_api::{MemberId, PluginError, PluginErrorKind, QuotaObservation
 use serde::{Deserialize, Serialize};
 
 const RECOVERY_CAPACITY: usize = 1_024;
+const HAND_ON_EVERY: Duration = Duration::from_secs(30);
 const CREDIT_RESET_MAX: Duration = Duration::from_secs(35 * 24 * 60 * 60);
 const WINDOWED_CREDIT_DEFAULT: Duration = Duration::from_secs(5 * 60 * 60);
 const RESTRICTED_REST: Duration = Duration::from_secs(2 * 60 * 60);
@@ -202,6 +208,12 @@ impl CooldownCause {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HandOnRest {
+    Rate,
+    Momentary,
+}
+
 /// An active member cooldown.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -217,6 +229,7 @@ pub struct Cooling {
     guessed: bool,
     /// Whether the refusal itself named this rest's deadline.
     vendor_timed: bool,
+    hand_on: Option<HandOnRest>,
 }
 
 impl Cooling {
@@ -254,6 +267,10 @@ impl Cooling {
     #[must_use]
     pub const fn background_probe(&self) -> bool {
         self.background_probe
+    }
+
+    pub(crate) const fn hand_on(&self) -> Option<HandOnRest> {
+        self.hand_on
     }
 
     /// Whether the refusal itself named this rest's deadline.
@@ -326,6 +343,7 @@ struct Book {
     credit_windows: HashMap<MemberId, CreditWindow>,
     probe_lifted: HashMap<MemberId, Instant>,
     probe_missed: HashSet<MemberId>,
+    hand_on_asked: HashMap<MemberId, Instant>,
     /// Keys that have answered a request. An unreadable history notes none.
     answered: HashSet<MemberId>,
     /// Keys whose last kept rest was a suspended subscription, including
@@ -374,6 +392,7 @@ impl Cooldowns {
                 credit_windows: HashMap::new(),
                 probe_lifted: HashMap::new(),
                 probe_missed: HashSet::new(),
+                hand_on_asked: HashMap::new(),
                 answered: HashSet::new(),
                 suspended: HashSet::new(),
                 invalidated: HashMap::new(),
@@ -381,6 +400,49 @@ impl Cooldowns {
                 recoveries: VecDeque::new(),
             }),
         }
+    }
+
+    pub(crate) fn note_asked_while_cooling(&self, id: &MemberId, model: &str) {
+        let now = (self.clock)();
+        let mut book = self.lock();
+        self.maintain_locked(&mut book, now);
+        let member = CooldownKey::new(id, None);
+        let specific = CooldownKey::new(id, Some(model));
+        let resting = [&member, &specific]
+            .into_iter()
+            .any(|key| book.states.get(key).is_some_and(|state| state.active(now)));
+        if resting {
+            book.hand_on_asked.insert(id.clone(), now);
+        }
+    }
+
+    pub(crate) fn claim_hand_on(&self, id: &MemberId, model: &str) -> bool {
+        let resting = self.cooling_for_model(id, model).is_some();
+        let now = (self.clock)();
+        let mut book = self.lock();
+        self.maintain_locked(&mut book, now);
+        if book
+            .hand_on_asked
+            .get(id)
+            .is_some_and(|asked| now.saturating_duration_since(*asked) < HAND_ON_EVERY)
+        {
+            return false;
+        }
+        if resting {
+            book.hand_on_asked.insert(id.clone(), now);
+        }
+        true
+    }
+
+    /// Whether `id` was asked while resting inside the last 30 seconds.
+    ///
+    /// The book's injected clock is the only time base. Callers must not
+    /// compare the stored ask with a different `Instant`.
+    pub(crate) fn hand_on_asked_recently(&self, id: &MemberId) -> bool {
+        let now = (self.clock)();
+        let mut book = self.lock();
+        self.maintain_locked(&mut book, now);
+        book.hand_on_asked.contains_key(id)
     }
 
     /// Enables full-window credit handling for one subscription account.
@@ -693,6 +755,7 @@ impl Cooldowns {
         }
         book.sunk.retain(|key, _| key.member != *id);
         book.spent.retain(|key| key.member != *id);
+        book.hand_on_asked.remove(id);
     }
 
     /// Sequence in which this member or model last rate limited with quota
@@ -739,6 +802,7 @@ impl Cooldowns {
             recover(&mut book, key, cooling.cause);
         }
         book.suspended.remove(id);
+        book.hand_on_asked.remove(id);
         book.probe_lifted.insert(id.clone(), now);
         true
     }
@@ -878,6 +942,7 @@ impl Cooldowns {
         }
         book.suspended.remove(id);
         book.spent.remove(&key);
+        book.hand_on_asked.remove(id);
         if let Some(state) = book.states.remove(&key)
             && let Some(cooling) = state.cooling
         {
@@ -1032,6 +1097,7 @@ impl Cooldowns {
         book.credit_windows.retain(|id, _| members.contains(id));
         book.probe_lifted.retain(|id, _| members.contains(id));
         book.probe_missed.retain(|id| members.contains(id));
+        book.hand_on_asked.retain(|id, _| members.contains(id));
         book.answered.retain(|id| members.contains(id));
         book.suspended.retain(|id| members.contains(id));
         book.invalidated.retain(|id, _| members.contains(id));
@@ -1053,6 +1119,7 @@ impl Cooldowns {
         book.credit_windows.remove(id);
         book.probe_lifted.remove(id);
         book.probe_missed.remove(id);
+        book.hand_on_asked.remove(id);
         book.answered.remove(id);
         book.suspended.remove(id);
         invalidate_member(&mut book, id);
@@ -1086,6 +1153,12 @@ impl Cooldowns {
         }
         if book.probe_missed.remove(was) {
             book.probe_missed.insert(now.clone());
+        }
+        if let Some(asked) = book.hand_on_asked.remove(was) {
+            book.hand_on_asked
+                .entry(now.clone())
+                .and_modify(|current| *current = (*current).max(asked))
+                .or_insert(asked);
         }
         if book.answered.remove(was) {
             book.answered.insert(now.clone());
@@ -1135,17 +1208,20 @@ impl Cooldowns {
         let revision = next_revision(book);
         let duration = overload_duration(&self.policy, error);
         let vendor_timed = positive_hint(error.retry_after()).is_some();
+        let hand_on = hand_on_rest(Failure::Overload, error);
         let Some(state) = self.entry_for_insert(book, &key, now, revision) else {
             let mut candidate = cooling(now, duration, CooldownCause::Overload, 0);
             candidate.status = error.status();
             candidate.error = error.message().trim().chars().take(300).collect();
             candidate.vendor_timed = vendor_timed;
+            candidate.hand_on = hand_on;
             return candidate;
         };
         let mut candidate = cooling(now, duration, CooldownCause::Overload, 0);
         candidate.status = error.status();
         candidate.error = error.message().trim().chars().take(300).collect();
         candidate.vendor_timed = vendor_timed;
+        candidate.hand_on = hand_on;
         let applied = apply(state, candidate, vendor_timed);
         state.idle_since = None;
         applied
@@ -1201,6 +1277,7 @@ impl Cooldowns {
         candidate.error = error.message().trim().chars().take(300).collect();
         candidate.background_probe =
             target.model.is_none() && id.subscription().is_none() && probe_error(error);
+        candidate.hand_on = hand_on_rest(failure, error);
         if let Some(state) = book.states.get_mut(&target) {
             state.idle_since = None;
             apply(state, candidate, false)
@@ -1268,6 +1345,7 @@ impl Cooldowns {
         candidate.status = error.status();
         candidate.error = error.message().trim().chars().take(300).collect();
         candidate.background_probe = background_probe;
+        candidate.hand_on = hand_on_rest(failure, error);
         let candidate_until = candidate.until;
         let applied = apply(state, candidate, named);
         // The credit ladder moves only with the rest it wrote: a kept rest
@@ -1456,6 +1534,8 @@ impl Cooldowns {
         for (key, cause) in recovered {
             recover(book, key, cause);
         }
+        book.hand_on_asked
+            .retain(|_, asked| now.saturating_duration_since(*asked) < HAND_ON_EVERY);
         let forget = self.policy.rate_forget;
         book.states.retain(|_, state| {
             if state.active(now) {
@@ -1570,6 +1650,32 @@ enum Failure {
     Verify,
     Restricted,
     Suspended,
+}
+
+fn hand_on_rest(failure: Failure, error: &PluginError) -> Option<HandOnRest> {
+    if positive_hint(error.retry_after()).is_some() {
+        return None;
+    }
+    match failure {
+        Failure::RateLimit => Some(HandOnRest::Rate),
+        Failure::Overload => Some(HandOnRest::Momentary),
+        Failure::Generic(CooldownCause::Failure)
+            if matches!(
+                error.kind(),
+                PluginErrorKind::Connect
+                    | PluginErrorKind::Timeout
+                    | PluginErrorKind::Transport
+                    | PluginErrorKind::Interrupted
+                    | PluginErrorKind::Decode
+                    | PluginErrorKind::Io
+                    | PluginErrorKind::Status
+            ) && (error.kind() != PluginErrorKind::Status
+                || matches!(error.status(), Some(408 | 500..=599))) =>
+        {
+            Some(HandOnRest::Momentary)
+        }
+        _ => None,
+    }
 }
 
 fn note_probe_failure(book: &mut Book, id: &MemberId, now: Instant) {
@@ -1817,6 +1923,7 @@ fn cooling(now: Instant, duration: Duration, cause: CooldownCause, failures: u32
         background_probe: false,
         guessed: false,
         vendor_timed: false,
+        hand_on: None,
     }
 }
 
