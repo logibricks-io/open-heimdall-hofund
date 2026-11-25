@@ -62,6 +62,7 @@ pub struct Http1Response {
     chunks: Vec<Vec<u8>>,
     chunked: bool,
     chunk_delay: Duration,
+    write_yields: usize,
     header_gate: Option<watch::Receiver<bool>>,
     hold_open: bool,
 }
@@ -76,6 +77,7 @@ impl Http1Response {
             chunks: Vec::new(),
             chunked: false,
             chunk_delay: Duration::ZERO,
+            write_yields: 0,
             header_gate: None,
             hold_open: false,
         }
@@ -109,6 +111,13 @@ impl Http1Response {
     #[must_use]
     pub fn chunk_delay(mut self, delay: Duration) -> Self {
         self.chunk_delay = delay;
+        self
+    }
+
+    /// Yields the server task `count` times before writing the response.
+    #[must_use]
+    pub fn yield_before_write(mut self, count: usize) -> Self {
+        self.write_yields = count;
         self
     }
 
@@ -248,6 +257,9 @@ async fn serve_http1(
                 }
             }
         }
+    }
+    for _ in 0..response.write_yields {
+        tokio::task::yield_now().await;
     }
     let reason = http::StatusCode::from_u16(response.status)
         .ok()
