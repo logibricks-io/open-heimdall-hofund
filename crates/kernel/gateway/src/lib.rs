@@ -1820,6 +1820,15 @@ async fn models(State(app): State<Arc<Inner>>, request: Request) -> Response {
         .into_iter()
         .map(|id| {
             let mut value = model_list_entry(&app.model_catalog, &id);
+            let efforts = router.effort_levels(&id);
+            if !efforts.is_empty() {
+                value["supported_reasoning_levels"] = serde_json::json!(
+                    efforts
+                        .into_iter()
+                        .map(|level| serde_json::json!({"effort": level}))
+                        .collect::<Vec<_>>()
+                );
+            }
             let tiers = router.service_tier_ids(&id);
             if !tiers.is_empty() {
                 value["service_tiers"] = hofund_codec::service_tier::named_tiers(&tiers);

@@ -448,6 +448,8 @@ pub(crate) fn expand(
                     at_once: state.at_once,
                     rank,
                     wire_model: hop.wire_model.clone(),
+                    effort_models: None,
+                    effort_live: None,
                     max_output_tokens: hop.max_output_tokens,
                     catalog_output_tokens: hop.catalog_output_tokens,
                     context_window: hop.context_window,

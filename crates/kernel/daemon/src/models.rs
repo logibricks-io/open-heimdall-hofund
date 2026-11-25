@@ -324,6 +324,47 @@ pub struct Cached {
     pub delisted: Vec<String>,
 }
 
+/// A hop's handle onto the host's source list.
+///
+/// The list lives in the host state store. A fetch, a restart load, and a
+/// provider rename all update that store. Dispatch and count read it on each
+/// call, the same way a probe does. There is no second copy to refresh.
+#[derive(Clone)]
+pub(crate) struct EffortLive {
+    provider: String,
+    model: String,
+    fold: Arc<RwLock<HashMap<String, bool>>>,
+    state: Arc<Mutex<super::models_state::StateStore>>,
+}
+
+impl EffortLive {
+    pub(crate) fn current(&self) -> Option<hofund_router::EffortModels> {
+        resolve_family(&self.fold, &self.state, &self.provider, &self.model)
+    }
+}
+
+fn resolve_family(
+    fold: &RwLock<HashMap<String, bool>>,
+    state: &Mutex<super::models_state::StateStore>,
+    provider: &str,
+    model: &str,
+) -> Option<hofund_router::EffortModels> {
+    let models = {
+        let mut store = state.lock().unwrap_or_else(|error| error.into_inner());
+        super::models_state::models(&store.get(provider).list)
+    };
+    let folds = fold
+        .read()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(provider)
+        .copied()
+        .unwrap_or(false);
+    if !folds {
+        return None;
+    }
+    super::effort_variants::resolver(&models, model)
+}
+
 /// Host-side model list and probe composition, with optional persistent state.
 pub struct ModelsHost {
     limits: HttpLimits,
@@ -336,8 +377,9 @@ pub struct ModelsHost {
     instances: RwLock<HashMap<String, RegisteredInstance>>,
     /// Every key instance of a provider, so a list or a saved seed reaches all of them.
     upstreams: RwLock<HashMap<String, Vec<Arc<dyn UpstreamProvider>>>>,
+    fold_efforts: Arc<RwLock<HashMap<String, bool>>>,
     registry: Arc<dyn DaemonRegistry>,
-    state: Mutex<super::models_state::StateStore>,
+    state: Arc<Mutex<super::models_state::StateStore>>,
     events: OnceLock<Arc<EventBus>>,
 }
 
@@ -365,8 +407,9 @@ impl ModelsHost {
             host_overrides: HashMap::new(),
             instances: RwLock::new(HashMap::new()),
             upstreams: RwLock::new(HashMap::new()),
+            fold_efforts: Arc::new(RwLock::new(HashMap::new())),
             registry: Arc::new(RegistryAdapter),
-            state: Mutex::new(super::models_state::StateStore::new(None)),
+            state: Arc::new(Mutex::new(super::models_state::StateStore::new(None))),
             events: OnceLock::new(),
         }
     }
@@ -407,7 +450,9 @@ impl ModelsHost {
     /// passes `.hofund` beside the active configuration file.
     #[must_use]
     pub fn with_state_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {
-        self.state = Mutex::new(super::models_state::StateStore::new(Some(root.into())));
+        self.state = Arc::new(Mutex::new(super::models_state::StateStore::new(Some(
+            root.into(),
+        ))));
         self
     }
 
@@ -418,13 +463,14 @@ impl ModelsHost {
     /// holds the daemon lock, is the only writer and does not.
     #[must_use]
     pub(crate) fn with_shared_state(self, fallback: Option<std::path::PathBuf>) -> Self {
-        let store = self
-            .state
+        let state = Arc::try_unwrap(self.state)
+            .unwrap_or_else(|_| unreachable!("model state is shared before any hop is planned"));
+        let store = state
             .into_inner()
             .unwrap_or_else(|error| error.into_inner())
             .shared(fallback);
         Self {
-            state: Mutex::new(store),
+            state: Arc::new(Mutex::new(store)),
             ..self
         }
     }
@@ -568,7 +614,8 @@ impl ModelsHost {
                 {
                     return Err(PicksError::Stale);
                 }
-                let listed = super::models_state::models(&state.list);
+                let source = super::models_state::models(&state.list);
+                let listed = self.fold_models(provider_id, &source);
                 let next = next_picks(provider_id, &state.picks, &listed, form)?;
                 let picked_from = listed
                     .iter()
@@ -604,9 +651,24 @@ impl ModelsHost {
             .map_err(|error| super::DaemonError::new(error.to_string()))
     }
 
-    /// Reads cached models without building a provider or contacting an upstream.
+    fn fold_models(&self, provider_id: &str, models: &[ModelSpec]) -> Vec<ModelSpec> {
+        if self
+            .fold_efforts
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(provider_id)
+            .copied()
+            .unwrap_or(false)
+        {
+            super::effort_variants::fold(models).0
+        } else {
+            models.to_vec()
+        }
+    }
+
+    /// Reads the source list used for routing and old-id compatibility.
     #[must_use]
-    pub fn cached(&self, provider_id: &str) -> Cached {
+    pub(crate) fn source_cached(&self, provider_id: &str) -> Cached {
         let mut store = self.state.lock().unwrap_or_else(|error| error.into_inner());
         let state = store.get(provider_id);
         Cached {
@@ -614,6 +676,42 @@ impl ModelsHost {
             fetched_at: state.fetched_at,
             delisted: state.delisted.clone(),
         }
+    }
+
+    /// Reads cached models without building a provider or contacting an upstream.
+    #[must_use]
+    pub fn cached(&self, provider_id: &str) -> Cached {
+        let mut cached = self.source_cached(provider_id);
+        cached.models = self.fold_models(provider_id, &cached.models);
+        cached
+    }
+
+    pub(crate) fn effort_models(
+        &self,
+        provider_id: &str,
+        model: &str,
+    ) -> Option<hofund_router::EffortModels> {
+        resolve_family(&self.fold_efforts, &self.state, provider_id, model)
+    }
+
+    /// Handle a hop keeps so dispatch reads the same source list as a probe.
+    pub(crate) fn effort_live(&self, provider: &str, model: &str) -> EffortLive {
+        EffortLive {
+            provider: provider.to_owned(),
+            model: model.to_owned(),
+            fold: Arc::clone(&self.fold_efforts),
+            state: Arc::clone(&self.state),
+        }
+    }
+
+    pub(crate) fn sent_id(
+        &self,
+        provider_id: &str,
+        model: &str,
+        effort: Option<hofund_plugin_api::Effort>,
+    ) -> String {
+        self.effort_models(provider_id, model)
+            .map_or_else(|| model.to_owned(), |family| family.at(model, effort))
     }
 
     /// Saves picked ids in the supplied order and restores them from delisted.
@@ -896,7 +994,11 @@ impl ModelsHost {
                     Some(&provider.model_list.auto_include),
                 )
                 .await
-                .map(|applied| applied.models);
+                .map(|applied| {
+                    let mut models = applied.models;
+                    models.models = self.fold_models(provider_id, &models.models);
+                    models
+                });
             match &result {
                 Ok(models) => {
                     tracing::Span::current().record("kind", format_args!("{:?}", models.kind));
@@ -971,9 +1073,10 @@ impl ModelsHost {
         let mut store = self.state.lock().unwrap_or_else(|error| error.into_inner());
         let state = store.get(provider_id);
         let kind = applied.models.kind;
-        let count = applied.models.models.len() as u64;
+        let models = self.fold_models(provider_id, &applied.models.models);
+        let count = models.len() as u64;
         let refreshed = Refreshed {
-            models: applied.models.models,
+            models,
             added: applied.taken,
             removed: applied.dropped,
             delisted: state.delisted.clone(),
@@ -1103,6 +1206,10 @@ impl ModelsHost {
             let redactor = redactor.clone();
             async move {
                 let model = selected.exposed.clone();
+                let selected = Selected {
+                    upstream: self.sent_id(&provider.id, &selected.upstream, None),
+                    ..selected
+                };
                 let started = std::time::Instant::now();
                 let result = self
                     .probe_one(
@@ -1158,11 +1265,13 @@ impl ModelsHost {
         auto_include: Vec<regex::Regex>,
     ) -> Applied {
         let listed = super::models_state::rows(&fetched.models.models);
+        let public = self.fold_models(&provider.id, &fetched.models.models);
         let now_ids = listed
             .iter()
             .map(|row| row.id.clone())
+            .chain(public.iter().map(|model| model.id().to_owned()))
             .collect::<HashSet<_>>();
-        let chat_ids = default_exposed(&fetched.models.models);
+        let chat_ids = default_exposed(&public);
         let mut dropped = Vec::new();
         let mut taken = Vec::new();
         // Memory keeps the new list even when the save fails, so a list
@@ -1178,10 +1287,16 @@ impl ModelsHost {
                     return;
                 }
                 state.retry_at = None;
+                let previous = super::models_state::models(&state.list);
                 let before = state
                     .list
                     .iter()
                     .map(|row| row.id.clone())
+                    .chain(
+                        self.fold_models(&provider.id, &previous)
+                            .iter()
+                            .map(|model| model.id().to_owned()),
+                    )
                     .collect::<HashSet<_>>();
                 let mut kept = Vec::new();
                 for id in &state.picks {
@@ -1699,7 +1814,17 @@ impl ModelsHost {
         &self,
         provider: &hofund_config::Provider,
     ) -> Result<Planned, DaemonError> {
-        self.planned_with(provider, |id| self.registry.find_preset(id))
+        let planned = self.planned_with(provider, |id| self.registry.find_preset(id))?;
+        let plugin = self.plugin_for(provider, &planned);
+        let folds = provider.preset.is_none()
+            && !provider.base_url.trim().is_empty()
+            && matches!(planned.wire, Wire::Chat | Wire::Responses | Wire::Messages)
+            && self.registry.is_kernel_factory(&plugin);
+        self.fold_efforts
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(provider.id.clone(), folds);
+        Ok(planned)
     }
 
     fn planned_with(
