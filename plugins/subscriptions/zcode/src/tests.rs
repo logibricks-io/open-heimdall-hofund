@@ -1242,7 +1242,10 @@ fn r57b_checkin_claims_marketing_offers_with_versioned_headers() {
     let (result, host) = claim_fixture(200, r#"{"code":0,"msg":""}"#);
     assert_eq!(result.outcome(), hofund_plugin_api::CheckinOutcome::Claimed);
     assert_eq!(result.message(), "claimed Weekend Build");
-    assert_eq!(result.recheck_at(), None);
+    assert_eq!(
+        result.recheck_at(),
+        Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(30 * 60))
+    );
     let calls = host.http().calls();
     assert_eq!(calls.len(), 2);
     assert!(calls[0].uri().contains("/api/v1/marketing/touch?seq=0"));
@@ -1265,7 +1268,10 @@ fn r57b_checkin_claims_marketing_offers_with_versioned_headers() {
 fn r57b_checkin_maps_done_ineligible_captcha_and_unknown() {
     let (done, _) = claim_fixture(200, r#"{"code":1003,"msg":"target already exists"}"#);
     assert_eq!(done.outcome(), hofund_plugin_api::CheckinOutcome::Done);
-    assert_eq!(done.recheck_at(), None);
+    assert_eq!(
+        done.recheck_at(),
+        Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(30 * 60))
+    );
     let (ineligible, _) = claim_fixture(400, r#"{"code":1004,"msg":"not eligible yet"}"#);
     assert_eq!(
         ineligible.outcome(),
@@ -1324,6 +1330,246 @@ fn r57b_empty_feed_rechecks_and_api_keys_do_not_claim() {
         hofund_plugin_api::CheckinOutcome::Ineligible
     );
     assert!(key_host.http().calls().is_empty());
+}
+
+struct ClaimSequence {
+    _dir: tempfile::TempDir,
+    host: TestHost,
+    id: AccountId,
+    sub: std::sync::Arc<dyn hofund_plugin_api::Subscription>,
+}
+
+impl ClaimSequence {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().expect("dir");
+        let home = dir.path().join(".zcode");
+        write_jwt_only_credentials(&home, "u-checkin-sequence");
+        let host = host(&dir);
+        let id =
+            block_on(discover::import(&home, discover::REFERENCE, host.context())).expect("import");
+        let sub = subscription(&host);
+        Self {
+            _dir: dir,
+            host,
+            id,
+            sub,
+        }
+    }
+
+    fn feed(&self, plans: &[(&str, &str)]) {
+        let deliveries = plans
+            .iter()
+            .map(|(id, name)| {
+                json!({"banner": {
+                    "background": {"args": {"zcode_plan": {"name": name}}},
+                    "buttons": [{"action": {
+                        "type": "claim_zcode_plan",
+                        "args": {"plan_id": id}
+                    }}]
+                }})
+            })
+            .collect::<Vec<_>>();
+        self.host.http().enqueue(
+            json!({"code": 0, "data": {"deliveries": deliveries}})
+                .to_string()
+                .into_bytes(),
+        );
+    }
+
+    fn answer(&self, status: u16, body: &str) {
+        self.host
+            .http()
+            .enqueue_response(status, &[], body.to_owned());
+    }
+
+    fn run(&self) -> hofund_plugin_api::CheckinResult {
+        block_on(self.sub.daily_checkin(&self.id, self.host.context())).expect("check-in")
+    }
+
+    fn call_count(&self) -> usize {
+        self.host.http().calls().len()
+    }
+
+    fn claims_since(&self, before: usize) -> Vec<String> {
+        self.host.http().calls()[before..]
+            .iter()
+            .filter(|call| call.uri().ends_with("/api/v1/zcode-plan/billing/claim"))
+            .map(|call| {
+                let body = hofund_plugin_sdk::json::from_slice::<hofund_plugin_sdk::json::Value>(
+                    call.body(),
+                )
+                .expect("claim body");
+                body.get("plan_id")
+                    .and_then(hofund_plugin_sdk::json::Value::as_str)
+                    .expect("plan id")
+                    .to_owned()
+            })
+            .collect()
+    }
+}
+
+#[test]
+fn d258_later_plan_is_claimed_without_reposting_the_earlier_claim() {
+    let fixture = ClaimSequence::new();
+    fixture.feed(&[("weekend", "Weekend Build")]);
+    fixture.answer(200, r#"{"code":0,"msg":""}"#);
+    let first = fixture.run();
+    assert_eq!(first.outcome(), hofund_plugin_api::CheckinOutcome::Claimed);
+    assert_eq!(first.message(), "claimed Weekend Build");
+    assert_eq!(
+        first.recheck_at(),
+        Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(30 * 60))
+    );
+
+    let before = fixture.call_count();
+    fixture.feed(&[("weekend", "Weekend Build"), ("night", "Night Build")]);
+    fixture.answer(200, r#"{"code":0,"msg":""}"#);
+    let later = fixture.run();
+    assert_eq!(later.outcome(), hofund_plugin_api::CheckinOutcome::Claimed);
+    assert_eq!(later.message(), "claimed Night Build");
+    assert!(later.recheck_at().is_some());
+    assert_eq!(fixture.claims_since(before), vec!["night".to_owned()]);
+}
+
+#[test]
+fn d258_recheck_with_nothing_new_stays_done_without_posting() {
+    let fixture = ClaimSequence::new();
+    fixture.feed(&[("weekend", "Weekend Build")]);
+    fixture.answer(200, r#"{"code":0,"msg":""}"#);
+    assert_eq!(
+        fixture.run().outcome(),
+        hofund_plugin_api::CheckinOutcome::Claimed
+    );
+
+    let before = fixture.call_count();
+    fixture.feed(&[]);
+    let gone = fixture.run();
+    assert_eq!(gone.outcome(), hofund_plugin_api::CheckinOutcome::Done);
+    assert_eq!(gone.message(), "already claimed: Weekend Build");
+    assert!(gone.recheck_at().is_some());
+    assert!(fixture.claims_since(before).is_empty());
+
+    let before = fixture.call_count();
+    fixture.feed(&[("weekend", "Weekend Build")]);
+    let listed = fixture.run();
+    assert_eq!(listed.outcome(), hofund_plugin_api::CheckinOutcome::Done);
+    assert_eq!(listed.message(), "already claimed: Weekend Build");
+    assert!(listed.recheck_at().is_some());
+    assert!(fixture.claims_since(before).is_empty());
+}
+
+#[test]
+fn d258_already_claimed_answer_is_not_posted_again() {
+    let fixture = ClaimSequence::new();
+    fixture.feed(&[("weekend", "Weekend Build")]);
+    fixture.answer(200, r#"{"code":1003,"msg":"target already exists"}"#);
+    let first = fixture.run();
+    assert_eq!(first.outcome(), hofund_plugin_api::CheckinOutcome::Done);
+    assert!(first.recheck_at().is_some());
+
+    let before = fixture.call_count();
+    fixture.feed(&[("weekend", "Weekend Build")]);
+    let again = fixture.run();
+    assert_eq!(again.outcome(), hofund_plugin_api::CheckinOutcome::Done);
+    assert_eq!(again.message(), "already claimed: Weekend Build");
+    assert!(again.recheck_at().is_some());
+    assert!(fixture.claims_since(before).is_empty());
+}
+
+#[test]
+fn d258_captcha_is_not_reposted_and_a_new_plan_can_still_be_claimed() {
+    let fixture = ClaimSequence::new();
+    fixture.feed(&[("weekend", "Weekend Build")]);
+    fixture.answer(400, r#"{"code":3007,"msg":"captcha verify failed"}"#);
+    let first = fixture.run();
+    assert_eq!(first.outcome(), hofund_plugin_api::CheckinOutcome::Captcha);
+    assert_eq!(first.recheck_at(), None);
+
+    let before = fixture.call_count();
+    fixture.feed(&[("weekend", "Weekend Build")]);
+    let again = fixture.run();
+    assert_eq!(again.outcome(), hofund_plugin_api::CheckinOutcome::Captcha);
+    assert_eq!(
+        again.message(),
+        "Weekend Build: claim it in the Z Code app (captcha verify failed)"
+    );
+    assert!(fixture.claims_since(before).is_empty());
+
+    let before = fixture.call_count();
+    fixture.feed(&[("weekend", "Weekend Build"), ("night", "Night Build")]);
+    fixture.answer(200, r#"{"code":0,"msg":""}"#);
+    let later = fixture.run();
+    assert_eq!(later.outcome(), hofund_plugin_api::CheckinOutcome::Claimed);
+    assert_eq!(fixture.claims_since(before), vec!["night".to_owned()]);
+
+    let before = fixture.call_count();
+    fixture.feed(&[("weekend", "Weekend Build"), ("night", "Night Build")]);
+    let settled = fixture.run();
+    assert_eq!(settled.outcome(), hofund_plugin_api::CheckinOutcome::Done);
+    assert_eq!(settled.message(), "already claimed: Night Build");
+    assert!(fixture.claims_since(before).is_empty());
+}
+
+#[test]
+fn d258_ineligible_after_a_claim_stays_done_and_is_retried() {
+    let fixture = ClaimSequence::new();
+    fixture.feed(&[("weekend", "Weekend Build")]);
+    fixture.answer(200, r#"{"code":0,"msg":""}"#);
+    assert_eq!(
+        fixture.run().outcome(),
+        hofund_plugin_api::CheckinOutcome::Claimed
+    );
+
+    let before = fixture.call_count();
+    fixture.feed(&[("weekend", "Weekend Build"), ("night", "Night Build")]);
+    fixture.answer(400, r#"{"code":1004,"msg":"not eligible yet"}"#);
+    let ineligible = fixture.run();
+    assert_eq!(
+        ineligible.outcome(),
+        hofund_plugin_api::CheckinOutcome::Done
+    );
+    assert_eq!(
+        ineligible.message(),
+        "already claimed: Weekend Build; Night Build: not eligible yet"
+    );
+    assert!(ineligible.recheck_at().is_some());
+    assert_eq!(fixture.claims_since(before), vec!["night".to_owned()]);
+
+    let before = fixture.call_count();
+    fixture.feed(&[("weekend", "Weekend Build"), ("night", "Night Build")]);
+    fixture.answer(200, r#"{"code":0,"msg":""}"#);
+    let claimed = fixture.run();
+    assert_eq!(
+        claimed.outcome(),
+        hofund_plugin_api::CheckinOutcome::Claimed
+    );
+    assert_eq!(claimed.message(), "claimed Night Build");
+    assert_eq!(fixture.claims_since(before), vec!["night".to_owned()]);
+}
+
+#[test]
+fn d258_failed_plan_is_retried_without_reposting_a_claimed_plan() {
+    let fixture = ClaimSequence::new();
+    fixture.feed(&[("weekend", "Weekend Build"), ("night", "Night Build")]);
+    fixture.answer(200, r#"{"code":0,"msg":""}"#);
+    fixture.answer(500, "not json");
+    let failed = fixture.run();
+    assert_eq!(failed.outcome(), hofund_plugin_api::CheckinOutcome::Failed);
+    assert_eq!(
+        failed.message(),
+        "claimed Weekend Build; Night Build: HTTP 500, unreadable claim reply"
+    );
+
+    let before = fixture.call_count();
+    fixture.feed(&[("weekend", "Weekend Build"), ("night", "Night Build")]);
+    fixture.answer(200, r#"{"code":0,"msg":""}"#);
+    let retried = fixture.run();
+    assert_eq!(
+        retried.outcome(),
+        hofund_plugin_api::CheckinOutcome::Claimed
+    );
+    assert_eq!(retried.message(), "claimed Night Build");
+    assert_eq!(fixture.claims_since(before), vec!["night".to_owned()]);
 }
 
 #[test]

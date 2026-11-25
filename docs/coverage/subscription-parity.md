@@ -622,11 +622,11 @@ Antigravity used through the user's own `agy` binary. D-222. Tests `d222_*` use 
 
 ## Z Code (`zcode`)
 
-**Reference files read:** `zcode.go`, `zcode_device.go`, `zcode_team.go`, `migrate_zcode.go`, `plugin_checkin.go`, `workbuddy.go`, `internal/agent/zcode.go`, and `internal/appdir/zcode.go`. The earlier audit incorrectly said the plugin package was absent. The frozen community package is present at `packages/zcode` under community commit 1ad712d and was read for R-57b: `index.mjs`, `prompt.mjs`, the sign-in, Start Plan, model, gift, team, usage, and check-in tests, and the recorded marketing fixture. R-57c also read `dual.test.mjs`, `toolsearch.test.mjs`, and `concurrency.test.mjs`. Wire details below now come from that package as well as the Go sources.
+**Reference files read:** `zcode.go`, `zcode_device.go`, `zcode_team.go`, `migrate_zcode.go`, `plugin_checkin.go`, `workbuddy.go`, `internal/agent/zcode.go`, and `internal/appdir/zcode.go`. The earlier audit incorrectly said the plugin package was absent. The frozen community package is present at `packages/zcode` under community commit 1ad712d and was read for R-57b: `index.mjs`, `prompt.mjs`, the sign-in, Start Plan, model, gift, team, usage, and check-in tests, and the recorded marketing fixture. R-57c also read `dual.test.mjs`, `toolsearch.test.mjs`, and `concurrency.test.mjs`. D-258 read `ed1d83a5b` and the full community `fdbf261b` patch, including `index.mjs`, `checkin.test.mjs`, and the README recheck contract. Wire details below now come from those packages as well as the Go sources.
 
-**hofund path:** `plugins/subscriptions/zcode/`; R-57, R-57b, and R-57c use deterministic recorded HTTP and fixture tests only.
+**hofund path:** `plugins/subscriptions/zcode/`; R-57, R-57b, R-57c, and D-258 use deterministic recorded HTTP and fixture tests only.
 
-| # | capability | reference v0.1.3005 | hofund 08035c9 + R-57 + R-57b + R-57c | status | gap to close |
+| # | capability | reference v0.1.3005 plus the D-258 delta | hofund 08035c9 + R-57 + R-57b + R-57c + D-258 | status | gap to close |
 |---|------------|----------------------|--------------------------------|--------|--------------|
 | a1 | sign-in: device / portal OAuth | `authorize()` posts `/api/v1/oauth/cli/init`, validates an HTTPS page, sets the site-specific redirect, and polls `/api/v1/oauth/cli/poll/{flow_id}` | `sign_in.rs` pending sessions implement both sites, business-token exchange, own/team plan resolution, and Start Plan fallback only for a live or pending plan | Done | Recorded mocks only; no live account |
 | a2 | API key import | Plugin supports Z.ai and BigModel key plans | Agent-store import plus `SignInProof::Token` API-key accounts | Done | — |
@@ -644,7 +644,7 @@ Antigravity used through the user's own `agy` binary. D-222. Tests `d222_*` use 
 | l | model list | Latest remote/local provider config, static fallback, and gift-tied model entries | `provider_config.rs` chooses by revision; `models.rs` adds Start and `-Trial` entries from every live grant | Done | No 10-minute config cache; mocks only |
 | m | multi-account | team seats from `setting.json`; separate `(team)` labels | `team.rs` project keys and separate labels; native sign-in supports team selection | Done | — |
 | n | error classification | ZCodeRestricted hint code 3012 and two-hour rest | `http_auth.rs` keeps HTTP 405, adds the support hint and cooldown | Done | — |
-| o | daily check-in | `claimDaily` reads marketing/touch and posts `/billing/claim`; codes 0/1003/1004, captcha fail-closed, 30-minute recheck | `checkin.rs` maps all outcomes without a captcha solver; `CheckinResult::recheck_at` and daemon-persisted deadlines rerun inactive, ineligible, and failed claims after 30 minutes | Done | Recorded mocks only |
+| o | daily check-in | `claimDaily` reads marketing/touch and posts `/billing/claim`; codes 0/1003/1004, captcha fail-closed, 30-minute recheck; post-freeze `ed1d83a5b` and community `fdbf261b` suppress same-day answered plans and recheck claimed/done | `checkin.rs` maps all outcomes without a captcha solver; `CheckinResult::recheck_at` and daemon-persisted deadlines rerun inactive, ineligible, failed, claimed, and done claims after 30 minutes. D-258 keeps claimed/1003/3007 answers per account and Beijing day in memory, never reposts them, keeps a no-new-plan recheck done, retries failed/ineligible plans, and resets at Beijing midnight (`d258_*`) | Done | Recorded mocks and fixed clocks only |
 | p | agent sign-in switch | Go writes gateway provider config; team keys are created when absent; the encrypted account store is read-only in the reference | `team.rs` creates `zcode-team-api-key` with `keyType: 2`; `agent_sign_in.rs` still refuses credential switching | Partial | No safe encrypted-store account-switch writer is specified, so switching stays fail-closed |
 | q | extras | `X-Device-Mid`; plugin pins `APP_VERSION` 3.17.2 and the marketing/Start version headers | `lib.rs` pins 3.17.2; `api.rs`, `checkin.rs`, and `start.rs` send the reference UA and `X-ZCode-App-Version` where used | Done | — |
 
@@ -664,7 +664,12 @@ Antigravity used through the user's own `agy` binary. D-222. Tests `d222_*` use 
 - Added ToolSearch request/history/tool-choice rewriting, undefer and placeholder removal, and unary/streamed response restoration through the existing SDK wire hooks.
 - Added 3008/3009 and wording-based busy classification, six fixed host-runtime waits, and a shared three-minute edge-firewall hold with the network hint and no account cooldown. Paused clocks drive all wait and expiry tests.
 
-**Remaining gaps after R-57c**
+**D-258 completed**
+
+- Rechecks claimed and already-claimed results after 30 minutes, posts only plans without a claimed/1003/3007 answer for that account and Beijing day, and answers done when no new plan remains.
+- Keeps failed and ineligible plans retryable, preserves done after an ineligible follows an earlier claim, and expires the in-memory answers at Beijing midnight. Deterministic `d258_*` tests use recorded HTTP and fixed clocks only.
+
+**Remaining gaps after D-258**
 
 - Agent credential switching remains fail-closed; the reference does not specify a safe encrypted-store switch writer.
 - General tool behavior and refresh remain Partial as listed above. All new behavior is verified with recorded HTTP, fixtures, and paused clocks only; no live-account claim is made.
