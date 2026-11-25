@@ -90,6 +90,15 @@ pub(crate) fn prepare(
     let Ok(resolved) = router.resolve(&choice.model) else {
         return keep(&asked, &choice.model, "the gateway does not serve it now");
     };
+    if router
+        .resolve(&request.model)
+        .is_ok_and(|current| current.route == resolved.route)
+    {
+        return Prepared {
+            request: None,
+            note: None,
+        };
+    }
     let restricted = !identity.models.is_empty() || !identity.accounts.is_empty();
     if restricted && !router.admits(&choice.model, Some(&route_scope(identity))) {
         return keep(&asked, &choice.model, "the gateway key may not use it");

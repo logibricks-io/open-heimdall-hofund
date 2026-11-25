@@ -517,6 +517,28 @@ async fn d267_unserved_disabled_and_key_bar_keep_the_asked_model() {
 }
 
 #[tokio::test]
+async fn d267_same_resolved_route_keeps_model_and_effort() {
+    for suffix in [None, Some("low")] {
+        let harness = harness(Some(choice("prov/sub", suffix)), &[]);
+        let (status, body) = send(
+            harness.app,
+            "/v1/messages",
+            &payload("sub", true, Some("high")),
+            true,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{suffix:?} {body}");
+        assert!(harness.lead.seen.lock().expect("lead").is_empty());
+        let seen = only(&harness.sub);
+        assert_eq!(seen.model, "sub", "{suffix:?}");
+        assert_eq!(seen.effort, Some(Effort::High), "{suffix:?}");
+        assert_eq!(seen.output_effort.as_deref(), Some("high"), "{suffix:?}");
+        assert!(harness.book.recent()[0].subagent.is_none(), "{suffix:?}");
+    }
+}
+
+#[tokio::test]
 async fn d267_count_tokens_uses_the_pick() {
     let harness = harness(Some(choice("sub", Some("high"))), &[]);
     let (status, body) = send(

@@ -44,9 +44,11 @@ pub struct SubagentSetting {
 ///
 /// Returns nothing unless `agent_id` is this agent, `body` is an Explore or
 /// Plan tool turn, `env.ANTHROPIC_BASE_URL` is `gateway_origin`, and
-/// `env.CLAUDE_CODE_SUBAGENT_MODEL` names a gateway model. A value with `/`
-/// is returned even when `is_route` is false, so the gateway can keep the
-/// asked model and say the target is unserved. A missing file is nothing.
+/// `env.CLAUDE_CODE_SUBAGENT_MODEL` names a gateway model. A value with `/`,
+/// and any other id that is not one of the client's own words, is returned
+/// even when `is_route` is false, so the gateway can resolve a wire alias or
+/// say the target is unserved. Comments and trailing commas are accepted. A
+/// missing file is nothing.
 #[must_use]
 pub fn inheriting_subagent_model(
     agent_id: &str,
@@ -85,7 +87,7 @@ fn setting_in_directory(
     is_route: impl Fn(&str) -> bool,
 ) -> Option<SubagentSetting> {
     let bytes = read_limited(&settings_dir.join("settings.json"))?;
-    let value: Value = json::from_slice(&bytes).ok()?;
+    let value = parse_settings(&bytes)?;
     let env = value.get("env")?.as_object()?;
     let origin = env.get("ANTHROPIC_BASE_URL")?.as_str()?;
     if !same_origin(origin, gateway_origin) {
@@ -142,13 +144,74 @@ fn interpret(raw: &str, is_route: &impl Fn(&str) -> bool) -> Option<SubagentSett
     if model.is_empty() {
         return None;
     }
-    if is_route(&model) {
-        return Some(SubagentSetting { model, effort });
-    }
-    if model.contains('/') && !is_client_word(&model) {
+    if is_route(&model) || !is_client_word(&model) {
         return Some(SubagentSetting { model, effort });
     }
     None
+}
+
+/// Parses settings JSON, including `//` comments, block comments, and trailing
+/// commas outside strings. The settings editor accepts those forms.
+fn parse_settings(bytes: &[u8]) -> Option<Value> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    json::from_str(&loosen_json(text)).ok()
+}
+
+fn loosen_json(input: &str) -> String {
+    let mut out = String::new();
+    let mut chars = input.chars().peekable();
+    let mut in_string = false;
+    let mut escape = false;
+    while let Some(char) = chars.next() {
+        if in_string {
+            out.push(char);
+            if escape {
+                escape = false;
+            } else if char == '\\' {
+                escape = true;
+            } else if char == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match char {
+            '"' => {
+                in_string = true;
+                out.push(char);
+            }
+            '/' => match chars.peek() {
+                Some('/') => {
+                    chars.next();
+                    for next in chars.by_ref() {
+                        if next == '\n' {
+                            out.push('\n');
+                            break;
+                        }
+                    }
+                }
+                Some('*') => {
+                    chars.next();
+                    let mut previous = '\0';
+                    for next in chars.by_ref() {
+                        if previous == '*' && next == '/' {
+                            break;
+                        }
+                        previous = next;
+                    }
+                }
+                _ => out.push(char),
+            },
+            ',' => {
+                let rest: String = chars.clone().collect();
+                let trimmed = rest.trim_start();
+                if !trimmed.starts_with('}') && !trimmed.starts_with(']') {
+                    out.push(char);
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 fn split_effort(raw: &str) -> (String, Option<String>) {
@@ -307,6 +370,42 @@ mod tests {
             .expect("configured but unserved");
         assert_eq!(got.model, "missing");
         write_settings(dir.path(), "not-a-route", ORIGIN);
+        let got = setting_in_directory(dir.path(), ORIGIN, |_| false).expect("bare id");
+        assert_eq!(got.model, "not-a-route");
+        assert_eq!(got.effort, None);
+    }
+
+    #[test]
+    fn d267_jsonc_comments_and_trailing_commas_are_read() {
+        let dir = tempfile::tempdir().expect("dir");
+        let text = format!(
+            r#"{{
+  // kept by the settings editor
+  "env": {{
+    "ANTHROPIC_BASE_URL": "{ORIGIN}",
+    "note": "keep // and /* inside */",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "sub",
+  }},
+}}"#
+        );
+        std::fs::write(dir.path().join("settings.json"), text).expect("settings");
+        let got = setting_in_directory(dir.path(), ORIGIN, served).expect("jsonc");
+        assert_eq!(got.model, "sub");
+        assert_eq!(got.effort, None);
+    }
+
+    #[test]
+    fn d267_bare_wire_alias_is_returned_for_resolve() {
+        let dir = tempfile::tempdir().expect("dir");
+        write_settings(dir.path(), "wire-alias", ORIGIN);
+        let got = setting_in_directory(dir.path(), ORIGIN, |_| false).expect("alias");
+        assert_eq!(got.model, "wire-alias");
+        assert_eq!(got.effort, None);
+        write_settings(dir.path(), "wire-alias:high", ORIGIN);
+        let got = setting_in_directory(dir.path(), ORIGIN, |_| false).expect("alias effort");
+        assert_eq!(got.model, "wire-alias");
+        assert_eq!(got.effort.as_deref(), Some("high"));
+        write_settings(dir.path(), "inherit", ORIGIN);
         assert!(setting_in_directory(dir.path(), ORIGIN, |_| false).is_none());
     }
 
