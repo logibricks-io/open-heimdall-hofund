@@ -7,6 +7,7 @@
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "relative-model",
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "relative-model",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "relative-model",
-    "ANTHROPIC_SMALL_FAST_MODEL": "relative-model"
+    "ANTHROPIC_SMALL_FAST_MODEL": "relative-model",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "route-a"
   }
 }

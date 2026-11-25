@@ -66,7 +66,7 @@ pub const API: &str = "1";
 pub use agent::{
     AgentFactory, AgentIntegration, ConnectionStatus, Credential, CredentialError, CredentialStore,
     DisconnectOutcome, DynAgentFactory, FileChange, GatewayTarget, ImportCtx, ImportedProvider,
-    Plan, WriteCtx,
+    Plan, WriteCtx, home_dir, home_dir_from_env, usable_override,
 };
 pub use balance::{
     BalanceCard, BalancePart, BalanceQuery, BalanceQuota, BalanceSupport, BalanceWallet,

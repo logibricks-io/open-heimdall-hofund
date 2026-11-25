@@ -372,6 +372,10 @@ pub struct StartOptions {
     #[doc(hidden)]
     pub config_watch_events:
         Option<tokio::sync::mpsc::UnboundedReceiver<notify::Result<notify::Event>>>,
+    /// Observes the virtual instant when each injected-stream watcher check starts.
+    #[cfg(feature = "test-util")]
+    #[doc(hidden)]
+    pub config_watch_check_starts: Option<tokio::sync::mpsc::UnboundedSender<tokio::time::Instant>>,
     /// The `HOFUND_ADDR` value to use instead of the process environment, for
     /// tests. `None` reads the environment.
     #[doc(hidden)]
@@ -641,13 +645,34 @@ async fn start_inner(
         );
     }
     // Downgrade shares the allocation, so this follows every `Arc::get_mut` builder.
-    runtime.set_ask(gateway.ask_backend());
     let env = match options.hofund_addr {
         Some(value) => Some(value),
         None => hofund_config::addr_env(),
     };
     let (listen, source) =
         hofund_config::effective_listen(&config, env.as_deref()).map_err(show)?;
+    let gateway_origin = format!("http://{listen}");
+    let subagent_routes = snapshot.clone();
+    let subagent_config = runtime.config_updates();
+    let subagent_settings = options
+        .agent_session
+        .as_ref()
+        .map(hofund_agent::Session::claude_settings_dir);
+    gateway = gateway.with_subagent_model(Arc::new(move |query| {
+        let models = subagent_routes.load().models();
+        let config = subagent_config.borrow();
+        registry::inheriting_subagent_model(
+            query.agent_id,
+            query.body,
+            subagent_settings.as_deref(),
+            &gateway_origin,
+            |model| {
+                models.iter().any(|id| id == model)
+                    || config.routes.iter().any(|route| route.model == model)
+            },
+        )
+    }));
+    runtime.set_ask(gateway.ask_backend());
     let model_listener = options.model_listener.take();
     let relisten_listeners = std::mem::take(&mut options.relisten_listeners);
     let mut running = gateway
@@ -706,9 +731,12 @@ async fn start_inner(
         if !options.skip_config_watch {
             #[cfg(feature = "test-util")]
             let task = match options.config_watch_events.take() {
-                Some(events) => {
-                    watch::spawn_with_events(Arc::clone(&ops), path.to_path_buf(), events)
-                }
+                Some(events) => watch::spawn_with_events(
+                    Arc::clone(&ops),
+                    path.to_path_buf(),
+                    events,
+                    options.config_watch_check_starts.take(),
+                ),
                 None => watch::spawn(Arc::clone(&ops), path.to_path_buf()),
             };
             #[cfg(not(feature = "test-util"))]

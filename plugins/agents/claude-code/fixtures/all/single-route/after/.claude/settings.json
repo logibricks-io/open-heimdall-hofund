@@ -6,7 +6,8 @@
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-sonnet-5",
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-5",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-sonnet-5",
-    "ANTHROPIC_SMALL_FAST_MODEL": "claude-sonnet-5"
+    "ANTHROPIC_SMALL_FAST_MODEL": "claude-sonnet-5",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "claude-sonnet-5"
   },
   "model": "claude-sonnet-5"
 }

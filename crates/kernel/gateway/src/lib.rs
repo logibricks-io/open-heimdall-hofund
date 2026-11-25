@@ -26,6 +26,7 @@ mod relisten;
 mod responses_ws;
 pub mod session_headers;
 mod stream_timing;
+mod subagent_model;
 mod usage_handoff;
 
 pub use allow::NetworkAccess;
@@ -36,6 +37,7 @@ pub use quotas::{
 };
 pub use relisten::BindHook;
 pub use relisten::{Relisten, RelistenError};
+pub use subagent_model::{SubagentModelChoice, SubagentModelHook, SubagentModelQuery};
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -122,6 +124,8 @@ struct Inner {
     visible_catalog: Option<Arc<RwLock<VisibleCatalog>>>,
     /// Optional resolver for the agent behind a model-list request.
     request_agent: Option<RequestAgentHook>,
+    /// Optional subagent-model reader. Absent leaves every request as asked.
+    subagent_model: Option<SubagentModelHook>,
     /// Routing decision history for the management API.
     route_trace: Option<Arc<hofund_router::RouteTraceBook>>,
     /// models.dev catalog for `/v1/models` enrichment and routing metadata.
@@ -572,6 +576,7 @@ impl Gateway {
                 quota_scope: tell_everything(),
                 visible_catalog: None,
                 request_agent: None,
+                subagent_model: None,
                 route_trace: None,
                 model_catalog: None,
                 pricer: None,
@@ -613,6 +618,15 @@ impl Gateway {
         Arc::get_mut(&mut self.inner)
             .expect("gateway is not shared yet")
             .request_agent = Some(hook);
+        self
+    }
+
+    /// Sets how an eligible subagent turn picks its model. Call before [`Self::bind`].
+    #[must_use]
+    pub fn with_subagent_model(mut self, hook: SubagentModelHook) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("gateway is not shared yet")
+            .subagent_model = Some(hook);
         self
     }
 
@@ -2149,11 +2163,26 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
         );
     }
     bridge_effort::apply(codec.id(), &bytes, &mut model_request);
+    let subagent_id = identity_headers
+        .iter()
+        .find(|(name, _)| *name == SUBAGENT_HEADER)
+        .map(|(_, value)| value.trim())
+        .unwrap_or_default();
+    let prepared = subagent_model::prepare(
+        app.as_ref(),
+        &client_agent,
+        subagent_id,
+        &bytes,
+        &identity,
+        &model_request,
+    );
+    let subagent_note = prepared.note.clone();
+    let dispatch_request = prepared.request.as_ref().unwrap_or(&model_request);
     let reservation = match reserve_for_codec(
         &app,
         codec.as_ref(),
         &identity,
-        &model_request,
+        dispatch_request,
         bytes.len(),
         started,
     ) {
@@ -2161,7 +2190,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
         Err(response) => return *response,
     };
     if let Some((status, message)) =
-        model_list::disabled_refusal(&app.model_catalog, &model_request.model)
+        model_list::disabled_refusal(&app.model_catalog, &dispatch_request.model)
     {
         write_usage_simple(
             &app.usage,
@@ -2185,7 +2214,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
         &app,
         RequestStart {
             request_id: request_id.clone(),
-            route: model_request.model.clone(),
+            route: dispatch_request.model.clone(),
             inbound_protocol: codec.id().to_owned(),
             started_at_ms: unix_ms_now(),
         },
@@ -2194,9 +2223,9 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     if let Some(marker) = stopped_waiting {
         track.stop_waiting(marker, Arc::clone(&app.usage), &model_request, &identity);
     }
-    let turn = turn_in(&model_request);
+    let turn = turn_in(dispatch_request);
     let conversation = hofund_router::affinity::Conversation::new(
-        conversation_key(&model_request.model, &identity_headers, &bytes),
+        conversation_key(&dispatch_request.model, &identity_headers, &bytes),
         turn.number,
         turn.within,
     )
@@ -2220,7 +2249,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
         hold.set_asked(&model_request.model);
     }
     let agent = trace_agent_label(&identity_headers, &identity);
-    let trace = app.route_trace.as_ref().map(|book| {
+    let mut trace = app.route_trace.as_ref().map(|book| {
         book.begin(hofund_router::RouteMeta {
             session: routing_session.clone(),
             agent,
@@ -2230,10 +2259,15 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
             ..hofund_router::RouteMeta::default()
         })
     });
+    if let Some(trace) = trace.as_mut()
+        && let Some(note) = subagent_note
+    {
+        trace.set_subagent(note);
+    }
     drop(unrouted_hold.take());
     let (wait, notice) = GatewayWait::channel();
     let mut dispatch: DispatchFuture = Box::pin({
-        let request = model_request.clone();
+        let request = dispatch_request.clone();
         let protocol = codec.id().to_owned();
         let scope = route_scope(&identity);
         async move {
@@ -2573,9 +2607,24 @@ async fn count_tokens(
             identity_headers.push((name, value));
         }
     }
-    let turn = turn_in(&model_request);
+    let client_agent = resolve_client_agent(app.as_ref(), &headers, &identity);
+    let subagent_id = identity_headers
+        .iter()
+        .find(|(name, _)| *name == SUBAGENT_HEADER)
+        .map(|(_, value)| value.trim())
+        .unwrap_or_default();
+    let prepared = subagent_model::prepare(
+        app.as_ref(),
+        &client_agent,
+        subagent_id,
+        &bytes,
+        &identity,
+        &model_request,
+    );
+    let counted = prepared.request.as_ref().unwrap_or(&model_request);
+    let turn = turn_in(counted);
     let conversation = hofund_router::affinity::Conversation::new(
-        conversation_key(&model_request.model, &identity_headers, &bytes),
+        conversation_key(&counted.model, &identity_headers, &bytes),
         turn.number,
         turn.within,
     )
@@ -2584,7 +2633,7 @@ async fn count_tokens(
     let router = app.snapshot.load();
     match router
         .count_scoped_conversation(
-            &model_request,
+            counted,
             codec.id(),
             Some(&route_scope(&identity)),
             Some(&conversation),
