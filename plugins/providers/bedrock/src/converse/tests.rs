@@ -21,13 +21,17 @@ fn a_pasted_chat_or_messages_url_becomes_the_runtime_root() {
 }
 
 #[test]
-fn the_region_option_wins_over_the_host() {
+fn the_host_wins_then_the_region_option() {
     assert_eq!(
         signing_region(
             " EU-West-2 ",
             "https://bedrock-runtime.eu-west-1.amazonaws.com"
         )
-        .expect("explicit"),
+        .expect("host"),
+        "eu-west-1"
+    );
+    assert_eq!(
+        signing_region(" EU-West-2 ", "https://proxy.example.test").expect("explicit"),
         "eu-west-2"
     );
     assert_eq!(
@@ -40,11 +44,7 @@ fn the_region_option_wins_over_the_host() {
         "https://bedrock-runtime.eu-west-1.amazonaws.com.evil.test",
         "not a url",
     ] {
-        let error = signing_region("", base).expect_err(base);
-        assert!(
-            error.to_string().contains("Converse needs a region"),
-            "{base}: {error}"
-        );
+        assert_eq!(signing_region("", base).expect(base), "us-east-1");
     }
     let error = signing_region("", "https://bedrock-runtime.us_east.amazonaws.com")
         .expect_err("bad host region");
