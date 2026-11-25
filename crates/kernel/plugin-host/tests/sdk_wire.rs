@@ -42,7 +42,7 @@ async fn run(
 }
 
 async fn raw_bytes(completion: Completion) -> Vec<u8> {
-    let Completion::Raw(mut body) = completion else {
+    let Completion::Raw(mut body) = completion.peel() else {
         panic!("expected raw bytes");
     };
     let mut bytes = Vec::new();
@@ -196,7 +196,7 @@ async fn converse_posts_a_signed_call_to_the_model_path() {
     )
     .await
     .expect("cross protocol");
-    assert!(matches!(completion, Completion::Unary(_)));
+    assert!(matches!(completion.peel(), Completion::Unary(_)));
 }
 
 #[tokio::test]
@@ -288,7 +288,7 @@ async fn a_cross_protocol_unary_reply_is_decoded() {
     let completion = run(&host, &target, None, ProtocolId::ANTHROPIC_MESSAGES)
         .await
         .expect("execute");
-    let Completion::Unary(response) = completion else {
+    let Completion::Unary(response) = completion.peel() else {
         panic!("expected a decoded response");
     };
     assert_eq!(response.model.as_deref(), Some("demo"));

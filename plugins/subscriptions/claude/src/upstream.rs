@@ -619,7 +619,7 @@ mod tests {
     }
 
     fn collect_events(completion: Completion) -> Vec<StreamEvent> {
-        let Completion::Stream(mut stream) = completion else {
+        let Completion::Stream(mut stream) = completion.peel() else {
             panic!("expected a stream");
         };
         block_on(async {

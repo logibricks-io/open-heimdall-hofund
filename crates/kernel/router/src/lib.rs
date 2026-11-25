@@ -2335,10 +2335,9 @@ impl DispatchState {
                     }
                 });
             }
-            let chat = hop.member.protocol() == hofund_codec::CHAT_PROTOCOL_ID;
             let mut empty_retried = false;
             let result = loop {
-                let result = call_member(
+                let (chat, result) = call_member(
                     &hop,
                     index,
                     &self.inbound_protocol,
@@ -3179,30 +3178,46 @@ fn stream_commits(event: &StreamEvent) -> bool {
     }
 }
 
+fn member_speaks_chat(hop: &Hop) -> bool {
+    let attempt = hop.member.attempt();
+    hofund_codec::service_tier::spoken_protocol(
+        hop.member.protocol(),
+        attempt.wire_protocol.as_str(),
+    ) == hofund_codec::CHAT_PROTOCOL_ID
+}
+
+fn produced_chat(codec: Option<hofund_plugin_api::ProtocolId>) -> bool {
+    codec.is_some_and(|codec| codec.as_str() == hofund_codec::CHAT_PROTOCOL_ID)
+}
+
 async fn call_member(
     hop: &Hop,
     index: usize,
     inbound_protocol: &str,
     attempt: Request,
     hook: Option<Arc<dyn AttemptHook>>,
-) -> Result<Completion, PluginError> {
+) -> (bool, Result<Completion, PluginError>) {
     let span = member_span(hop, index, inbound_protocol);
     let started = Instant::now();
-    let chat = hop.member.protocol() == hofund_codec::CHAT_PROTOCOL_ID;
-    let result = async {
+    let member_chat = member_speaks_chat(hop);
+    let (chat, result) = async {
         match hop
             .member
             .execute_with_attempt(attempt, inbound_protocol, hook)
             .await
         {
-            Ok(completion) => accept(completion, chat).await,
-            Err(error) => Err(error),
+            Ok(completion) => {
+                let (codec, completion) = completion.split_produced();
+                let chat = member_chat || produced_chat(codec);
+                (chat, accept(completion, chat).await)
+            }
+            Err(error) => (member_chat, Err(error)),
         }
     }
     .instrument(span.clone())
     .await;
     record_call(&span, &result_status(result.as_ref().err()), started);
-    result
+    (chat, result)
 }
 
 fn member_span(hop: &Hop, index: usize, inbound_protocol: &str) -> tracing::Span {

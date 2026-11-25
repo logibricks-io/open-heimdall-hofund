@@ -11,8 +11,10 @@ use hofund_codec::CHAT_PROTOCOL_ID;
 use hofund_ir::{
     Extensions, Message, MessageDelta, MessageStop, Request, Response, Role, StreamEvent, Usage,
 };
-use hofund_plugin_api::{BodyStream, MemberId, MemberKey, PluginError, PresetId};
-use hofund_router::{Completion, FailoverPolicy, Member, Router, RouterError};
+use hofund_plugin_api::{BodyStream, MemberId, MemberKey, PluginError, PresetId, ProtocolId};
+use hofund_router::{
+    Completion, CooldownPolicy, Cooldowns, FailoverPolicy, Member, Router, RouterError,
+};
 
 const VOID_DONE: &[u8] = concat!(
     "data: {\"id\":\"void\",\"model\":\"m\",\"choices\":[{\"delta\":{\"content\":\"\",\"role\":\"assistant\"}}]}\n\n",
@@ -50,6 +52,8 @@ enum Reply {
 struct Fake {
     route_id: &'static str,
     member_id: MemberId,
+    protocol: &'static str,
+    stamp_chat: bool,
     hits: Arc<AtomicUsize>,
     replies: Vec<Reply>,
 }
@@ -65,16 +69,14 @@ impl Member for Fake {
     }
 
     fn protocol(&self) -> &str {
-        CHAT_PROTOCOL_ID
+        self.protocol
     }
 
     async fn execute(&self, _request: Request, _inbound: &str) -> Result<Completion, PluginError> {
         let hit = self.hits.fetch_add(1, Ordering::SeqCst);
-        match &self.replies[hit.min(self.replies.len() - 1)] {
-            Reply::Raw(bytes) => Ok(Completion::Raw(BodyStream::from_bytes(Bytes::from_static(
-                bytes,
-            )))),
-            Reply::EmptyEvents => Ok(Completion::Stream(Box::pin(stream::iter(vec![
+        let completion = match &self.replies[hit.min(self.replies.len() - 1)] {
+            Reply::Raw(bytes) => Completion::Raw(BodyStream::from_bytes(Bytes::from_static(bytes))),
+            Reply::EmptyEvents => Completion::Stream(Box::pin(stream::iter(vec![
                 Ok(StreamEvent::MessageDelta(MessageDelta {
                     stop: None,
                     usage: Some(Usage {
@@ -85,12 +87,17 @@ impl Member for Fake {
                     extensions: Extensions::new(),
                 })),
                 Ok(StreamEvent::MessageStop(MessageStop::default())),
-            ])))),
+            ]))),
             Reply::Unary => {
                 let mut message = Message::new(Role::Assistant);
                 message.content.push(hofund_ir::ContentPart::text("hello"));
-                Ok(Completion::Unary(Box::new(Response::new(message))))
+                Completion::Unary(Box::new(Response::new(message)))
             }
+        };
+        if self.stamp_chat {
+            Ok(completion.produced(ProtocolId::OPENAI_CHAT))
+        } else {
+            Ok(completion)
         }
     }
 }
@@ -102,6 +109,22 @@ fn fake(route_id: &'static str, hits: &Arc<AtomicUsize>, replies: Vec<Reply>) ->
             PresetId::try_from(route_id).expect("preset"),
             MemberKey::from_static("row"),
         ),
+        protocol: CHAT_PROTOCOL_ID,
+        stamp_chat: false,
+        hits: Arc::clone(hits),
+        replies,
+    })
+}
+
+fn tagged(route_id: &'static str, hits: &Arc<AtomicUsize>, replies: Vec<Reply>) -> Arc<dyn Member> {
+    Arc::new(Fake {
+        route_id,
+        member_id: MemberId::from_preset(
+            PresetId::try_from(route_id).expect("preset"),
+            MemberKey::from_static("row"),
+        ),
+        protocol: "subscription",
+        stamp_chat: true,
         hits: Arc::clone(hits),
         replies,
     })
@@ -206,6 +229,34 @@ async fn d248_decoded_void_retries_and_fails_over() {
     assert_eq!(routed.upstream_id, "second");
     assert_eq!(first.load(Ordering::SeqCst), 2);
     assert_eq!(second.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn d248_non_chat_label_void_retries_fails_over_without_a_rest_or_leaked_bytes() {
+    let first_hits = Arc::new(AtomicUsize::new(0));
+    let second_hits = Arc::new(AtomicUsize::new(0));
+    let first = tagged(
+        "first",
+        &first_hits,
+        vec![Reply::Raw(VOID_DONE), Reply::Raw(VOID_DONE)],
+    );
+    let second = tagged("second", &second_hits, vec![Reply::Raw(TEXT_REPLY)]);
+    assert_ne!(first.protocol(), CHAT_PROTOCOL_ID);
+    assert_ne!(second.protocol(), CHAT_PROTOCOL_ID);
+    let book = Arc::new(Cooldowns::new(CooldownPolicy::default()));
+    let router = router(vec![first, second]).with_cooldowns(Arc::clone(&book));
+    let routed = dispatch(&router).await.expect("failover");
+    assert_eq!(routed.upstream_id, "second");
+    let body = raw_bytes(routed.completion).await;
+    assert_eq!(body, TEXT_REPLY);
+    assert!(!String::from_utf8_lossy(&body).contains("void"));
+    assert_eq!(first_hits.load(Ordering::SeqCst), 2);
+    assert_eq!(second_hits.load(Ordering::SeqCst), 1);
+    let rested = MemberId::from_preset(
+        PresetId::try_from("first").expect("preset"),
+        MemberKey::from_static("row"),
+    );
+    assert_eq!(book.cooling(&rested), None);
 }
 
 #[tokio::test]

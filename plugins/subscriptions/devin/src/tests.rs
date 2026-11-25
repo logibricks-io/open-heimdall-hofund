@@ -103,7 +103,7 @@ fn collect_events(completion: Completion) -> Result<Vec<StreamEvent>, PluginErro
 }
 
 async fn collect_events_async(completion: Completion) -> Result<Vec<StreamEvent>, PluginError> {
-    let Completion::Stream(mut stream) = completion else {
+    let Completion::Stream(mut stream) = completion.peel() else {
         panic!("expected an event stream");
     };
     let mut events = Vec::new();
