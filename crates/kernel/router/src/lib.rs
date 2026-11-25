@@ -1082,7 +1082,8 @@ impl Router {
         result
     }
 
-    /// Whether hop `index` is resting on a quota refusal that named its deadline.
+    /// Whether hop `index` has a vendor-timed quota or credit rest without an
+    /// open renewal probe.
     fn vendor_timed_quota_at(&self, resolved: &Resolved, index: usize) -> bool {
         let Some(cooldowns) = &self.cooldowns else {
             return false;
@@ -1095,10 +1096,11 @@ impl Router {
     /// Counts input tokens for `request`.
     ///
     /// An upstream that has a count endpoint is asked, with the same failover
-    /// rules as [`Self::dispatch`]. A vendor-timed quota rest is not asked.
-    /// The next member counts, or the result is a character estimate when
-    /// none remains. When every asked upstream has no count endpoint, the
-    /// result is that estimate and [`InputCount::estimated`] is set.
+    /// rules as [`Self::dispatch`]. A vendor-timed quota or credit rest is not
+    /// asked unless its renewal probe is open. The next member counts, or the
+    /// result is a character estimate when none remains. When every asked
+    /// upstream has no count endpoint, the result is that estimate and
+    /// [`InputCount::estimated`] is set.
     ///
     /// # Errors
     ///
@@ -2299,7 +2301,7 @@ fn region_key(provider: &str, model: &str) -> String {
 
 /// What to do with a vendor-timed quota rest before calling the member.
 enum QuotaHold {
-    /// This hop is not that kind of rest.
+    /// This hop is not that kind of rest, or a renewed window opened its probe.
     Proceed,
     /// This hop rests that way, and a later hop can still be asked.
     Skip,
@@ -2990,16 +2992,21 @@ impl DispatchState {
         Ok(None)
     }
 
-    /// A vendor-timed quota rest is not a probe. A later member that can still
-    /// be asked is tried instead. When every remaining member rests that way,
-    /// the first stored words and the soonest reset are the answer.
+    /// A vendor-timed quota or credit rest is not probed unless a renewed
+    /// window opened its one-shot probe. A later member that can still be asked
+    /// is tried instead. When every remaining member is held, the answer uses
+    /// the first held member's class, words, and status, and `Retry-After` at
+    /// the soonest reset, so a mixed quota and credit pool cannot pair one
+    /// member's class with another's status.
     fn quota_hold(&self, asking: &[usize], index: usize) -> QuotaHold {
         let Some(cooldowns) = self.cooldowns.as_ref() else {
             return QuotaHold::Proceed;
         };
         let now = self.now();
         let mut first_message = None;
-        let mut soonest: Option<(Duration, u16)> = None;
+        let mut first_cause = None;
+        let mut first_status = None;
+        let mut soonest: Option<Duration> = None;
         let mut current_held = false;
         let mut other = false;
         let mut any = false;
@@ -3027,17 +3034,21 @@ impl DispatchState {
                 current_held = true;
             }
             if first_message.is_none() {
+                first_cause = Some(cooling.cause());
+                first_status = Some(cooling.status().unwrap_or(429));
                 let text = cooling.error();
                 first_message = Some(if text.is_empty() {
-                    "out of quota".to_owned()
+                    match cooling.cause() {
+                        CooldownCause::Credit => "out of credit".to_owned(),
+                        _ => "out of quota".to_owned(),
+                    }
                 } else {
                     text.to_owned()
                 });
             }
             let left = cooling.until().saturating_duration_since(now);
-            let status = cooling.status().unwrap_or(429);
-            if soonest.as_ref().is_none_or(|(best, _)| left < *best) {
-                soonest = Some((left, status));
+            if soonest.is_none_or(|best| left < best) {
+                soonest = Some(left);
             }
         }
         if !any || (!current_held && other) {
@@ -3046,11 +3057,16 @@ impl DispatchState {
         if other {
             return QuotaHold::Skip;
         }
-        let Some((left, status)) = soonest else {
+        let Some(left) = soonest else {
             return QuotaHold::Proceed;
         };
         let message = first_message.unwrap_or_else(|| "out of quota".to_owned());
-        let mut error = PluginError::quota_status(status, message).with_model_scope();
+        let status = first_status.unwrap_or(429);
+        let mut error = match first_cause {
+            Some(CooldownCause::Credit) => PluginError::credit_status(status, message),
+            _ => PluginError::quota_status(status, message),
+        }
+        .with_model_scope();
         if !left.is_zero() {
             error = error.with_reset_after(left).with_retry_after(left);
         }
@@ -3427,11 +3443,18 @@ fn cooling_labels(cooldowns: Option<&Arc<Cooldowns>>, resolved: &Resolved) -> Ve
         .collect()
 }
 
-/// The active rest when it is a quota refusal that named its own deadline.
+/// The active rest when a quota or credit refusal named its deadline and no
+/// renewed window has opened its one-shot probe.
 fn vendor_timed_quota_rest(cooldowns: &Cooldowns, hop: &Hop, model: &str) -> Option<Cooling> {
     cooldowns
         .cooling_for_model(hop.member.id(), model)
-        .filter(|cooling| cooling.cause() == CooldownCause::Quota && cooling.vendor_timed())
+        .filter(|cooling| {
+            matches!(
+                cooling.cause(),
+                CooldownCause::Quota | CooldownCause::Credit
+            ) && cooling.vendor_timed()
+                && !cooldowns.renewal_probe_for_model(hop.member.id(), model)
+        })
 }
 
 fn order_hops(hops: Vec<Hop>, cooldowns: &Cooldowns, bare: &str) -> (Vec<Hop>, Vec<Hop>) {

@@ -2,12 +2,13 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
 use hofund_ir::{ContentPart, Message, Request, Response, Role, estimate_input_tokens};
 use hofund_plugin_api::{
     CountOutcome, MemberId, MemberKey, PluginError, PluginId, PresetId, QuotaObservation,
+    QuotaWindow,
 };
 use hofund_router::strategy::{Strategy, StrategyState};
 use hofund_router::{
@@ -24,6 +25,9 @@ struct Fake {
 
 enum Behavior {
     Fail,
+    CountQuota,
+    RefuseCredit,
+    RefuseQuota,
     Unary,
     MissingCount,
     Count(u64),
@@ -47,6 +51,10 @@ impl Member for Fake {
         self.seen.lock().expect("seen").push(self.id);
         match self.behavior {
             Behavior::Fail => Err(PluginError::status_error(503, "down")),
+            Behavior::RefuseCredit => Err(PluginError::credit_status(402, "allowance exhausted")
+                .with_reset_after(Duration::from_secs(6 * 60 * 60))),
+            Behavior::RefuseQuota => Err(PluginError::quota_status(429, "allowance exhausted")
+                .with_reset_after(Duration::from_secs(6 * 60 * 60))),
             _ => {
                 let mut message = Message::new(Role::Assistant);
                 message.content.push(ContentPart::text("ok"));
@@ -63,6 +71,8 @@ impl Member for Fake {
         self.seen.lock().expect("seen").push(self.id);
         match self.behavior {
             Behavior::Fail => Err(PluginError::status_error(503, "down")),
+            Behavior::CountQuota => Err(PluginError::quota_status(429, "allowance exhausted")
+                .with_reset_after(Duration::from_secs(6 * 60 * 60))),
             Behavior::Count(tokens) => Ok(CountOutcome::Counted(tokens)),
             _ => Ok(CountOutcome::Unsupported),
         }
@@ -395,6 +405,135 @@ async fn b5e_routing_reads_the_rest_of_the_hop_wire_model() {
         .expect("dispatch");
     assert_eq!(routed.upstream_id, "second");
     assert_eq!(seen.lock().expect("seen").as_slice(), ["second"]);
+}
+
+#[tokio::test]
+async fn d251_3_renewal_lets_a_lone_member_ask_once() {
+    for credit in [false, true] {
+        let (book, seen) = fixture();
+        let id = member_id("first");
+        book.configure_credit_window(&id);
+        let reset = SystemTime::now() + Duration::from_secs(3 * 60 * 60);
+        let reading =
+            |used| QuotaWindow::new("window", used, Some(10), Some(reset)).expect("window");
+        let refusal = || {
+            if credit {
+                PluginError::credit_status(402, "allowance exhausted")
+            } else {
+                PluginError::quota_status(429, "allowance exhausted")
+            }
+            .with_reset_after(Duration::from_secs(6 * 60 * 60))
+        };
+        book.observe_credit_window(&id, &[reading(10)]);
+        book.record_failure(&id, &refusal())
+            .expect("vendor-timed rest");
+        let behavior = if credit {
+            Behavior::RefuseCredit
+        } else {
+            Behavior::RefuseQuota
+        };
+        let router = router(vec![fake("first", &seen, behavior)], &book);
+        let status = if credit { 402 } else { 429 };
+
+        let held = router.dispatch(&Request::new("demo"), "inbound").await;
+        assert!(seen.lock().expect("seen").is_empty());
+        let Err(RouterError::Upstream { error, .. }) = held else {
+            panic!("expected the stored refusal");
+        };
+        assert_eq!(error.status(), Some(status));
+        assert_eq!(error.message(), "allowance exhausted");
+        assert_eq!(error.is_credit(), credit);
+
+        book.observe_credit_window(&id, &[reading(8)]);
+        let probed = router.dispatch(&Request::new("demo"), "inbound").await;
+        assert_eq!(seen.lock().expect("seen").as_slice(), ["first"]);
+        let Err(RouterError::Upstream { error, .. }) = probed else {
+            panic!("expected the upstream refusal");
+        };
+        assert_eq!(error.status(), Some(status));
+        book.record_failure(&id, &refusal())
+            .expect("same-time refusal");
+
+        seen.lock().expect("seen").clear();
+        book.observe_credit_window(&id, &[reading(10)]);
+        book.observe_credit_window(&id, &[reading(8)]);
+        let held_again = router.dispatch(&Request::new("demo"), "inbound").await;
+        assert!(seen.lock().expect("seen").is_empty());
+        let Err(RouterError::Upstream { error, .. }) = held_again else {
+            panic!("expected the held refusal");
+        };
+        assert_eq!(error.status(), Some(status));
+        assert_eq!(error.is_credit(), credit);
+    }
+}
+
+#[tokio::test]
+async fn d251_7_ready_sibling_answers_before_the_renewal_probe() {
+    let (book, seen) = fixture();
+    let id = member_id("first");
+    book.configure_credit_window(&id);
+    let reset = SystemTime::now() + Duration::from_secs(3 * 60 * 60);
+    let reading = |used| QuotaWindow::new("window", used, Some(10), Some(reset)).expect("window");
+    let refusal = PluginError::quota_status(429, "allowance exhausted")
+        .with_reset_after(Duration::from_secs(6 * 60 * 60));
+    book.observe_credit_window(&id, &[reading(10)]);
+    book.record_failure(&id, &refusal)
+        .expect("vendor-timed rest");
+    book.observe_credit_window(&id, &[reading(8)]);
+    assert!(book.renewal_probe(&id));
+    let router = router(
+        vec![
+            fake("first", &seen, Behavior::RefuseQuota),
+            fake("second", &seen, Behavior::Unary),
+        ],
+        &book,
+    );
+
+    let routed = router
+        .dispatch(&Request::new("demo"), "inbound")
+        .await
+        .expect("ready sibling");
+    assert_eq!(routed.upstream_id, "second");
+    assert_eq!(seen.lock().expect("seen").as_slice(), ["second"]);
+}
+
+#[tokio::test]
+async fn d251_11_count_can_use_then_close_the_renewal_probe() {
+    let (book, seen) = fixture();
+    let id = member_id("first");
+    book.configure_credit_window(&id);
+    let reset = SystemTime::now() + Duration::from_secs(3 * 60 * 60);
+    let reading = |used| QuotaWindow::new("window", used, Some(10), Some(reset)).expect("window");
+    let refusal = || {
+        PluginError::quota_status(429, "allowance exhausted")
+            .with_reset_after(Duration::from_secs(6 * 60 * 60))
+    };
+    book.observe_credit_window(&id, &[reading(10)]);
+    book.record_failure(&id, &refusal())
+        .expect("vendor-timed rest");
+    book.observe_credit_window(&id, &[reading(8)]);
+    assert!(book.renewal_probe(&id));
+    let router = router(vec![fake("first", &seen, Behavior::CountQuota)], &book);
+
+    let counted = router.count(&Request::new("demo"), "inbound").await;
+    assert_eq!(seen.lock().expect("seen").as_slice(), ["first"]);
+    let Err(RouterError::Upstream { error, .. }) = counted else {
+        panic!("expected the count refusal");
+    };
+    assert_eq!(error.status(), Some(429));
+    book.record_failure(&id, &refusal())
+        .expect("same-time count refusal");
+    assert!(!book.renewal_probe(&id));
+
+    seen.lock().expect("seen").clear();
+    book.observe_credit_window(&id, &[reading(10)]);
+    book.observe_credit_window(&id, &[reading(8)]);
+    let held = router.dispatch(&Request::new("demo"), "inbound").await;
+    assert!(seen.lock().expect("seen").is_empty());
+    let Err(RouterError::Upstream { error, .. }) = held else {
+        panic!("expected the held refusal");
+    };
+    assert_eq!(error.status(), Some(429));
 }
 
 #[tokio::test]
