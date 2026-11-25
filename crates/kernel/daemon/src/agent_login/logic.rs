@@ -659,4 +659,59 @@ mod tests {
         assert_eq!(jump.1, "carol@x.com");
         assert!(!jump.2);
     }
+
+    fn held_out() -> LoginQuota {
+        LoginQuota {
+            readable: true,
+            used_share: 100.0,
+            used_up: true,
+            held: true,
+            error: false,
+        }
+    }
+
+    fn read_error() -> LoginQuota {
+        LoginQuota {
+            readable: false,
+            error: true,
+            ..LoginQuota::default()
+        }
+    }
+
+    fn spend_policy() -> LoginPolicy {
+        LoginPolicy {
+            routing: "smart".to_owned(),
+            keep_login: false,
+            switch_only: false,
+            sign_in_spends: true,
+        }
+    }
+
+    #[test]
+    fn d254_held_active_moves_and_a_held_spare_is_skipped() {
+        let rows = vec![
+            row("a", true, true),
+            row("b", true, false),
+            row("c", true, false),
+        ];
+        let quotas = vec![
+            ("a".to_owned(), held_out()),
+            ("b".to_owned(), held_out()),
+            ("c".to_owned(), quota(10.0)),
+        ];
+        let jump = next_login(&rows, &quotas, &spend_policy(), None).expect("move");
+        assert_eq!(jump.0, "a");
+        assert_eq!(jump.1, "c");
+        assert!(!jump.2);
+    }
+
+    #[test]
+    fn d254_plain_read_error_stays() {
+        let rows = vec![row("a", true, true), row("b", true, false)];
+        let quotas = vec![
+            ("a".to_owned(), read_error()),
+            ("b".to_owned(), quota(10.0)),
+        ];
+        assert!(next_login(&rows, &quotas, &spend_policy(), None).is_none());
+    }
 }

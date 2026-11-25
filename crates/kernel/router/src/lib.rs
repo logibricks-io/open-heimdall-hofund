@@ -34,7 +34,8 @@ use std::time::{Duration, Instant, SystemTime};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use hofund_codec::responses_empty::{
-    EMPTY_REPLY_MESSAGE, decoded_stream_empty, relayed_sse_empty_without_content,
+    ChatStreamCheck, EMPTY_REPLY_MESSAGE, chat_response_empty, decoded_chat_stream_empty,
+    decoded_stream_empty, empty_reply_message, relayed_sse_empty_without_content,
     relayed_sse_event_boundary, relayed_sse_has_content, relayed_sse_has_opaque_content,
     relayed_sse_lifecycle_only,
 };
@@ -2433,14 +2434,34 @@ impl DispatchState {
                     }
                 });
             }
-            let result = call_member(
-                &hop,
-                index,
-                &self.inbound_protocol,
-                attempt,
-                self.hook.clone(),
-            )
-            .await;
+            let mut empty_retried = false;
+            let result = loop {
+                let (chat, result) = call_member(
+                    &hop,
+                    index,
+                    &self.inbound_protocol,
+                    attempt.clone(),
+                    self.hook.clone(),
+                )
+                .await;
+                if chat
+                    && !empty_retried
+                    && let Err(error) = &result
+                    && error.message().contains(EMPTY_REPLY_MESSAGE)
+                {
+                    self.note_try(
+                        index,
+                        &hop,
+                        &upstream_model,
+                        true,
+                        try_status(error),
+                        fail_text(error),
+                    );
+                    empty_retried = true;
+                    continue;
+                }
+                break result;
+            };
             match result {
                 Ok(completion) => {
                     if let Some(hook) = self.hook.as_ref() {
@@ -3116,7 +3137,7 @@ fn label_model(completion: Completion, model: String) -> Completion {
     }
 }
 
-async fn accept(completion: Completion) -> Result<Completion, PluginError> {
+async fn accept(completion: Completion, chat: bool) -> Result<Completion, PluginError> {
     let empty = || PluginError::status_error(502, EMPTY_REPLY_MESSAGE).without_cooldown();
     match completion {
         Completion::Stream(mut stream) => {
@@ -3124,7 +3145,18 @@ async fn accept(completion: Completion) -> Result<Completion, PluginError> {
             while let Some(item) = stream.next().await {
                 let event = item?;
                 let commits = stream_commits(&event);
+                let terminal = matches!(&event, StreamEvent::MessageStop(_));
                 held.push(event);
+                if chat {
+                    if let Some(usage) = decoded_chat_stream_empty(&held) {
+                        if terminal {
+                            return Err(empty_with_usage(usage));
+                        }
+                        continue;
+                    }
+                    let head = futures_util::stream::iter(held.into_iter().map(Ok));
+                    return Ok(Completion::Stream(Box::pin(head.chain(stream))));
+                }
                 if commits {
                     if decoded_stream_empty(&held) {
                         return Err(empty());
@@ -3133,7 +3165,11 @@ async fn accept(completion: Completion) -> Result<Completion, PluginError> {
                     return Ok(Completion::Stream(Box::pin(head.chain(stream))));
                 }
             }
-            if decoded_stream_empty(&held) {
+            if chat {
+                if let Some(usage) = decoded_chat_stream_empty(&held) {
+                    return Err(empty_with_usage(usage));
+                }
+            } else if decoded_stream_empty(&held) {
                 return Err(empty());
             }
             Ok(Completion::Stream(Box::pin(futures_util::stream::iter(
@@ -3142,13 +3178,14 @@ async fn accept(completion: Completion) -> Result<Completion, PluginError> {
         }
         Completion::Raw(mut body) => {
             let mut buffered = Vec::new();
+            let mut chat_check = ChatStreamCheck::default();
             loop {
                 // Lifecycle-only events are held only while the next chunk is
                 // already there: an upstream that goes quiet after
                 // `response.created` gets that event released, so the client
                 // learns the response id (and can interrupt) instead of the
                 // turn hanging until the upstream speaks again.
-                let next = if relayed_sse_event_boundary(&buffered) {
+                let next = if !chat && relayed_sse_event_boundary(&buffered) {
                     match futures_util::FutureExt::now_or_never(body.next_chunk()) {
                         Some(next) => next,
                         None => {
@@ -3161,7 +3198,12 @@ async fn accept(completion: Completion) -> Result<Completion, PluginError> {
                 };
                 match next {
                     None => {
-                        if relayed_sse_empty_without_content(&buffered) {
+                        if chat {
+                            chat_check.finish();
+                            if let Some(usage) = chat_check.empty_usage() {
+                                return Err(empty_with_usage(usage));
+                            }
+                        } else if relayed_sse_empty_without_content(&buffered) {
                             return Err(empty());
                         }
                         // the upstream has ended: hand back only what was read,
@@ -3183,6 +3225,19 @@ async fn accept(completion: Completion) -> Result<Completion, PluginError> {
                     }
                     Some(Ok(chunk)) => {
                         buffered.extend_from_slice(&chunk);
+                        if chat {
+                            chat_check.observe(&chunk);
+                            if chat_check.is_terminal()
+                                && let Some(usage) = chat_check.empty_usage()
+                            {
+                                return Err(empty_with_usage(usage));
+                            }
+                            if chat_check.has_reply() || chat_check.is_opaque() {
+                                let head = Bytes::from(std::mem::take(&mut buffered));
+                                return Ok(Completion::Raw(BodyStream::resume(head, body)));
+                            }
+                            continue;
+                        }
                         if relayed_sse_empty_without_content(&buffered) {
                             return Err(empty());
                         }
@@ -3199,9 +3254,14 @@ async fn accept(completion: Completion) -> Result<Completion, PluginError> {
             }
         }
         Completion::Unary(response) => {
-            if response.usage.as_ref().is_some_and(|usage| {
-                usage.input_tokens.unwrap_or(0) + usage.output_tokens.unwrap_or(0) == 0
-            }) && response.message.content.is_empty()
+            if chat && chat_response_empty(&response) {
+                return Err(empty_with_usage(response.usage.clone().unwrap_or_default()));
+            }
+            if !chat
+                && response.usage.as_ref().is_some_and(|usage| {
+                    usage.input_tokens.unwrap_or(0) + usage.output_tokens.unwrap_or(0) == 0
+                })
+                && response.message.content.is_empty()
             {
                 return Err(empty());
             }
@@ -3209,6 +3269,10 @@ async fn accept(completion: Completion) -> Result<Completion, PluginError> {
         }
         other => Ok(other),
     }
+}
+
+fn empty_with_usage(usage: hofund_ir::Usage) -> PluginError {
+    PluginError::status_error(502, empty_reply_message(&usage)).without_cooldown()
 }
 
 fn stream_commits(event: &StreamEvent) -> bool {
@@ -3223,29 +3287,46 @@ fn stream_commits(event: &StreamEvent) -> bool {
     }
 }
 
+fn member_speaks_chat(hop: &Hop) -> bool {
+    let attempt = hop.member.attempt();
+    hofund_codec::service_tier::spoken_protocol(
+        hop.member.protocol(),
+        attempt.wire_protocol.as_str(),
+    ) == hofund_codec::CHAT_PROTOCOL_ID
+}
+
+fn produced_chat(codec: Option<hofund_plugin_api::ProtocolId>) -> bool {
+    codec.is_some_and(|codec| codec.as_str() == hofund_codec::CHAT_PROTOCOL_ID)
+}
+
 async fn call_member(
     hop: &Hop,
     index: usize,
     inbound_protocol: &str,
     attempt: Request,
     hook: Option<Arc<dyn AttemptHook>>,
-) -> Result<Completion, PluginError> {
+) -> (bool, Result<Completion, PluginError>) {
     let span = member_span(hop, index, inbound_protocol);
     let started = Instant::now();
-    let result = async {
+    let member_chat = member_speaks_chat(hop);
+    let (chat, result) = async {
         match hop
             .member
             .execute_with_attempt(attempt, inbound_protocol, hook)
             .await
         {
-            Ok(completion) => accept(completion).await,
-            Err(error) => Err(error),
+            Ok(completion) => {
+                let (codec, completion) = completion.split_produced();
+                let chat = member_chat || produced_chat(codec);
+                (chat, accept(completion, chat).await)
+            }
+            Err(error) => (member_chat, Err(error)),
         }
     }
     .instrument(span.clone())
     .await;
     record_call(&span, &result_status(result.as_ref().err()), started);
-    result
+    (chat, result)
 }
 
 fn member_span(hop: &Hop, index: usize, inbound_protocol: &str) -> tracing::Span {

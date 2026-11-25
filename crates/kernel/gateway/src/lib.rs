@@ -451,6 +451,8 @@ fn unix_ms_now() -> u64 {
 #[doc(hidden)]
 pub const CONTROL_DRAIN: std::time::Duration = std::time::Duration::from_secs(4);
 
+/// Hook run before the HTTP drain starts.
+type BeforeDrainHook = Box<dyn FnOnce() + Send>;
 /// Hook run after the HTTP drain, before [`Running`] is dropped.
 type AfterDrainHook = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
 
@@ -472,6 +474,7 @@ pub struct Running {
     realtimes: Option<Arc<realtime::Registry>>,
     relisten: Option<Relisten>,
     fatal: Option<watch::Receiver<Option<String>>>,
+    before_drain: Option<BeforeDrainHook>,
     after_drain: Option<AfterDrainHook>,
 }
 
@@ -768,11 +771,29 @@ impl Gateway {
     /// The returned server can move to another address with
     /// [`Running::relisten`].
     pub async fn bind(self, listen: SocketAddr) -> Result<Running, GatewayError> {
+        self.bind_with_listener(listen, None).await
+    }
+
+    /// Binds `listen`, or serves `prepared` when a test already holds that socket.
+    ///
+    /// A prepared socket whose port is not `listen`'s port is rejected, unless
+    /// `listen` uses port 0. Production callers use [`Self::bind`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GatewayError`] when the address cannot be bound or the
+    /// prepared socket does not match `listen`.
+    #[doc(hidden)]
+    pub async fn bind_with_listener(
+        self,
+        listen: SocketAddr,
+        prepared: Option<std::net::TcpListener>,
+    ) -> Result<Running, GatewayError> {
         let sockets = Arc::clone(&self.inner.sockets);
         let realtimes = Arc::clone(&self.inner.realtimes);
         let prune = self.inner.keys.clone().map(issue_keys::prune_task);
         let mut running =
-            serve_relistenable(self.into_router(), listen, sockets, realtimes).await?;
+            serve_relistenable(self.into_router(), listen, prepared, sockets, realtimes).await?;
         if let Some(task) = prune {
             running = running.with_task(task);
         }
@@ -784,12 +805,17 @@ impl Gateway {
 async fn serve_relistenable(
     router: axum::Router,
     listen: SocketAddr,
+    prepared: Option<std::net::TcpListener>,
     sockets: Arc<responses_ws::SocketRegistry>,
     realtimes: Arc<realtime::Registry>,
 ) -> Result<Running, GatewayError> {
-    let listener = TcpListener::bind(listen)
-        .await
-        .map_err(|source| GatewayError::Bind { listen, source })?;
+    let listener = match prepared {
+        Some(prepared) => relisten::adopt_std_listener(listen, prepared)
+            .map_err(|source| GatewayError::Bind { listen, source })?,
+        None => TcpListener::bind(listen)
+            .await
+            .map_err(|source| GatewayError::Bind { listen, source })?,
+    };
     let local_addr = listener
         .local_addr()
         .map_err(|source| GatewayError::Bind { listen, source })?;
@@ -833,6 +859,7 @@ impl Running {
             realtimes: None,
             relisten: None,
             fatal: None,
+            before_drain: None,
             after_drain: None,
         }
     }
@@ -875,6 +902,19 @@ impl Running {
             handle.set_hook(hook);
         }
         self
+    }
+
+    /// Keeps `listener` bound until a relisten asks for its address.
+    ///
+    /// The socket is installed in place of a fresh bind, so the port is never
+    /// released for another process to take. The server must be one that can
+    /// relisten.
+    #[doc(hidden)]
+    pub fn hold_for_relisten(&self, listener: std::net::TcpListener) {
+        self.relisten
+            .as_ref()
+            .expect("this server cannot relisten")
+            .hold_for_relisten(listener);
     }
 
     /// Attaches the channel on which the daemon reports a fatal error. A
@@ -950,6 +990,17 @@ impl Running {
     #[must_use]
     pub fn with_resource<T: std::any::Any + Send>(mut self, resource: T) -> Self {
         self.resources.push(Box::new(resource));
+        self
+    }
+
+    /// Runs `hook` before listeners and in-flight requests are drained.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_before_drain<F>(mut self, hook: F) -> Self
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.before_drain = Some(Box::new(hook));
         self
     }
 
@@ -1042,9 +1093,13 @@ impl Running {
     /// Asks the server to stop, aborts attached tasks, and waits for the server.
     /// Control listeners close connections that outlast their drain deadline.
     /// Responses sockets close after their turns; dropping a bounded drain cuts them.
-    /// After the HTTP drain, any [`Self::with_after_drain`] hook runs so
-    /// constructed upstream providers can shut down before they are dropped.
+    /// Any [`Self::with_before_drain`] hook runs first. After the HTTP drain,
+    /// any [`Self::with_after_drain`] hook runs so constructed upstream
+    /// providers can shut down before they are dropped.
     pub async fn shutdown(mut self) {
+        if let Some(hook) = self.before_drain.take() {
+            hook();
+        }
         self.request_shutdown();
         for task in self.attached.drain(..) {
             task.abort();
@@ -1088,6 +1143,9 @@ impl Running {
 
 impl Drop for Running {
     fn drop(&mut self) {
+        if let Some(hook) = self.before_drain.take() {
+            hook();
+        }
         for task in self.attached.drain(..) {
             task.abort();
         }
@@ -2205,6 +2263,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
             }
         }
     });
+    track.client_waiting(Arc::clone(&app.usage), &model_request, &identity);
     let result = tokio::select! {
         result = &mut dispatch => result,
         _ = notice => {
@@ -3277,6 +3336,21 @@ fn failure(
         Some(upstream)
     };
     track.end_with(member, status.as_u16(), None, None);
+    if request.stream
+        && codec.id() == hofund_codec::CHAT_PROTOCOL_ID
+        && message.contains(hofund_codec::EMPTY_REPLY_MESSAGE)
+    {
+        let mut bytes = codec.encode_stream_error(status.as_u16(), &message);
+        bytes.extend_from_slice(codec.severed_stream_end());
+        return with_named_session(
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, codec.stream_content_type())
+                .body(Body::from(bytes))
+                .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "stream")),
+            &ledger.session_id,
+        );
+    }
     if compacts_in_stream_client(|name| headers.get(name).and_then(|value| value.to_str().ok()))
         && request.stream
         && codec.id() == ProtocolId::OPENAI_RESPONSES.as_str()

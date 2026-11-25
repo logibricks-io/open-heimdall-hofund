@@ -720,7 +720,8 @@ fn plugin_error(error: ProviderError) -> PluginError {
 }
 
 fn plugin_completion(completion: ProviderCompletion) -> PluginCompletion {
-    match completion {
+    let (codec, completion) = completion.split_produced();
+    let mapped = match completion {
         ProviderCompletion::Unary(response) => PluginCompletion::Unary(response),
         ProviderCompletion::Stream(stream) => {
             PluginCompletion::Stream(Box::pin(stream.map(|item| item.map_err(plugin_error))))
@@ -730,6 +731,11 @@ fn plugin_completion(completion: ProviderCompletion) -> PluginCompletion {
                 stream.map(|item| item.map_err(plugin_error)),
             ))
         }
+        ProviderCompletion::Produced { inner, .. } => plugin_completion(*inner),
+    };
+    match codec {
+        Some(codec) => mapped.produced(codec),
+        None => mapped,
     }
 }
 

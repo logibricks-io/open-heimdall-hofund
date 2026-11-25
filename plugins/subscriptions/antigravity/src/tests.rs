@@ -577,7 +577,7 @@ fn r49c_recorded_unary_and_stream_use_the_daily_code_assist_envelope() {
         let completion = block_on(upstream.execute(request, ProtocolId::GENERATIVE_LANGUAGE))
             .expect("recorded reply");
         if stream {
-            let Completion::Raw(mut body) = completion else {
+            let Completion::Raw(mut body) = completion.peel() else {
                 panic!("raw same-protocol stream");
             };
             let text = block_on(async move {

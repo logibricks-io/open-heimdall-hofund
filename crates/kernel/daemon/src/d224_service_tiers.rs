@@ -679,7 +679,7 @@ async fn d224_wire_fold_keeps_the_completed_served_tier() {
     )
     .await
     .expect("sent");
-    let Completion::Unary(response) = sent.fold().await.expect("folded") else {
+    let Completion::Unary(response) = sent.fold().await.expect("folded").peel() else {
         panic!("folded reply");
     };
     assert_eq!(

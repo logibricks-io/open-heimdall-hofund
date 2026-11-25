@@ -1136,7 +1136,8 @@ fn watch_completion(
     cooldowns: Arc<Cooldowns>,
     reload: Weak<Table>,
 ) -> Completion {
-    match completion {
+    let (codec, completion) = completion.split_produced();
+    let watched = match completion {
         Completion::Stream(stream) => Completion::Stream(Box::pin(Watched::new(
             stream, id, idle, failed, cooldowns, reload,
         ))),
@@ -1148,7 +1149,14 @@ fn watch_completion(
             cooldowns,
             reload,
         ))),
+        Completion::Produced { inner, .. } => {
+            watch_completion(*inner, id, idle, failed, cooldowns, reload)
+        }
         other => other,
+    };
+    match codec {
+        Some(codec) => watched.produced(codec),
+        None => watched,
     }
 }
 
@@ -1159,7 +1167,8 @@ fn record_completion(
     cooldowns: Arc<Cooldowns>,
     revision: u64,
 ) -> Completion {
-    match completion {
+    let (codec, completion) = completion.split_produced();
+    let recorded = match completion {
         Completion::Stream(stream) => Completion::Stream(Box::pin(OutcomeStream::new(
             stream, id, model, cooldowns, revision,
         ))),
@@ -1170,6 +1179,9 @@ fn record_completion(
             cooldowns,
             revision,
         ))),
+        Completion::Produced { inner, .. } => {
+            record_completion(*inner, id, model, cooldowns, revision)
+        }
         other => {
             if model.is_empty() {
                 cooldowns.record_success_if_unchanged(&id, revision);
@@ -1178,6 +1190,10 @@ fn record_completion(
             }
             other
         }
+    };
+    match codec {
+        Some(codec) => recorded.produced(codec),
+        None => recorded,
     }
 }
 
@@ -1338,7 +1354,8 @@ where
 }
 
 fn map_completion(completion: ProviderCompletion) -> Completion {
-    match completion {
+    let (codec, completion) = completion.split_produced();
+    let mapped = match completion {
         ProviderCompletion::Unary(response) => Completion::Unary(response),
         ProviderCompletion::Stream(stream) => {
             Completion::Stream(Box::pin(stream.map(|item| item.map_err(into_plugin))))
@@ -1346,6 +1363,11 @@ fn map_completion(completion: ProviderCompletion) -> Completion {
         ProviderCompletion::Raw(stream) => Completion::Raw(BodyStream::from_stream(
             stream.map(|item| item.map_err(into_plugin)),
         )),
+        ProviderCompletion::Produced { inner, .. } => map_completion(*inner),
+    };
+    match codec {
+        Some(codec) => mapped.produced(codec),
+        None => mapped,
     }
 }
 

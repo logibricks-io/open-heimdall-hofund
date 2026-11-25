@@ -1452,6 +1452,36 @@ fn r5_18_complete_sign_in_rejects_idle_pending() {
 }
 
 #[test]
+fn d254_a_limit_line_counts_as_spent_and_a_401_does_not() {
+    let dir = tempfile::tempdir().expect("dir");
+    let limit_host = host(&dir);
+    let sub = subscription(&limit_host);
+    let id = account_id_from(&["claude", UUID]);
+    store(&limit_host, &id, &signed_in_blob());
+    limit_host
+        .process()
+        .script_piped(PipedScript::new().exits(|_| {
+            vec!["You've hit your weekly limit · resets Nov 24, 2027 at 5am (UTC)\n".to_owned()]
+        }));
+    let windows = block_on(sub.quota(&id, limit_host.context())).expect("limit counts as spent");
+    assert!(
+        windows
+            .iter()
+            .any(|window| window.held() && window.used() == 100)
+    );
+
+    let denied = tempfile::tempdir().expect("dir");
+    let denied_host = host(&denied);
+    let sub = subscription(&denied_host);
+    store(&denied_host, &id, &signed_in_blob());
+    denied_host
+        .process()
+        .script_piped(PipedScript::new().exits(|_| vec!["HTTP 401 Unauthorized\n".to_owned()]));
+    let error = block_on(sub.quota(&id, denied_host.context())).expect_err("401 stays an error");
+    assert_eq!(error.kind(), PluginErrorKind::Auth);
+}
+
+#[test]
 fn r5_19_quota_removes_credentials_file() {
     let dir = tempfile::tempdir().expect("dir");
     let host = host(&dir);
@@ -2232,6 +2262,35 @@ fn claude_for(host: &TestHost) -> crate::Claude {
         bridge: crate::bridge::Bridge::new(),
         limits: crate::limits::Store::new(),
     }
+}
+
+#[test]
+fn d253_agent_sign_in_switch_hands_over_the_bridge_account() {
+    let dir = tempfile::tempdir().expect("dir");
+    let agent_home = dir.path().join("claude");
+    let host = host(&dir);
+    let claude = claude_for(&host);
+    let id = account_id_from(&["claude", UUID]);
+    store(&host, &id, &signed_in_blob());
+    let run = claude.bridge.park_run(id.clone(), Vec::new());
+    claude.bridge.ensure_session_run(run, &id, Vec::new());
+    let request: hofund_plugin_api::Request = serde_json::from_value(serde_json::json!({
+        "model": "claude-sonnet-4-5",
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+        "tools": [{"name": "read", "input_schema": {"type": "object"}}]
+    }))
+    .expect("request");
+    claude.bridge.ended(
+        run,
+        &id,
+        &request,
+        "hello",
+        crate::bridge::session::TurnStop::Stop,
+        true,
+    );
+    assert_eq!(claude.bridge.idle_len(), 1);
+    block_on(claude.write_agent_sign_in(&id, &agent_home, host.context())).expect("switch");
+    assert_eq!(claude.bridge.idle_len(), 0);
 }
 
 #[test]

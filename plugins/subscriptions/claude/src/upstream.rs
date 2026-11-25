@@ -2,8 +2,8 @@
 
 use std::ffi::OsString;
 use std::path::PathBuf;
-#[cfg(test)]
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use futures_util::stream;
@@ -19,13 +19,21 @@ use crate::bridge::run::{
     SpawnPlan, StartSpec, env_deny, events_allowing_tools, events_from_stdout, has_tools,
     reject_non_text, start_plan, stdin_from_said, stdin_from_since, workdir,
 };
-use crate::bridge::session::{TurnStop, has_reply};
+use crate::bridge::session::{CancelGuard, TurnStop, has_reply};
 use crate::launcher;
 use crate::proxy;
 use crate::{COMMAND, creds, setup_token};
 
 #[cfg(test)]
 type TestRunner = Arc<dyn Fn(&SpawnPlan) -> Result<String, PluginError> + Send + Sync>;
+#[cfg(test)]
+type AsyncTestRunner = Arc<
+    dyn for<'a> Fn(
+            &'a SpawnPlan,
+        ) -> futures_util::future::BoxFuture<'a, Result<String, PluginError>>
+        + Send
+        + Sync,
+>;
 
 /// Serves text turns and parked tool continuations through Claude Code.
 pub(crate) struct ClaudeUpstream {
@@ -36,6 +44,8 @@ pub(crate) struct ClaudeUpstream {
     limits: crate::limits::Store,
     #[cfg(test)]
     runner: Option<TestRunner>,
+    #[cfg(test)]
+    async_runner: Option<AsyncTestRunner>,
 }
 
 impl ClaudeUpstream {
@@ -56,6 +66,8 @@ impl ClaudeUpstream {
             limits,
             #[cfg(test)]
             runner: None,
+            #[cfg(test)]
+            async_runner: None,
         }
     }
 
@@ -64,6 +76,14 @@ impl ClaudeUpstream {
     #[must_use]
     pub(crate) fn with_runner(mut self, runner: TestRunner) -> Self {
         self.runner = Some(runner);
+        self
+    }
+
+    /// Overrides the spawn with an asynchronous fake runner.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_async_runner(mut self, runner: AsyncTestRunner) -> Self {
+        self.async_runner = Some(runner);
         self
     }
 
@@ -84,6 +104,12 @@ impl ClaudeUpstream {
         spec: &StartSpec,
         run_id: Option<u64>,
     ) -> Result<String, PluginError> {
+        #[cfg(test)]
+        if let Some(runner) = &self.async_runner {
+            let text = runner(plan).await?;
+            self.note_stdout(run_id, &text);
+            return Ok(text);
+        }
         #[cfg(test)]
         if let Some(runner) = &self.runner {
             let text = runner(plan)?;
@@ -211,22 +237,75 @@ fn running_as_root() -> bool {
 impl UpstreamProvider for ClaudeUpstream {
     async fn execute(
         &self,
-        request: Request,
-        _inbound: ProtocolId,
+        mut request: Request,
+        inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
         reject_non_text(&request)?;
+        if let Some(error) =
+            crate::said_out::block_request(&self.host, &self.account, &request.model)
+        {
+            return Err(error);
+        }
         self.bridge.use_ask(self.host.ask().clone());
-        let mut request = request;
         let advisor_model = crate::bridge::advisor::prepare(&mut request, self.host.ask());
+        let guard = CancelGuard::arm(
+            self.bridge.clone(),
+            request.clone(),
+            self.account.clone(),
+            None,
+            Arc::new(AtomicBool::new(false)),
+        );
+        guard.rewatch(request.clone()).await?;
+        let result = self
+            .execute_guarded(request, inbound, advisor_model, &guard)
+            .await;
+        guard.defuse();
+        result
+    }
+
+    fn stopping(&self) {
+        self.bridge.mark_stopping();
+    }
+
+    async fn probe(&self, query: &ProbeQuery) -> Result<ProbeReport, PluginError> {
+        crate::account::ask(
+            &self.host,
+            self.command.as_ref(),
+            &self.account,
+            query.model(),
+        )
+        .await?;
+        Ok(ProbeReport::new("ok"))
+    }
+}
+
+impl ClaudeUpstream {
+    async fn execute_guarded(
+        &self,
+        mut request: Request,
+        _inbound: ProtocolId,
+        advisor_model: Option<String>,
+        guard: &CancelGuard,
+    ) -> Result<Completion, PluginError> {
         if let Some(found) = self.try_match(&request) {
+            guard.bind(found.run_id);
+            self.bridge.begin_turn(found.run_id, &request, None);
+            self.bridge.heard(found.run_id, &request.messages);
             return self.continue_parked(found, &request, advisor_model).await;
         }
         if let Some(resume) = self.bridge.resume(&request, &self.account) {
+            guard.bind(resume.run_id);
+            self.bridge.begin_turn(resume.run_id, &request, None);
+            self.bridge.heard(resume.run_id, &request.messages);
             return self.continue_resume(resume, &request, advisor_model).await;
         }
         // Stage D only on a resume miss.
         crate::bridge::flags::apply_stage_d(&mut request);
-        let unshelved = self.bridge.unshelve(&request, &self.account);
+        guard.rewatch(request.clone()).await?;
+        let unshelved = self
+            .bridge
+            .unshelve(&request, &self.account)
+            .or_else(|| self.bridge.retry_branch(&request, &self.account));
         self.bridge.retire(&self.account, &request);
         let room = self
             .bridge
@@ -290,6 +369,13 @@ impl UpstreamProvider for ClaudeUpstream {
                 .set_effort(id, crate::bridge::flags::from_request(&request).effort);
             self.bridge.set_room_guard(id, room);
             self.bridge.begin_reply(id, &request, advisor_model.clone());
+            let persists = spec.wsl_distro.is_none();
+            self.bridge.begin_turn(id, &request, Some(persists));
+            if persists && let Some((saved, since)) = &unshelved {
+                self.bridge
+                    .note_started_from(id, saved, &request, since.len());
+            }
+            guard.bind(id);
             run_id = Some(id);
             let token = park::new_callback_token()?;
             let handler = self.bridge.callback_handler(id, request.clone());
@@ -322,17 +408,6 @@ impl UpstreamProvider for ClaudeUpstream {
         let _ = callback_guard;
         self.finish_stdout(stdout, run_id, has_tools(&request), &request, login_version)
             .await
-    }
-
-    async fn probe(&self, query: &ProbeQuery) -> Result<ProbeReport, PluginError> {
-        crate::account::ask(
-            &self.host,
-            self.command.as_ref(),
-            &self.account,
-            query.model(),
-        )
-        .await?;
-        Ok(ProbeReport::new("ok"))
     }
 }
 
@@ -480,7 +555,17 @@ impl ClaudeUpstream {
         let (events, calls, session) = match result {
             Ok(decoded) => decoded,
             Err(error) => {
+                crate::said_out::note_bridge(
+                    &self.host,
+                    &self.account,
+                    &request.model,
+                    &error,
+                    self.host.clock().now(),
+                );
                 if let Some(run_id) = run_id {
+                    if error.kind() == hofund_plugin_api::PluginErrorKind::Quota {
+                        self.bridge.keep_for_reset(run_id, request, &self.account);
+                    }
                     self.bridge
                         .ended(run_id, &self.account, request, "", TurnStop::Other, false);
                 }
@@ -507,7 +592,15 @@ impl ClaudeUpstream {
             .collect();
         if let Some(run_id) = run_id {
             if let Some(session) = session {
-                self.bridge.set_session(run_id, session, Vec::new());
+                let paths = account_dir(&self.host, &self.account)
+                    .map(|dir| crate::bridge::cut::session_dirs(&dir, &session))
+                    .unwrap_or_default();
+                self.bridge.set_session(run_id, session, paths);
+            }
+            if calls.is_empty()
+                && let Some(message_id) = crate::bridge::cut::completed_reply_id(&stdout)
+            {
+                self.bridge.note_completed_reply(run_id, &message_id);
             }
             for (id, name) in &calls {
                 self.bridge.register_call(run_id, id.clone(), name.clone());
@@ -619,7 +712,7 @@ mod tests {
     }
 
     fn collect_events(completion: Completion) -> Vec<StreamEvent> {
-        let Completion::Stream(mut stream) = completion else {
+        let Completion::Stream(mut stream) = completion.peel() else {
             panic!("expected a stream");
         };
         block_on(async {
@@ -974,6 +1067,254 @@ mod tests {
             .expect("one-off");
         let _ = collect_events(completion);
         assert_eq!(bridge.idle_len(), 0);
+    }
+
+    fn d253_fixture() -> (
+        tempfile::TempDir,
+        TestHost,
+        AccountId,
+        crate::bridge::Bridge,
+    ) {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = TestHost::open_for(
+            PluginKind::Subscription,
+            PluginId::from_static("claude"),
+            dir.path(),
+        );
+        let id = AccountId::from_static("a-00000000000000aa");
+        seed_account(&host, &id);
+        (dir, host, id, crate::bridge::Bridge::new())
+    }
+
+    fn d253_provider(
+        host: &TestHost,
+        id: &AccountId,
+        bridge: crate::bridge::Bridge,
+    ) -> ClaudeUpstream {
+        ClaudeUpstream::new(
+            id.clone(),
+            host.context().clone(),
+            Some(program()),
+            bridge,
+            crate::limits::Store::new(),
+        )
+    }
+
+    fn d253_request(messages: serde_json::Value, tools: serde_json::Value) -> Request {
+        serde_json::from_value(json!({
+            "model": "claude-sonnet-4-5",
+            "messages": messages,
+            "tools": tools,
+        }))
+        .expect("request")
+    }
+
+    fn d253_advisor_tool() -> hofund_plugin_api::Tool {
+        let mut extensions = hofund_plugin_api::Extensions::new();
+        extensions.insert("type", json!("advisor_20260301"));
+        extensions.insert("model", json!("not-served"));
+        hofund_plugin_api::Tool {
+            name: "advisor".to_owned(),
+            description: None,
+            input_schema: json!({}),
+            extensions,
+        }
+    }
+
+    fn d253_seed_idle(
+        host: &TestHost,
+        id: &AccountId,
+        bridge: &crate::bridge::Bridge,
+        request: &Request,
+        shelve: bool,
+    ) {
+        let config = crate::account::account_dir(host.context(), id).expect("account dir");
+        let sessions = config.join("projects").join("project");
+        std::fs::create_dir_all(&sessions).expect("sessions");
+        std::fs::write(
+            sessions.join("sess_text.jsonl"),
+            "{\"type\":\"assistant\",\"uuid\":\"line-1\",\"sessionId\":\"sess_text\",\"message\":{\"id\":\"msg_text\",\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"Hello world\"}]}}\n",
+        )
+        .expect("transcript");
+        let run = bridge.park_run(id.clone(), Vec::new());
+        bridge.ensure_session_run(run, id, Vec::new());
+        bridge.set_session(run, "sess_text", vec![sessions]);
+        bridge.note_completed_reply(run, "msg_text");
+        bridge.ended(
+            run,
+            id,
+            request,
+            "Hello world",
+            crate::bridge::session::TurnStop::Stop,
+            true,
+        );
+        if shelve {
+            assert!(bridge.evict_idle_for_room());
+        }
+    }
+
+    fn d253_drop_execute(provider: ClaudeUpstream, request: Request) {
+        let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let runner_entered = Arc::clone(&entered);
+        let provider = provider.with_async_runner(Arc::new(move |_plan| {
+            let entered = Arc::clone(&runner_entered);
+            Box::pin(async move {
+                entered.store(true, std::sync::atomic::Ordering::Release);
+                std::future::pending::<Result<String, PluginError>>().await
+            })
+        }));
+        block_on(async {
+            let mut call = Box::pin(provider.execute(request, ProtocolId::AnthropicMessages));
+            futures_util::future::poll_fn(|cx| {
+                match std::future::Future::poll(call.as_mut(), cx) {
+                    std::task::Poll::Pending => {}
+                    std::task::Poll::Ready(Err(error)) => {
+                        panic!("execute failed before the runner: {error}")
+                    }
+                    std::task::Poll::Ready(Ok(_)) => panic!("execute completed before the runner"),
+                }
+                if entered.load(std::sync::atomic::Ordering::Acquire) {
+                    std::task::Poll::Ready(())
+                } else {
+                    std::task::Poll::Pending
+                }
+            })
+            .await;
+            drop(call);
+        });
+    }
+
+    fn d253_replacement_stdin(provider: ClaudeUpstream, request: Request) -> String {
+        let stdin = Arc::new(std::sync::Mutex::new(String::new()));
+        let captured = Arc::clone(&stdin);
+        let provider = provider.with_runner(Arc::new(move |plan| {
+            *captured.lock().expect("stdin") = plan.stdin.clone();
+            Ok(MESSAGE_DELTA.to_string())
+        }));
+        let completion = block_on(provider.execute(request, ProtocolId::AnthropicMessages))
+            .expect("replacement turn");
+        let _ = collect_events(completion);
+        stdin.lock().expect("stdin").clone()
+    }
+
+    #[test]
+    fn d253_execute_drop_during_same_key_wait_wakes_without_a_poked_flag() {
+        let (_dir, host, id, bridge) = d253_fixture();
+        let seed = d253_request(
+            json!([
+                {"role": "user", "content": [{"type": "text", "text": "original"}]}
+            ]),
+            json!([{"name": "read", "input_schema": {"type": "object"}}]),
+        );
+        d253_seed_idle(&host, &id, &bridge, &seed, false);
+        let request = d253_request(
+            json!([
+                {"role": "user", "content": [{"type": "text", "text": "original"}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "Hello world"}]},
+                {"role": "user", "content": [{"type": "text", "text": "same turn"}]}
+            ]),
+            json!([{"name": "read", "input_schema": {"type": "object"}}]),
+        );
+        let key = crate::bridge::session::next_turn(id.as_str(), &request)
+            .expect("turn")
+            .0;
+        let gone = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ticket = bridge
+            .watch_cancel_blocking(&key, Arc::clone(&gone))
+            .expect("watch")
+            .expect("ticket");
+        gone.store(true, std::sync::atomic::Ordering::Release);
+        let before = bridge.cancel_generation();
+        let provider =
+            d253_provider(&host, &id, bridge.clone()).with_async_runner(Arc::new(|_plan| {
+                Box::pin(async { std::future::pending::<Result<String, PluginError>>().await })
+            }));
+        let mut call = Box::pin(provider.execute(request, ProtocolId::AnthropicMessages));
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(waker);
+        assert!(std::future::Future::poll(call.as_mut(), &mut cx).is_pending());
+        drop(call);
+        assert!(bridge.cancel_generation() > before);
+        bridge.finish_cancel(ticket);
+    }
+
+    #[test]
+    fn d253_advisor_mutation_cancel_shelves_and_next_turn_is_only_replacement() {
+        let (_dir, host, id, bridge) = d253_fixture();
+        let seed = d253_request(
+            json!([
+                {"role": "system", "content": [{"type": "text", "text": "rules"}]},
+                {"role": "user", "content": [{"type": "text", "text": "original"}]}
+            ]),
+            json!([{"name": "read", "input_schema": {"type": "object"}}]),
+        );
+        d253_seed_idle(&host, &id, &bridge, &seed, false);
+        let mut cancelled = d253_request(
+            json!([
+                {"role": "system", "content": [{"type": "text", "text": "rules"}]},
+                {"role": "user", "content": [{"type": "text", "text": "original"}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "Hello world"}]},
+                {"role": "user", "content": [{"type": "text", "text": "CANCEL ME"}]}
+            ]),
+            json!([{"name": "read", "input_schema": {"type": "object"}}]),
+        );
+        cancelled.tools.push(d253_advisor_tool());
+        d253_drop_execute(d253_provider(&host, &id, bridge.clone()), cancelled);
+        let mut replacement = d253_request(
+            json!([
+                {"role": "system", "content": [{"type": "text", "text": "rules"}]},
+                {"role": "user", "content": [{"type": "text", "text": "original"}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "Hello world"}]},
+                {"role": "user", "content": [{"type": "text", "text": "replacement"}]}
+            ]),
+            json!([{"name": "read", "input_schema": {"type": "object"}}]),
+        );
+        replacement.tools.push(d253_advisor_tool());
+        let stdin = d253_replacement_stdin(d253_provider(&host, &id, bridge.clone()), replacement);
+        assert!(stdin.contains("replacement"), "{stdin}");
+        assert!(!stdin.contains("CANCEL ME"), "{stdin}");
+        assert!(!stdin.contains("original"), "{stdin}");
+    }
+
+    #[test]
+    fn d253_stage_d_mutation_cancel_shelves_and_next_turn_is_only_replacement() {
+        let (_dir, host, id, bridge) = d253_fixture();
+        let mut seed = d253_request(
+            json!([
+                {"role": "system", "content": [{"type": "text", "text": "<block>rules</block>"}]},
+                {"role": "user", "content": [{"type": "text", "text": "<transcript>original"}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "earlier"}]}
+            ]),
+            json!([]),
+        );
+        seed.extensions
+            .insert(crate::bridge::flags::BRIDGE_EFFORT, json!("low"));
+        d253_seed_idle(&host, &id, &bridge, &seed, true);
+        let cancelled = d253_request(
+            json!([
+                {"role": "system", "content": [{"type": "text", "text": "<block>rules</block>"}]},
+                {"role": "user", "content": [{"type": "text", "text": "<transcript>original"}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "earlier"}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "Hello world"}]},
+                {"role": "user", "content": [{"type": "text", "text": "CANCEL ME"}]}
+            ]),
+            json!([]),
+        );
+        d253_drop_execute(d253_provider(&host, &id, bridge.clone()), cancelled);
+        let replacement = d253_request(
+            json!([
+                {"role": "system", "content": [{"type": "text", "text": "<block>rules</block>"}]},
+                {"role": "user", "content": [{"type": "text", "text": "<transcript>original"}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "earlier"}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "Hello world"}]},
+                {"role": "user", "content": [{"type": "text", "text": "replacement"}]}
+            ]),
+            json!([]),
+        );
+        let stdin = d253_replacement_stdin(d253_provider(&host, &id, bridge.clone()), replacement);
+        assert!(stdin.contains("replacement"), "{stdin}");
+        assert!(!stdin.contains("CANCEL ME"), "{stdin}");
+        assert!(!stdin.contains("transcript"), "{stdin}");
     }
 
     fn stored_blob(host: &TestHost, id: &AccountId) -> SecretObject {

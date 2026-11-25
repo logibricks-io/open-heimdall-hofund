@@ -1,9 +1,280 @@
-//! Detects an empty OpenAI Responses terminal reply for failover.
+//! Detects empty Responses and Chat replies for failover.
 
+use hofund_ir::{ContentPart, Response, StreamEvent, Usage};
 use serde_json::{Map, Value};
 
 /// Router and gateway treat this as a shape failure that does not rest the member.
 pub const EMPTY_REPLY_MESSAGE: &str = "an empty reply (the model answered nothing; try again)";
+
+/// Formats an empty-reply failure with the output and reasoning tokens counted.
+#[must_use]
+pub fn empty_reply_message(usage: &Usage) -> String {
+    let output = usage.output_tokens.unwrap_or(0);
+    let reasoning = usage.reasoning_tokens.unwrap_or(0);
+    let detail = if reasoning > 0 && output >= reasoning {
+        format!(
+            "the model reasoned for {reasoning} of the {output} output tokens it counted, and its reply carried no text or tool call"
+        )
+    } else if reasoning > 0 {
+        format!(
+            "the model counted {reasoning} reasoning tokens, and its reply carried no text or tool call"
+        )
+    } else if output > 0 {
+        format!(
+            "the model counted {output} output tokens, and its reply carried no text or tool call"
+        )
+    } else {
+        return EMPTY_REPLY_MESSAGE.to_owned();
+    };
+    format!(
+        "{EMPTY_REPLY_MESSAGE} — {detail}; if trying again ends the same way, switch to another model or compact the conversation"
+    )
+}
+
+/// Incremental state for a relayed Chat event stream.
+///
+/// Role-only chunks and usage do not start a reply. Text, refusal, reasoning,
+/// a tool call, or a non-empty finish reason does.
+#[derive(Debug, Default)]
+pub struct ChatStreamCheck {
+    pending: Vec<u8>,
+    reply: bool,
+    terminal: bool,
+    ended: bool,
+    opaque: bool,
+    usage: Usage,
+}
+
+impl ChatStreamCheck {
+    /// Reads another upstream byte chunk.
+    pub fn observe(&mut self, bytes: &[u8]) {
+        if self.opaque {
+            return;
+        }
+        self.pending.extend_from_slice(bytes);
+        while let Some(end) = self.pending.iter().position(|byte| *byte == b'\n') {
+            let mut line: Vec<u8> = self.pending.drain(..=end).collect();
+            line.pop();
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            self.line(&line);
+            if self.opaque {
+                return;
+            }
+        }
+        // A chunk that cannot grow into a Chat SSE field is not a Chat
+        // stream. Mark it immediately so a hold does not swallow an active
+        // body while waiting for a newline that will never be a `data:` line.
+        if !self.pending.is_empty() && !sse_line_prefix(&self.pending) {
+            self.opaque = true;
+        }
+    }
+
+    /// Marks a clean upstream EOF.
+    pub fn finish(&mut self) {
+        if !self.opaque && !self.pending.is_empty() {
+            let line = std::mem::take(&mut self.pending);
+            let line = line.strip_suffix(b"\r").unwrap_or(&line);
+            self.line(line);
+        }
+        self.ended = true;
+    }
+
+    /// Whether the stream carried output or a finish reason.
+    #[must_use]
+    pub const fn has_reply(&self) -> bool {
+        self.reply
+    }
+
+    /// Whether `[DONE]` has arrived.
+    #[must_use]
+    pub const fn is_terminal(&self) -> bool {
+        self.terminal
+    }
+
+    /// Whether these bytes are not a JSON Chat event stream.
+    #[must_use]
+    pub const fn is_opaque(&self) -> bool {
+        self.opaque
+    }
+
+    /// Usage for an empty terminal reply, or `None` for a real reply.
+    #[must_use]
+    pub fn empty_usage(&self) -> Option<Usage> {
+        ((self.terminal || self.ended) && !self.reply && !self.opaque).then(|| self.usage.clone())
+    }
+
+    fn line(&mut self, line: &[u8]) {
+        if line.is_empty()
+            || line.starts_with(b":")
+            || line.starts_with(b"event:")
+            || line.starts_with(b"id:")
+            || line.starts_with(b"retry:")
+        {
+            return;
+        }
+        let Some(data) = line.strip_prefix(b"data:") else {
+            self.opaque = true;
+            return;
+        };
+        let data = data.strip_prefix(b" ").unwrap_or(data);
+        if data.is_empty() {
+            return;
+        }
+        if data == b"[DONE]" {
+            self.terminal = true;
+            return;
+        }
+        let Ok(value) = serde_json::from_slice::<Value>(data) else {
+            self.opaque = true;
+            return;
+        };
+        let Some(object) = value.as_object() else {
+            self.opaque = true;
+            return;
+        };
+        if object.contains_key("error") {
+            self.opaque = true;
+            return;
+        }
+        if let Some(choices) = object.get("choices").and_then(Value::as_array) {
+            for choice in choices {
+                if choice
+                    .get("finish_reason")
+                    .and_then(Value::as_str)
+                    .is_some_and(|reason| !reason.is_empty())
+                {
+                    self.reply = true;
+                }
+                for key in ["delta", "message"] {
+                    if let Some(delta) = choice.get(key).and_then(Value::as_object) {
+                        self.delta(delta);
+                    }
+                }
+            }
+        }
+        if let Some(usage) = object.get("usage").and_then(Value::as_object) {
+            self.note_usage(usage);
+        }
+    }
+
+    fn delta(&mut self, delta: &Map<String, Value>) {
+        self.reply |= map_says(delta);
+    }
+
+    fn note_usage(&mut self, usage: &Map<String, Value>) {
+        if let Some(output) = optional_token_field(usage, &["completion_tokens", "output_tokens"]) {
+            self.usage.output_tokens = u64::try_from(output).ok();
+        }
+        let top = optional_token_field(usage, &["reasoning_tokens"]);
+        let details = usage
+            .get("completion_tokens_details")
+            .and_then(Value::as_object)
+            .and_then(|details| optional_token_field(details, &["reasoning_tokens"]));
+        let reasoning = match details {
+            Some(count) if count > 0 => Some(count),
+            other => top.or(other),
+        };
+        if let Some(reasoning) = reasoning {
+            self.usage.reasoning_tokens = u64::try_from(reasoning).ok();
+        }
+    }
+}
+
+fn map_says(delta: &Map<String, Value>) -> bool {
+    [
+        "content",
+        "refusal",
+        "reasoning_content",
+        "reasoning",
+        "function_call",
+    ]
+    .into_iter()
+    .any(|key| raw_says(delta.get(key)))
+        || ["tool_calls", "reasoning_details"].into_iter().any(|key| {
+            delta
+                .get(key)
+                .and_then(Value::as_array)
+                .is_some_and(|items| !items.is_empty())
+        })
+}
+
+/// Whether `pending` can still become a Chat SSE field line.
+///
+/// A finished line is classified separately. This keeps a partial comment or
+/// a prefix of `data:`, `event:`, `id:`, or `retry:`.
+fn sse_line_prefix(pending: &[u8]) -> bool {
+    if pending.first() == Some(&b':') {
+        return true;
+    }
+    const FIELDS: [&[u8]; 4] = [b"data:", b"event:", b"id:", b"retry:"];
+    FIELDS
+        .iter()
+        .any(|field| pending.starts_with(field) || field.starts_with(pending))
+}
+
+fn raw_says(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => false,
+        Some(Value::String(text)) => !text.is_empty(),
+        Some(_) => true,
+    }
+}
+
+/// Whether a decoded Chat stream carried no output and no finish reason.
+/// Returns its merged usage when it is empty.
+#[must_use]
+pub fn decoded_chat_stream_empty(events: &[StreamEvent]) -> Option<Usage> {
+    let mut reply = false;
+    let mut usage = Usage::default();
+    for event in events {
+        match event {
+            StreamEvent::TextDelta(delta) if !delta.text.is_empty() => reply = true,
+            StreamEvent::ThinkingDelta(delta) if !delta.text.is_empty() => reply = true,
+            StreamEvent::ToolArgumentsDelta(delta) if !delta.partial_json.is_empty() => {
+                reply = true;
+            }
+            StreamEvent::SignatureDelta(delta) if !delta.signature.is_empty() => reply = true,
+            StreamEvent::ContentBlockStart(start) => match &start.block {
+                hofund_ir::BlockStart::ToolCall { .. } => reply = true,
+                hofund_ir::BlockStart::Thinking {
+                    data: Some(data), ..
+                } if !data.is_empty() => {
+                    reply = true;
+                }
+                _ => {}
+            },
+            StreamEvent::MessageStart(start) => {
+                if let Some(patch) = &start.usage {
+                    usage.merge_from(patch);
+                }
+            }
+            StreamEvent::MessageDelta(delta) => {
+                reply |= delta.stop.is_some() || map_says(delta.extensions.as_map());
+                if let Some(patch) = &delta.usage {
+                    usage.merge_from(patch);
+                }
+            }
+            _ => {}
+        }
+    }
+    (!reply).then_some(usage)
+}
+
+/// Whether a whole Chat response has no output and no finish reason.
+#[must_use]
+pub fn chat_response_empty(response: &Response) -> bool {
+    response.stop.is_none()
+        && !response.message.content.iter().any(|part| match part {
+            ContentPart::Text(text) => !text.text.is_empty(),
+            ContentPart::Thinking(thinking) => {
+                !thinking.text.is_empty() || thinking.signature.is_some() || thinking.data.is_some()
+            }
+            ContentPart::Unknown(_) => false,
+            _ => true,
+        })
+}
 
 /// Whether a `response.completed` event object names empty output and zero
 /// billed tokens. Missing `output` or `usage` is not an empty reply.
@@ -282,12 +553,16 @@ fn billed_tokens(usage: &Map<String, Value>) -> i64 {
 }
 
 fn token_field(usage: &Map<String, Value>, names: &[&str]) -> i64 {
+    optional_token_field(usage, names).unwrap_or(0)
+}
+
+fn optional_token_field(usage: &Map<String, Value>, names: &[&str]) -> Option<i64> {
     for name in names {
         if let Some(value) = usage.get(*name).and_then(as_i64) {
-            return value.max(0);
+            return Some(value.max(0));
         }
     }
-    0
+    None
 }
 
 fn as_i64(value: &Value) -> Option<i64> {
@@ -309,9 +584,169 @@ fn content_has_text(content: &Value) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use hofund_ir::Usage;
     use serde_json::json;
 
-    use super::{completed_event_empty, relayed_sse_empty_without_content, response_body_empty};
+    use super::{
+        ChatStreamCheck, chat_response_empty, completed_event_empty, decoded_chat_stream_empty,
+        empty_reply_message, relayed_sse_empty_without_content, response_body_empty,
+    };
+    use crate::{Codec, OpenAiChat};
+
+    #[test]
+    fn d248_chat_usage_only_stream_is_empty_at_done_or_eof() {
+        let role =
+            "data: {\"choices\":[{\"delta\":{\"content\":null,\"role\":\"assistant\"}}]}\n\n";
+        let usage = "data: {\"choices\":[],\"usage\":{\"completion_tokens\":2359,\"prompt_tokens\":91000,\"reasoning_tokens\":2351}}\n\n";
+        for terminal in ["", "data: [DONE]\n\n"] {
+            let bytes = format!("{role}{usage}{terminal}");
+            let mut check = ChatStreamCheck::default();
+            for chunk in bytes.as_bytes().chunks(7) {
+                check.observe(chunk);
+            }
+            check.finish();
+            let usage = check.empty_usage().expect("empty reply");
+            assert_eq!(usage.output_tokens, Some(2359));
+            assert_eq!(usage.reasoning_tokens, Some(2351));
+            assert!(!check.is_opaque());
+        }
+    }
+
+    #[test]
+    fn d248_chat_output_or_a_finish_reason_is_not_empty() {
+        for delta in [
+            "{\"content\":\"hello\"}",
+            "{\"refusal\":\"no\"}",
+            "{\"reasoning_content\":\"thought\"}",
+            "{\"reasoning\":\"thought\"}",
+            "{\"reasoning_details\":[{}]}",
+            "{\"tool_calls\":[{}]}",
+            "{\"function_call\":{}}",
+        ] {
+            let bytes =
+                format!("data: {{\"choices\":[{{\"delta\":{delta}}}]}}\n\ndata: [DONE]\n\n");
+            let mut check = ChatStreamCheck::default();
+            check.observe(bytes.as_bytes());
+            assert!(check.has_reply(), "{delta}");
+            assert!(check.empty_usage().is_none(), "{delta}");
+        }
+        let stopped =
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+        let mut check = ChatStreamCheck::default();
+        check.observe(stopped.as_bytes());
+        assert!(check.empty_usage().is_none());
+
+        let text_without_finish = "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n";
+        let mut check = ChatStreamCheck::default();
+        check.observe(text_without_finish.as_bytes());
+        check.finish();
+        assert!(check.empty_usage().is_none());
+    }
+
+    #[test]
+    fn d248_decoded_chat_usage_only_stream_is_empty_not_stopped() {
+        let stream = concat!(
+            "data: {\"id\":\"c\",\"model\":\"m\",\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n",
+            "data: {\"id\":\"c\",\"model\":\"m\",\"choices\":[],\"usage\":{\"completion_tokens\":12,\"reasoning_tokens\":9}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let events = OpenAiChat.decode_stream(stream.as_bytes()).expect("decode");
+        let usage = decoded_chat_stream_empty(&events).expect("empty");
+        assert_eq!(usage.output_tokens, Some(12));
+        assert_eq!(usage.reasoning_tokens, Some(9));
+
+        let stopped =
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+        let events = OpenAiChat
+            .decode_stream(stopped.as_bytes())
+            .expect("decode");
+        assert!(decoded_chat_stream_empty(&events).is_none());
+
+        for delta in [
+            "{\"reasoning\":\"thought\"}",
+            "{\"reasoning_details\":[{}]}",
+            "{\"refusal\":\"no\"}",
+            "{\"function_call\":{}}",
+            "{\"signature\":\"sig\"}",
+        ] {
+            let stream = format!(
+                "data: {{\"id\":\"c\",\"model\":\"m\",\"choices\":[{{\"delta\":{delta}}}]}}\n\ndata: [DONE]\n\n"
+            );
+            let mut events = OpenAiChat.decode_stream(stream.as_bytes()).expect("decode");
+            for event in &mut events {
+                crate::service_tier::retain_served_tier(event);
+            }
+            assert!(
+                decoded_chat_stream_empty(&events).is_none(),
+                "{delta}: {events:?}"
+            );
+        }
+
+        for message in [
+            r#"{"role":"assistant","reasoning":"thought"}"#,
+            r#"{"role":"assistant","reasoning_details":[{}]}"#,
+            r#"{"role":"assistant","refusal":"no"}"#,
+            r#"{"role":"assistant","function_call":{}}"#,
+        ] {
+            let body = format!(r#"{{"id":"c","model":"m","choices":[{{"message":{message}}}]}}"#);
+            let mut response = OpenAiChat.decode_response(body.as_bytes()).expect("decode");
+            crate::service_tier::retain_response_tier(&mut response);
+            assert!(!chat_response_empty(&response), "{message}: {response:?}");
+        }
+    }
+
+    #[test]
+    fn d248_non_sse_bytes_are_opaque_before_a_newline() {
+        let mut check = ChatStreamCheck::default();
+        check.observe(b"x");
+        assert!(check.is_opaque());
+        assert!(check.empty_usage().is_none());
+
+        let mut partial = ChatStreamCheck::default();
+        partial.observe(b"dat");
+        assert!(!partial.is_opaque());
+        partial.observe(b"a: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n");
+        assert!(partial.has_reply());
+        assert!(partial.empty_usage().is_none());
+    }
+
+    #[test]
+    fn d248_empty_reply_words_include_counted_output_and_reasoning() {
+        assert_eq!(
+            empty_reply_message(&Usage::default()),
+            super::EMPTY_REPLY_MESSAGE
+        );
+        assert_eq!(
+            empty_reply_message(&Usage {
+                input_tokens: Some(9),
+                ..Usage::default()
+            }),
+            super::EMPTY_REPLY_MESSAGE
+        );
+        assert_eq!(
+            empty_reply_message(&Usage {
+                output_tokens: Some(40),
+                ..Usage::default()
+            }),
+            "an empty reply (the model answered nothing; try again) — the model counted 40 output tokens, and its reply carried no text or tool call; if trying again ends the same way, switch to another model or compact the conversation"
+        );
+        assert_eq!(
+            empty_reply_message(&Usage {
+                output_tokens: Some(10),
+                reasoning_tokens: Some(30),
+                ..Usage::default()
+            }),
+            "an empty reply (the model answered nothing; try again) — the model counted 30 reasoning tokens, and its reply carried no text or tool call; if trying again ends the same way, switch to another model or compact the conversation"
+        );
+        assert_eq!(
+            empty_reply_message(&Usage {
+                output_tokens: Some(2359),
+                reasoning_tokens: Some(2351),
+                ..Usage::default()
+            }),
+            "an empty reply (the model answered nothing; try again) — the model reasoned for 2351 of the 2359 output tokens it counted, and its reply carried no text or tool call; if trying again ends the same way, switch to another model or compact the conversation"
+        );
+    }
 
     #[test]
     fn d37_1_empty_completed_is_detected() {

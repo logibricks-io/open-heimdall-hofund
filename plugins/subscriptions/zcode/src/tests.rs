@@ -1933,7 +1933,7 @@ fn execute_raw(
         let completion = upstream
             .execute(request, ProtocolId::ANTHROPIC_MESSAGES)
             .await?;
-        let Completion::Raw(mut body) = completion else {
+        let Completion::Raw(mut body) = completion.peel() else {
             panic!("same-protocol Messages replies stay raw");
         };
         let mut bytes = Vec::new();

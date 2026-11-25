@@ -57,6 +57,51 @@ pub enum Completion {
     Stream(Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>),
     /// Same-protocol bytes. The gateway forwards them and only observes them.
     Raw(Pin<Box<dyn Stream<Item = Result<Bytes, ProviderError>> + Send>>),
+    /// `inner` was produced by `codec`.
+    ///
+    /// The daemon copies this onto the plugin completion so a member whose
+    /// label is not the codec still tells the router which codec ran.
+    Produced {
+        /// Codec that encoded the request and decoded or relayed this body.
+        codec: hofund_plugin_api::ProtocolId,
+        /// The unary, stream, or raw body.
+        inner: Box<Completion>,
+    },
+}
+
+impl Completion {
+    /// Tags `self` with the codec that produced it.
+    #[must_use]
+    pub fn produced(self, codec: hofund_plugin_api::ProtocolId) -> Self {
+        Self::Produced {
+            codec,
+            inner: Box::new(self),
+        }
+    }
+
+    /// Removes producing-codec tags and returns the body.
+    #[must_use]
+    pub fn peel(self) -> Self {
+        match self {
+            Self::Produced { inner, .. } => inner.peel(),
+            other => other,
+        }
+    }
+
+    /// Splits producing-codec tags from the body.
+    ///
+    /// Nested tags keep the codec closest to the body. An untagged completion
+    /// returns `None` and itself.
+    #[must_use]
+    pub fn split_produced(self) -> (Option<hofund_plugin_api::ProtocolId>, Self) {
+        match self {
+            Self::Produced { codec, inner } => {
+                let (inner_codec, body) = inner.split_produced();
+                (Some(inner_codec.unwrap_or(codec)), body)
+            }
+            other => (None, other),
+        }
+    }
 }
 
 /// The result of asking an upstream to count input tokens.

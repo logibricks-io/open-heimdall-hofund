@@ -24,6 +24,7 @@ static SPEC: UpstreamSpec = UpstreamSpec::from_static(
 #[derive(Default)]
 struct ShutdownLog {
     calls: Mutex<Vec<Duration>>,
+    stopping: std::sync::atomic::AtomicUsize,
 }
 
 impl ShutdownLog {
@@ -86,6 +87,12 @@ impl UpstreamProvider for RecordingUpstream {
         _inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
         Err(PluginError::unsupported("recording provider"))
+    }
+
+    fn stopping(&self) {
+        self.log
+            .stopping
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
     async fn shutdown(&self, deadline: Duration) -> Result<(), PluginError> {
@@ -208,4 +215,17 @@ async fn shutdown_still_finishes_when_one_provider_fails() {
         2,
         "a failing provider must not skip the other constructed upstreams"
     );
+}
+
+#[tokio::test]
+async fn d253_stopping_is_called_on_every_constructed_upstream() {
+    let log = Arc::new(ShutdownLog::default());
+    let (_dir, path) = config_with(&[("one", "http://127.0.0.1:1"), ("two", "http://127.0.0.1:2")]);
+    let running = start_with_registry(&path, registry(&log))
+        .await
+        .expect("start");
+    assert_eq!(log.stopping.load(std::sync::atomic::Ordering::SeqCst), 0);
+    support::shutdown(running).await;
+    assert_eq!(log.stopping.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(log.calls().len(), 2);
 }

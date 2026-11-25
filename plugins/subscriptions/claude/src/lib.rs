@@ -37,6 +37,7 @@ mod lock;
 mod models;
 mod proxy;
 mod run_lock;
+mod said_out;
 mod setup_token;
 mod token_env;
 mod upstream;
@@ -494,6 +495,7 @@ impl Claude {
         };
         let blob = SecretObject::parse(&secret)?;
         let now = host.clock().now();
+        said_out::observe_agent(host, account, now);
         if setup_token::is_setup_token(&blob) {
             if let Some(windows) = self.limits.kept_windows(account, now) {
                 return Ok(windows);
@@ -509,7 +511,11 @@ impl Claude {
             .usage_read_decision(account, now, active, card_refresh, intent);
         if !decision.run_usage {
             if let Some(windows) = self.limits.kept_windows(account, now) {
-                return Ok(windows);
+                return Ok(said_out::overlay(host, account, windows, now));
+            }
+            let held = said_out::overlay(host, account, Vec::new(), now);
+            if held.iter().any(|window| window.held()) {
+                return Ok(held);
             }
             if !active && !card_refresh {
                 return Err(PluginError::unsupported(
@@ -533,18 +539,27 @@ impl Claude {
         self.limits.mark_usage_tried(account, now);
         match account::read_usage(host, self.command.as_ref(), account).await {
             Ok(windows) => {
+                said_out::clear_good_read(host, account, &windows, now);
                 let stored = self
                     .limits
                     .record_usage(account, windows, now, &prev, prev_at);
                 if let Some(path) = reading_path.as_deref() {
                     limits::save_reading(path, &stored, now)?;
                 }
-                Ok(self.limits.kept_windows(account, now).unwrap_or_default())
+                Ok(said_out::overlay(
+                    host,
+                    account,
+                    self.limits.kept_windows(account, now).unwrap_or(stored),
+                    now,
+                ))
             }
             Err(err) => {
                 self.limits.record_usage_failure(account, &err);
-                if let Some(windows) = self.limits.fallback_on_usage_error(account, &err, now) {
+                if let Some(windows) = said_out::spent_on_failure(host, account, &err, now) {
                     return Ok(windows);
+                }
+                if let Some(windows) = self.limits.fallback_on_usage_error(account, &err, now) {
+                    return Ok(said_out::overlay(host, account, windows, now));
                 }
                 Err(err)
             }
@@ -752,7 +767,9 @@ impl Subscription for Claude {
         home: &Path,
         host: &HostContext,
     ) -> Result<(), PluginError> {
-        agent_sign_in::write(account, home, host).await
+        agent_sign_in::write(account, home, host).await?;
+        self.bridge.account_handed_over(account);
+        Ok(())
     }
 
     async fn import_accounts(

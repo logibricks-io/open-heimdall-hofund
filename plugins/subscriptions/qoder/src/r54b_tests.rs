@@ -255,7 +255,7 @@ fn rich_sse() -> Vec<u8> {
 }
 
 fn raw_text(completion: Completion) -> String {
-    let Completion::Raw(mut body) = completion else {
+    let Completion::Raw(mut body) = completion.peel() else {
         panic!("same-protocol stream expected");
     };
     block_on(async move {
@@ -309,7 +309,7 @@ fn r54b_selected_display_name_replaces_upstream_auto_in_unary_and_streaming_repl
             }
             assert!(events >= 2, "{output}");
         } else {
-            let Completion::Unary(answer) = completion else {
+            let Completion::Unary(answer) = completion.peel() else {
                 panic!("unary response expected");
             };
             assert_eq!(answer.model.as_deref(), Some("Qwen3.8-Flash"));
