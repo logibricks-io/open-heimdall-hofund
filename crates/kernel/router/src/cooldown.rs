@@ -798,10 +798,15 @@ impl Cooldowns {
             .cloned()
             .collect::<Vec<_>>();
         for key in keys {
-            if let Some(state) = book.states.remove(&key)
-                && let Some(cooling) = state.cooling
-            {
-                recover(&mut book, key, cooling.cause);
+            if let Some(mut state) = book.states.remove(&key) {
+                let recovered = state.cooling.as_ref().map(|cooling| cooling.cause);
+                let keep = key.model.is_none() && preserve_asked_deadline(&mut state, now);
+                if let Some(cause) = recovered {
+                    recover(&mut book, key.clone(), cause);
+                }
+                if keep {
+                    book.states.insert(key, state);
+                }
             }
         }
         book.sunk.retain(|key, _| key.member != *id);
@@ -994,10 +999,15 @@ impl Cooldowns {
         book.suspended.remove(id);
         book.spent.remove(&key);
         book.hand_on_asked.remove(id);
-        if let Some(state) = book.states.remove(&key)
-            && let Some(cooling) = state.cooling
-        {
-            recover(&mut book, key, cooling.cause);
+        if let Some(mut state) = book.states.remove(&key) {
+            let recovered = state.cooling.as_ref().map(|cooling| cooling.cause);
+            let keep = model.is_none() && preserve_asked_deadline(&mut state, now);
+            if let Some(cause) = recovered {
+                recover(&mut book, key.clone(), cause);
+            }
+            if keep {
+                book.states.insert(key, state);
+            }
         }
         if model.is_some() {
             // A real answer also clears an open renewal probe, retaining its
@@ -1618,6 +1628,15 @@ impl Cooldowns {
                 }
                 recovered.push((key.clone(), cooling.cause));
             }
+            // The reference drops a past asked mark. One second is still the
+            // same reset; only an inactive entry past that is forgotten, so
+            // the slot can be reused.
+            if let ProbeState::Asked { until } = state.renewal
+                && !state.active(now)
+                && now.saturating_duration_since(until) > Duration::from_secs(1)
+            {
+                state.renewal = ProbeState::Closed;
+            }
             if state.rate_until.is_some_and(|until| {
                 now.saturating_duration_since(until) >= self.policy.rate_forget
             }) {
@@ -1882,9 +1901,13 @@ fn lift_open_renewal(book: &mut Book, member: &CooldownKey, now: Instant) {
             state.renewal = ProbeState::Closed;
             return;
         };
-        if !cooling.vendor_timed
-            || !matches!(cooling.cause, CooldownCause::Quota | CooldownCause::Credit)
-        {
+        if !matches!(cooling.cause, CooldownCause::Quota | CooldownCause::Credit) {
+            // The open probe belonged to a quota or credit rest that is no
+            // longer active. Keep this other rest and close the probe.
+            state.renewal = ProbeState::Closed;
+            return;
+        }
+        if !cooling.vendor_timed {
             return;
         }
         (cooling.cause, state.renewal.until().expect("open reset"))
@@ -2085,6 +2108,7 @@ fn apply(state: &mut State, candidate: Cooling, named: bool) -> Cooling {
     };
     state.cooling = Some(applied.clone());
     state.last_cause = Some(applied.cause);
+    close_open_probe_for_other_cause(state);
     applied
 }
 
@@ -2097,7 +2121,48 @@ fn apply_observation(state: &mut State, candidate: Cooling) -> Cooling {
     };
     state.cooling = Some(applied.clone());
     state.last_cause = Some(applied.cause);
+    close_open_probe_for_other_cause(state);
     applied
+}
+
+/// An open probe stays only while a quota or credit rest is the active
+/// cooling. Another cause keeps its own rest and closes the probe.
+fn close_open_probe_for_other_cause(state: &mut State) {
+    let keeps_probe = state.cooling.as_ref().is_some_and(|cooling| {
+        matches!(cooling.cause, CooldownCause::Quota | CooldownCause::Credit)
+    });
+    if !keeps_probe && state.renewal.is_open() {
+        state.renewal = ProbeState::Closed;
+    }
+}
+
+/// A member-wide answer clears the rest but keeps the deadline a probe
+/// already asked, including an open probe of the vendor-timed quota or
+/// credit rest this answer clears. Model-scoped answers do the same in
+/// [`lift_open_renewal`].
+fn preserve_asked_deadline(state: &mut State, now: Instant) -> bool {
+    let until = match state.renewal {
+        ProbeState::Asked { until } => until,
+        ProbeState::Open { until }
+            if state.cooling.as_ref().is_some_and(|cooling| {
+                cooling.vendor_timed
+                    && matches!(cooling.cause, CooldownCause::Quota | CooldownCause::Credit)
+                    && same_reset(cooling.until, until)
+            }) =>
+        {
+            until
+        }
+        _ => return false,
+    };
+    state.cooling = None;
+    state.renewal = ProbeState::Asked { until };
+    state.credit_rung = 0;
+    state.credit_until = None;
+    state.credit_ladder = false;
+    state.last_cause = None;
+    state.idle_since = Some(now);
+    state.touched = now;
+    true
 }
 
 fn u128_as_u64(value: u128) -> u64 {
