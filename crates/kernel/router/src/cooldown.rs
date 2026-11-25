@@ -416,7 +416,8 @@ impl Cooldowns {
         }
     }
 
-    pub(crate) fn claim_hand_on(&self, id: &MemberId) -> bool {
+    pub(crate) fn claim_hand_on(&self, id: &MemberId, model: &str) -> bool {
+        let resting = self.cooling_for_model(id, model).is_some();
         let now = (self.clock)();
         let mut book = self.lock();
         self.maintain_locked(&mut book, now);
@@ -427,7 +428,9 @@ impl Cooldowns {
         {
             return false;
         }
-        book.hand_on_asked.insert(id.clone(), now);
+        if resting {
+            book.hand_on_asked.insert(id.clone(), now);
+        }
         true
     }
 

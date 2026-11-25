@@ -23,6 +23,7 @@ enum Reply {
     StatusAdvance(u16, &'static str, u64),
     StatusThenUnary(u16, &'static str),
     StatusTwiceThenUnary(u16, &'static str),
+    SkipPlugin(u16),
     StreamStatus(u16),
     StreamOk,
     Quota,
@@ -55,6 +56,14 @@ impl Member for Fake {
         self.id
     }
 
+    fn plugin_id(&self) -> &str {
+        if self.id.starts_with("shared-") {
+            "shared"
+        } else {
+            ""
+        }
+    }
+
     fn protocol(&self) -> &str {
         "test"
     }
@@ -84,6 +93,10 @@ impl Member for Fake {
                 Err(PluginError::status_error(status, message))
             }
             Reply::StatusTwiceThenUnary(_, _) => Ok(Completion::Unary(Box::new(answer()))),
+            Reply::SkipPlugin(status) => {
+                Err(PluginError::status_error(status, "skip this plugin")
+                    .skip_failover_same_plugin())
+            }
             Reply::StatusThenQuota(status, message) if hit == 0 => {
                 Err(PluginError::status_error(status, message))
             }
@@ -484,6 +497,57 @@ async fn d265_replan_quota_asks_the_too_small_member() {
 }
 
 #[tokio::test]
+async fn d265_last_resort_excludes_ineligible_rests() {
+    for rest in [Rest::Key, Rest::RetryRate, Rest::RetryOutage] {
+        let fixture = Fixture::new();
+        fixture.rest("probe", Rest::Rate);
+        fixture.rest("small", rest);
+        let router = fixture.fit_router(&[
+            ("small", Reply::Unary, Some(4_000)),
+            ("probe", Reply::Quota, Some(1_000_000)),
+        ]);
+        assert!(router.dispatch(&long_request(), "test").await.is_err());
+        assert_eq!(fixture.seen(), ["probe"]);
+    }
+}
+
+#[tokio::test]
+async fn d265_last_resort_honors_recent_resting_ask() {
+    let fixture = Fixture::new();
+    fixture.rest("small", Rest::Rate);
+    fixture.rest("hold", Rest::Quota);
+    let primer = fixture.router(&[
+        ("small", Reply::Status(401, "bad key")),
+        ("hold", Reply::Unary),
+    ]);
+    assert!(dispatch(&primer).await.is_err());
+
+    fixture.rest("probe", Rest::Overload);
+    let router = fixture.fit_router(&[
+        ("small", Reply::Unary, Some(4_000)),
+        ("probe", Reply::Quota, Some(1_000_000)),
+    ]);
+    fixture.clear_seen();
+    assert!(router.dispatch(&long_request(), "test").await.is_err());
+    assert_eq!(fixture.seen(), ["probe"]);
+}
+
+#[tokio::test]
+async fn d265_skipped_plugin_is_not_a_hand_on_candidate() {
+    let fixture = Fixture::new();
+    fixture.rest("probe", Rest::Overload);
+    fixture.rest("shared-hand", Rest::Rate);
+    let router = fixture.router(&[
+        ("shared-blocker", Reply::SkipPlugin(503)),
+        ("probe", Reply::Status(503, "unavailable")),
+        ("shared-hand", Reply::Unary),
+    ]);
+    assert!(dispatch(&router).await.is_err());
+    assert_eq!(fixture.seen(), ["shared-blocker", "probe"]);
+    assert_eq!(fixture.another(), [false, false]);
+}
+
+#[tokio::test]
 async fn d265_another_candidate_skips_unaccepted_hand_on() {
     let fixture = Fixture::new();
     fixture.rest("probe", Rest::Rate);
@@ -715,6 +779,56 @@ async fn d265_momentary_failure_asks_member_whose_rest_expired() {
     let routed = dispatch(&router).await.expect("ready member answers");
     assert_eq!(routed.upstream_id, "second");
     assert_eq!(fixture.seen(), ["first", "second"]);
+}
+
+#[tokio::test]
+async fn d265_guarded_member_remains_available_when_guard_expires() {
+    let fixture = Fixture::new();
+    fixture.rest("hand", Rest::Rate);
+    fixture.rest("hold", Rest::Quota);
+    let primer = fixture.router(&[
+        ("hand", Reply::Status(503, "unavailable")),
+        ("hold", Reply::Unary),
+    ]);
+    assert!(dispatch(&primer).await.is_err());
+
+    fixture.rest("probe", Rest::Overload);
+    let router = fixture.router(&[
+        ("probe", Reply::StatusAdvance(503, "unavailable", 31)),
+        ("hand", Reply::Unary),
+        ("hold", Reply::Unary),
+    ]);
+    fixture.clear_seen();
+    let routed = dispatch(&router)
+        .await
+        .expect("expired guard allows hand-on");
+    assert_eq!(routed.upstream_id, "hand");
+    assert_eq!(fixture.seen(), ["probe", "hand"]);
+}
+
+#[tokio::test]
+async fn d265_expired_hand_on_failure_starts_no_new_guard() {
+    let fixture = Fixture::new();
+    fixture.rest("hand", Rest::Rate);
+    fixture.rest("probe", Rest::Overload);
+    let router = fixture.router(&[
+        ("probe", Reply::StatusAdvance(503, "unavailable", 45)),
+        ("hand", Reply::Status(503, "unavailable")),
+    ]);
+    assert!(dispatch(&router).await.is_err());
+    assert_eq!(fixture.seen(), ["probe", "hand"]);
+
+    fixture.rest_now("hand", Rest::Outage);
+    fixture.rest_now("third", Rest::Overload);
+    fixture.advance(10);
+    let next = fixture.router(&[
+        ("hand", Reply::Unary),
+        ("third", Reply::Status(503, "unavailable")),
+    ]);
+    fixture.clear_seen();
+    let routed = dispatch(&next).await.expect("no guard from an expired ask");
+    assert_eq!(routed.upstream_id, "hand");
+    assert_eq!(fixture.seen(), ["third", "hand"]);
 }
 
 #[tokio::test]

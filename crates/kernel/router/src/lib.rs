@@ -953,7 +953,7 @@ impl Router {
         let (fitting, hand_on, over_window) = if apply_window {
             let cooldowns = self.cooldowns.clone();
             let bare = resolved.bare.clone();
-            split_over_window(resolved.hops, hand_on, input_tokens, |hop| {
+            split_over_window(resolved.hops, hand_on, input_tokens, |hop, apply_window| {
                 cooldowns.as_ref().is_some_and(|cooldowns| {
                     hand_on_candidate(
                         cooldowns,
@@ -961,7 +961,8 @@ impl Router {
                         &bare,
                         HandOnFailure::Momentary,
                         input_tokens,
-                        true,
+                        apply_window,
+                        false,
                     )
                 })
             })
@@ -1015,6 +1016,7 @@ impl Router {
                                 HandOnFailure::Momentary,
                                 input_tokens,
                                 apply_window,
+                                false,
                             )
                         })
                     })
@@ -2015,6 +2017,8 @@ enum HandOnFailure {
     Momentary,
     /// Any other own failure failover may hand on, including 401-404 and quota 429.
     Own,
+    /// The allowance last resort. Any guessed or expired rest may answer, subject to the guard.
+    LastResort,
 }
 
 /// Whether one left-out member would be asked for `failure`.
@@ -2035,7 +2039,10 @@ fn hand_on_eligible(
     match seat {
         HandOnSeat::Ineligible => false,
         HandOnSeat::Rate => true,
-        HandOnSeat::Momentary | HandOnSeat::Expired => failure == HandOnFailure::Momentary,
+        HandOnSeat::Momentary | HandOnSeat::Expired => matches!(
+            failure,
+            HandOnFailure::Momentary | HandOnFailure::LastResort
+        ),
     }
 }
 
@@ -2059,6 +2066,7 @@ fn hand_on_candidate(
     failure: HandOnFailure,
     tokens: u64,
     apply_window: bool,
+    honor_guard: bool,
 ) -> bool {
     let window_blocks = apply_window
         && hop
@@ -2068,7 +2076,7 @@ fn hand_on_candidate(
         hand_on_seat(cooldowns, hop, bare),
         failure,
         window_blocks,
-        cooldowns.hand_on_asked_recently(hop.member.id()),
+        honor_guard && cooldowns.hand_on_asked_recently(hop.member.id()),
     )
 }
 
@@ -2106,7 +2114,7 @@ fn split_over_window(
     hops: Vec<Hop>,
     left: Vec<Hop>,
     tokens: u64,
-    eligible: impl Fn(&Hop) -> bool,
+    eligible: impl Fn(&Hop, bool) -> bool,
 ) -> (Vec<Hop>, Vec<Hop>, Vec<Hop>) {
     let total = hops.len() + left.len();
     if total < 2 {
@@ -2117,7 +2125,7 @@ fn split_over_window(
             .is_some_and(|window| window > 0 && tokens >= window)
     };
     let fitting_count = hops.iter().filter(|hop| !too_small(hop)).count()
-        + left.iter().filter(|hop| eligible(hop)).count();
+        + left.iter().filter(|hop| eligible(hop, true)).count();
     let any_too_small = hops.iter().chain(left.iter()).any(too_small);
     if fitting_count == 0 || !any_too_small {
         return (hops, left, Vec::new());
@@ -2134,8 +2142,10 @@ fn split_over_window(
     let mut left_fitting = Vec::new();
     for hop in left {
         if too_small(&hop) {
-            over_window.push(hop);
-        } else if eligible(&hop) {
+            if eligible(&hop, false) {
+                over_window.push(hop);
+            }
+        } else if eligible(&hop, true) {
             left_fitting.push(hop);
         }
     }
@@ -2259,8 +2269,10 @@ impl DispatchState {
         let tokens = self.input_tokens;
         let apply_window = self.resolved.routing == "fit";
         let position = self.hand_on.iter().position(|hop| {
-            hand_on_candidate(&cooldowns, hop, &bare, failure, tokens, apply_window)
-                && cooldowns.claim_hand_on(hop.member.id())
+            !self.member_skipped(hop)
+                && hand_on_candidate(&cooldowns, hop, &bare, failure, tokens, apply_window, true)
+                && cooldowns
+                    .claim_hand_on(hop.member.id(), hop.wire_model.as_deref().unwrap_or(&bare))
         })?;
         let hop = self.hand_on.remove(position);
         let index = self.resolved.hops.len();
@@ -2907,7 +2919,20 @@ impl DispatchState {
         }
         let extra: Vec<Hop> = std::mem::take(&mut self.over_window)
             .into_iter()
-            .filter(|hop| !self.resting_allowance(hop))
+            .filter(|hop| {
+                !self.member_skipped(hop)
+                    && self.cooldowns.as_ref().is_none_or(|cooldowns| {
+                        hand_on_candidate(
+                            cooldowns,
+                            hop,
+                            &self.resolved.bare,
+                            HandOnFailure::LastResort,
+                            self.input_tokens,
+                            false,
+                            true,
+                        )
+                    })
+            })
             .collect();
         if extra.is_empty() {
             return None;
@@ -2958,6 +2983,7 @@ impl DispatchState {
                     failure,
                     self.input_tokens,
                     self.resolved.routing == "fit",
+                    true,
                 )
         })
     }
@@ -2970,14 +2996,16 @@ impl DispatchState {
             return false;
         };
         self.hand_on.iter().any(|hop| {
-            hand_on_candidate(
-                cooldowns,
-                hop,
-                &self.resolved.bare,
-                failure,
-                self.input_tokens,
-                self.resolved.routing == "fit",
-            )
+            !self.member_skipped(hop)
+                && hand_on_candidate(
+                    cooldowns,
+                    hop,
+                    &self.resolved.bare,
+                    failure,
+                    self.input_tokens,
+                    self.resolved.routing == "fit",
+                    true,
+                )
         })
     }
 
@@ -2995,20 +3023,6 @@ impl DispatchState {
                 hop.context_window
                     .is_some_and(|window| window > 0 && tokens >= window)
             })
-    }
-
-    fn resting_allowance(&self, hop: &Hop) -> bool {
-        let model = hop.wire_model.as_deref().unwrap_or(&self.resolved.bare);
-        self.cooldowns.as_ref().is_some_and(|cooldowns| {
-            cooldowns
-                .cooling_for_model(hop.member.id(), model)
-                .is_some_and(|cooling| {
-                    matches!(
-                        cooling.cause(),
-                        CooldownCause::Quota | CooldownCause::Credit
-                    )
-                })
-        })
     }
 
     fn note_skip(&mut self, order: u32, reason: SkipReason) {
@@ -3516,6 +3530,41 @@ mod hand_on_eligible_tests {
                 HandOnFailure::Own,
                 true,
                 true,
+                false,
+            ),
+            (
+                HandOnSeat::Rate,
+                HandOnFailure::LastResort,
+                false,
+                false,
+                true,
+            ),
+            (
+                HandOnSeat::Momentary,
+                HandOnFailure::LastResort,
+                false,
+                false,
+                true,
+            ),
+            (
+                HandOnSeat::Expired,
+                HandOnFailure::LastResort,
+                false,
+                false,
+                true,
+            ),
+            (
+                HandOnSeat::Momentary,
+                HandOnFailure::LastResort,
+                false,
+                true,
+                false,
+            ),
+            (
+                HandOnSeat::Ineligible,
+                HandOnFailure::LastResort,
+                false,
+                false,
                 false,
             ),
         ];
