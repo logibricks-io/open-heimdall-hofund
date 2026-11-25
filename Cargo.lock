@@ -2314,15 +2314,19 @@ dependencies = [
 name = "hofund-daemon-bin"
 version = "0.2.0-rc.3"
 dependencies = [
+ "hofund-agent",
  "hofund-bridge-mcp",
  "hofund-daemon",
  "hofund-plugin-api",
  "hofund-plugin-registry",
  "log",
+ "reqwest 0.12.28",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "wiremock",
 ]
 
 [[package]]

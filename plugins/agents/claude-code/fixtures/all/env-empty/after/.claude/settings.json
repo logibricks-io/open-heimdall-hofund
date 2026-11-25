@@ -7,6 +7,7 @@
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "empty-override-model",
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "empty-override-model",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "empty-override-model",
-    "ANTHROPIC_SMALL_FAST_MODEL": "empty-override-model"
+    "ANTHROPIC_SMALL_FAST_MODEL": "empty-override-model",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "route-a"
   }
 }

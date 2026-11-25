@@ -334,7 +334,7 @@ fn expected_dev_deps(package: &str) -> Option<&'static [&'static str]> {
             "hofund-plugin-subscription-qoder",
             "hofund-secrets",
         ],
-        "hofund-daemon-bin" => &[],
+        "hofund-daemon-bin" => &["hofund-agent"],
         "hofund-gateway" => &[
             "hofund-codec",
             "hofund-config",

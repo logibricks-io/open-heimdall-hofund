@@ -23,6 +23,31 @@ impl ModelMove {
     }
 }
 
+/// A subagent turn the gateway considered moving onto a configured model.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SubagentRoute {
+    /// Model the client asked for.
+    pub asked: String,
+    /// Model named for this kind of turn.
+    pub to: String,
+    /// Why the turn stayed on [`Self::asked`]. Empty when routing used [`Self::to`].
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kept: String,
+}
+
+impl SubagentRoute {
+    /// A consideration of `to` for a client that asked `asked`.
+    #[must_use]
+    pub fn new(asked: impl Into<String>, to: impl Into<String>, kept: impl Into<String>) -> Self {
+        Self {
+            asked: asked.into(),
+            to: to.into(),
+            kept: kept.into(),
+        }
+    }
+}
+
 /// Why a candidate was not tried, or was moved behind others.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -190,6 +215,11 @@ pub struct RoutingDecision {
     /// Stand-in that changed the model before routing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub moved: Option<ModelMove>,
+    /// Subagent model consideration for this turn, when one applied.
+    ///
+    /// Boxed so a decision stays small enough to sit inside other enums.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent: Option<Box<SubagentRoute>>,
     /// Ordered candidates as routing weighed them.
     #[serde(default)]
     pub candidates: Vec<RouteCandidate>,
