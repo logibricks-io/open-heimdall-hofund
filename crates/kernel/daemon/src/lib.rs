@@ -61,7 +61,10 @@ mod d226_import;
 #[cfg(test)]
 mod d241_listed;
 #[cfg(test)]
+mod d246_relay_effort_ids;
+#[cfg(test)]
 mod d250_messages_refused;
+mod effort_variants;
 mod events;
 mod log_tail;
 mod measurements;
@@ -1309,6 +1312,8 @@ fn expand_route(
                     at_once: 0,
                     rank: 0,
                     wire_model: upstream.model.clone(),
+                    effort_models: None,
+                    effort_live: None,
                     max_output_tokens: upstream.max_output_tokens,
                     catalog_output_tokens: None,
                     context_window: None,
@@ -1422,9 +1427,13 @@ fn push_provider(
     if !seen.insert((id.to_owned(), model_name.to_owned())) {
         return;
     }
-    let listed = context
+    let listed = context.models_host.and_then(|host| {
+        listed_model(host.cached(id).models, model_name)
+            .or_else(|| listed_model(host.source_cached(id).models, model_name))
+    });
+    let effort_models = context
         .models_host
-        .and_then(|host| listed_model(host.cached(id).models, model_name));
+        .and_then(|host| host.effort_models(id, model_name));
     parents.push(Unit {
         key: format!("provider/{id}/{model_name}"),
         pool: format!("provider/{id}"),
@@ -1464,6 +1473,10 @@ fn push_provider(
             at_once,
             rank,
             wire_model: model.clone(),
+            effort_models: effort_models.clone(),
+            effort_live: context
+                .models_host
+                .map(|host| host.effort_live(id, model_name)),
             max_output_tokens: max_output_tokens.or(provider_cap),
             catalog_output_tokens: hop_output(listed.as_ref()),
             context_window: hop_window(listed.as_ref()),

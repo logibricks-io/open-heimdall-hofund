@@ -194,7 +194,7 @@ All effort, thinking, **`turnKey`** effort bit, and CLI argv rules **derive from
 
 **Codec gaps (hofund today — gateway must supply extensions in R-6c, not infer from IR):**
 
-- **Anthropic** `messages_effort` (`anthropic.rs:358-374`): only **`output_config.effort`** or **`thinking.type == disabled`** → **`Effort::None`**; omits **`between_tools`**, budget-only **A**, and **`none`/`minimal` vs ThinkOff** distinction.
+- **Anthropic** `messages_effort` (`anthropic.rs`, `messages_effort`): a level is read only when **`thinking.type`** is **`enabled`** or **`adaptive`**. Missing, **`disabled`**, **`between_tools`**, or any other type leaves **`params.effort` unset** even when **`output_config.effort`** is set. On an enabled or adaptive body, **`output_config.effort`** beats the budget, and **`none`** and **`minimal`** select low. Chat **`reasoning_effort: none`** stays **`Effort::None`**. Gateway **`bridge_effort`** still recomputes from the raw body and extensions; this codec order does not replace that computation.
 - **Chat** `reasoning_effort` (`openai_chat.rs:559-562`): stores label in **`params.effort`** without **ThinkOff**; literal **`none`** becomes **`Effort::None`**, not **`low` + think-off**.
 - **Responses** reasoning effort: same pattern as Chat.
 

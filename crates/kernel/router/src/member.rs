@@ -9,7 +9,7 @@ use hofund_plugin_api::{
     Completion, CountOutcome, MemberId, PluginError, RawAnswer, RawBody, Request,
 };
 
-use crate::{AttemptHook, MemberAttempt, RealtimeDial};
+use crate::{AttemptHook, EffortModels, MemberAttempt, RealtimeDial};
 
 /// Proof that a member answered a background model-list request.
 #[derive(Clone, Debug)]
@@ -71,6 +71,11 @@ pub trait Member: Send + Sync {
 
     /// A coding-agent catalog entry learned for `model`, as a JSON object.
     fn learned_catalog_entry(&self, _model: &str) -> Option<String> {
+        None
+    }
+
+    /// Effort-suffixed ids this member can serve as one model, when listed.
+    fn effort_models(&self) -> Option<EffortModels> {
         None
     }
 

@@ -1870,6 +1870,7 @@ fn model_entries(models: &[ModelSpec]) -> Vec<ModelEntry> {
             entry.display_name = model.display_name().map(str::to_owned);
             entry.context = (model.context() != 0).then(|| model.context());
             entry.max_output = (model.max_output() != 0).then(|| model.max_output());
+            entry.efforts = model.efforts().to_vec();
             entry.rate = model.rate();
             entry.rate_was = model.rate_was();
             entry

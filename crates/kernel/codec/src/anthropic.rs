@@ -376,22 +376,62 @@ fn encode_request(request: &Request) -> Result<Vec<u8>, CodecError> {
 }
 
 fn messages_effort(object: &Object) -> Option<Effort> {
+    let thinking = object.get("thinking").and_then(Value::as_object);
+    let kind = thinking
+        .and_then(|thinking| thinking.get("type"))
+        .and_then(Value::as_str);
+    // A level is read only after the caller asked to think. A missing body,
+    // `disabled`, `between_tools`, or any other type leaves effort unset even
+    // when `output_config.effort` names one. The objects stay in the
+    // extension bag, so encode writes them back unchanged.
+    if !matches!(kind, Some("enabled" | "adaptive")) {
+        return None;
+    }
     if let Some(label) = object
         .get("output_config")
         .and_then(Value::as_object)
         .and_then(|config| config.get("effort"))
         .and_then(Value::as_str)
-        && let Some(effort) = Effort::from_label(label)
+        && let Some(effort) = messages_config_effort(label)
     {
         return Some(effort);
     }
-    let disabled = object
-        .get("thinking")
-        .and_then(Value::as_object)
-        .and_then(|thinking| thinking.get("type"))
-        .and_then(Value::as_str)
-        == Some("disabled");
-    disabled.then_some(Effort::None)
+    let budget = thinking
+        .and_then(|thinking| thinking.get("budget_tokens"))
+        .and_then(json_i64)
+        .unwrap_or(0);
+    effort_of_budget(budget)
+}
+
+/// `output_config.effort` once thinking is enabled or adaptive.
+///
+/// `none` and `minimal` select low. An unknown word is not a level, so the
+/// budget is used instead. Chat `reasoning_effort` is not read here.
+fn messages_config_effort(label: &str) -> Option<Effort> {
+    match label.trim().to_ascii_lowercase().as_str() {
+        "none" | "minimal" => Some(Effort::Low),
+        other => Effort::from_label(other),
+    }
+}
+
+fn json_i64(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|number| i64::try_from(number).ok()))
+}
+
+/// Maps a Messages thinking budget to a level.
+///
+/// The cuts are 4096, 12000, and 24000. Zero or a missing budget does not
+/// request a level. A negative budget is not a level either.
+fn effort_of_budget(budget: i64) -> Option<Effort> {
+    match budget {
+        ..=0 => None,
+        1..=4096 => Some(Effort::Low),
+        4097..=12000 => Some(Effort::Medium),
+        12001..=24000 => Some(Effort::High),
+        _ => Some(Effort::Xhigh),
+    }
 }
 
 fn write_messages_effort(object: &mut Object, request: &Request) {
