@@ -228,10 +228,18 @@ fn map_says(delta: &Map<String, Value>) -> bool {
         })
 }
 
+fn content_said(value: Option<&Value>) -> bool {
+    match value {
+        Some(Value::String(text)) => !text.is_empty(),
+        _ => false,
+    }
+}
+
 fn map_said(delta: &Map<String, Value>) -> bool {
-    ["content", "refusal", "function_call"]
-        .into_iter()
-        .any(|key| raw_says(delta.get(key)))
+    content_said(delta.get("content"))
+        || ["refusal", "function_call"]
+            .into_iter()
+            .any(|key| raw_says(delta.get(key)))
         || delta
             .get("tool_calls")
             .and_then(Value::as_array)
@@ -725,7 +733,8 @@ mod tests {
 
     use super::{
         ChatStreamCheck, chat_response_empty, completed_event_empty, decoded_chat_stream_empty,
-        empty_reply_message, relayed_sse_empty_without_content, response_body_empty,
+        empty_reply_message, relayed_chat_response_cut_void, relayed_sse_empty_without_content,
+        response_body_empty,
     };
     use crate::{Codec, OpenAiChat};
 
@@ -844,6 +853,31 @@ mod tests {
         partial.observe(b"a: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n");
         assert!(partial.has_reply());
         assert!(partial.empty_usage().is_none());
+    }
+
+    #[test]
+    fn d252_empty_or_reasoning_array_content_is_a_length_cut() {
+        let empty = r#"{"choices":[{"delta":{"content":[]},"finish_reason":"length"}],"usage":{"completion_tokens":8192}}"#;
+        let reasoning = r#"{"choices":[{"message":{"content":[{"type":"reasoning","text":"think"}]},"finish_reason":"length"}],"usage":{"completion_tokens":8192,"completion_tokens_details":{"reasoning_tokens":8192}}}"#;
+        for body in [empty, reasoning] {
+            assert!(
+                relayed_chat_response_cut_void(body.as_bytes(), None).is_some(),
+                "{body}"
+            );
+        }
+        let said = r#"{"choices":[{"delta":{"content":"done"},"finish_reason":"length"}],"usage":{"completion_tokens":8192}}"#;
+        assert!(relayed_chat_response_cut_void(said.as_bytes(), None).is_none());
+        let call = r#"{"choices":[{"delta":{"function_call":{"name":"lookup","arguments":"{}"}},"finish_reason":"length"}],"usage":{"completion_tokens":8192}}"#;
+        assert!(relayed_chat_response_cut_void(call.as_bytes(), None).is_none());
+
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":[]},\"finish_reason\":\"length\"}],\"usage\":{\"completion_tokens\":8192}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let mut check = ChatStreamCheck::default();
+        check.observe(sse.as_bytes());
+        check.finish();
+        assert!(check.cut_void_usage(None).is_some());
     }
 
     #[test]

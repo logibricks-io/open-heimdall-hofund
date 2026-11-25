@@ -2638,7 +2638,12 @@ impl DispatchState {
             if self.protocol_alternate_idle(&hop) {
                 continue;
             }
-            let client_limit = self.request.params.max_tokens.filter(|limit| *limit > 0);
+            // A present field is the client's limit, including an explicit zero.
+            // The error text still names only a positive limit. A hop cap fills
+            // an omitted field in `apply_wire` and is not a learned room.
+            let client_omitted = self.request.params.max_tokens.is_none();
+            let room_open = client_omitted && hop.max_output_tokens.is_none();
+            let named_limit = self.request.params.max_tokens.filter(|limit| *limit > 0);
             let mut attempt = self.request.clone();
             apply_wire(&mut attempt, &hop, &self.resolved.bare, &self.served);
             self.tier_sent = hofund_codec::service_tier::extension_tier(&attempt.extensions);
@@ -2647,7 +2652,7 @@ impl DispatchState {
             );
             let upstream_model = attempt.model.clone();
             let mut void_roomed = false;
-            if client_limit.is_none()
+            if room_open
                 && let Some(room) = self.void_rooms.get(hop.member.route_id(), &upstream_model)
             {
                 let room = void_room::fitted_room(room, hop.context_window, self.input_tokens);
@@ -2775,7 +2780,7 @@ impl DispatchState {
                     &self.inbound_protocol,
                     attempt.clone(),
                     self.hook.clone(),
-                    client_limit,
+                    named_limit,
                 )
                 .await;
                 if void_roomed
@@ -2799,7 +2804,7 @@ impl DispatchState {
                     continue;
                 }
                 if chat
-                    && client_limit.is_none()
+                    && room_open
                     && !void_roomed
                     && !void_retried
                     && let Some(spent) = void
@@ -3884,7 +3889,13 @@ fn output_field_refused(error: &PluginError) -> bool {
     if !matches!(error.status(), Some(400 | 422)) {
         return false;
     }
-    let text = hofund_ir::words_of(error.message()).to_ascii_lowercase();
+    let text = hofund_ir::words_of(error.message());
+    // A window-versus-prompt accounting still names the output field. It is
+    // not a refusal of the field, so the learned room stays.
+    if void_room::reply_left(&text) > 0 {
+        return false;
+    }
+    let text = text.to_ascii_lowercase();
     [
         "max_tokens",
         "max_output_tokens",

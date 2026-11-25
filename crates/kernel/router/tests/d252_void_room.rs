@@ -59,6 +59,7 @@ enum Reply {
     UnaryVoid,
     UnaryText,
     RefuseOutput,
+    RefuseWindow,
 }
 
 struct Fake {
@@ -137,6 +138,10 @@ impl Member for Fake {
             Reply::RefuseOutput => Err(PluginError::status_error(
                 400,
                 "max_tokens must be at most 16384",
+            )),
+            Reply::RefuseWindow => Err(PluginError::status_error(
+                400,
+                "input length and max_tokens exceed context limit: 197202 + 21333 > 200000",
             )),
         }
     }
@@ -388,4 +393,110 @@ async fn d252_decoded_and_whole_replies_learn_room() {
             [None, Some(32_768), Some(32_768)]
         );
     }
+}
+
+#[tokio::test]
+async fn d252_explicit_zero_fails_once_without_learning_a_room() {
+    let only = fixture("only", vec![Reply::RawVoid, Reply::RawText]);
+    let rooms = VoidRooms::default();
+    let router = router(vec![only.member.clone()]).with_void_rooms(rooms.clone());
+    let error = dispatch(&router, Some(0), true).await.expect_err("void");
+    assert!(error.contains("cut at its length"), "{error}");
+    assert!(
+        !error.contains("request's limit was"),
+        "a zero is a client limit, and the error names only a positive one: {error}"
+    );
+    assert_eq!(only.hits.load(Ordering::SeqCst), 1);
+    assert_eq!(only.limits.lock().expect("limits").as_slice(), [Some(0)]);
+    assert_eq!(rooms.get("only", "demo"), None);
+
+    let later = dispatch(&router, None, true).await.expect("later");
+    assert!(later.contains("done"), "{later}");
+    assert_eq!(
+        only.limits.lock().expect("limits").as_slice(),
+        [Some(0), None]
+    );
+    assert_eq!(rooms.get("only", "demo"), None);
+}
+
+#[tokio::test]
+async fn d252_configured_hop_cap_survives_a_void() {
+    let rooms = VoidRooms::default();
+    let capped = fixture("capped", vec![Reply::RawVoid, Reply::RawText]);
+    let capped_router = hop_router(capped.member.clone(), 4_096, rooms.clone());
+    let error = dispatch(&capped_router, None, true)
+        .await
+        .expect_err("void");
+    assert!(error.contains("cut at its length"), "{error}");
+    assert_eq!(capped.hits.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        capped.limits.lock().expect("limits").as_slice(),
+        [Some(4_096)]
+    );
+    assert_eq!(rooms.get("capped", "demo"), None);
+
+    let later = dispatch(&capped_router, None, true).await.expect("later");
+    assert!(later.contains("done"), "{later}");
+    assert_eq!(
+        capped.limits.lock().expect("limits").as_slice(),
+        [Some(4_096), Some(4_096)]
+    );
+    assert_eq!(rooms.get("capped", "demo"), None);
+
+    let open = fixture("only", vec![Reply::RawVoid, Reply::RawText]);
+    let open_router = router(vec![open.member.clone()]).with_void_rooms(rooms.clone());
+    dispatch(&open_router, None, true).await.expect("learn");
+    assert_eq!(rooms.get("only", "demo"), Some(32_768));
+    let guarded = fixture("only", vec![Reply::RawText]);
+    let guarded_router = hop_router(guarded.member.clone(), 4_096, rooms);
+    let answer = dispatch(&guarded_router, None, true).await.expect("capped");
+    assert!(answer.contains("done"), "{answer}");
+    assert_eq!(
+        guarded.limits.lock().expect("limits").as_slice(),
+        [Some(4_096)]
+    );
+}
+
+#[tokio::test]
+async fn d252_window_refusal_leaves_learned_room() {
+    let only = fixture(
+        "only",
+        vec![
+            Reply::RawVoid,
+            Reply::RawText,
+            Reply::RefuseWindow,
+            Reply::RawText,
+        ],
+    );
+    let rooms = VoidRooms::default();
+    let router = router(vec![only.member.clone()]).with_void_rooms(rooms.clone());
+    dispatch(&router, None, true).await.expect("learn");
+    assert_eq!(rooms.get("only", "demo"), Some(32_768));
+
+    let error = dispatch(&router, None, true).await.expect_err("window");
+    assert!(error.contains("exceed context limit"), "{error}");
+    assert_eq!(only.hits.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        only.limits.lock().expect("limits").as_slice(),
+        [None, Some(32_768), Some(32_768)]
+    );
+    assert_eq!(rooms.get("only", "demo"), Some(32_768));
+
+    let answer = dispatch(&router, None, true).await.expect("kept");
+    assert!(answer.contains("done"), "{answer}");
+    assert_eq!(
+        only.limits.lock().expect("limits").as_slice(),
+        [None, Some(32_768), Some(32_768), Some(32_768)]
+    );
+    assert_eq!(rooms.get("only", "demo"), Some(32_768));
+}
+
+fn hop_router(member: Arc<dyn Member>, cap: u64, rooms: VoidRooms) -> Router {
+    let mut hop = Hop::new(member);
+    hop.max_output_tokens = Some(cap);
+    Router::from_hops(
+        BTreeMap::from([("demo".to_owned(), vec![hop])]),
+        FailoverPolicy::default(),
+    )
+    .with_void_rooms(rooms)
 }
