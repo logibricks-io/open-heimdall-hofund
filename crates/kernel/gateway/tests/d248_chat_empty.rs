@@ -215,8 +215,8 @@ async fn d248_translated_void_is_an_empty_stream_on_every_client_route() {
     ] {
         let (app, hits, _usage, dir) = app(vec![Reply::EmptyEvents]);
         let (status, content_type, body) = post(app, uri, ask).await;
-        assert_eq!(status, StatusCode::OK, "{uri}: {body}");
-        assert_eq!(content_type, "text/event-stream");
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{uri}: {body}");
+        assert_ne!(content_type, "text/event-stream", "{uri}");
         assert!(body.contains("an empty reply"), "{uri}: {body}");
         assert!(body.contains(COUNTED_DETAIL), "{uri}: {body}");
         assert!(!body.contains("[DONE]"), "{uri}: {body}");

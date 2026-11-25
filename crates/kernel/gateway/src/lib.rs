@@ -3277,7 +3277,10 @@ fn failure(
         Some(upstream)
     };
     track.end_with(member, status.as_u16(), None, None);
-    if request.stream && message.contains(hofund_codec::EMPTY_REPLY_MESSAGE) {
+    if request.stream
+        && codec.id() == hofund_codec::CHAT_PROTOCOL_ID
+        && message.contains(hofund_codec::EMPTY_REPLY_MESSAGE)
+    {
         let mut bytes = codec.encode_stream_error(status.as_u16(), &message);
         bytes.extend_from_slice(codec.severed_stream_end());
         return with_named_session(
