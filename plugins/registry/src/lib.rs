@@ -265,23 +265,33 @@ pub struct InheritingSubagent {
 
 /// The subagent model for an inheriting tool turn, when one is set.
 ///
-/// `is_route` reports whether `model` is a gateway route right now. The
-/// settings directory is `$CLAUDE_CONFIG_DIR` or the user home. Tests that
-/// need a stand-in directory call the agent crate with that path instead.
+/// `is_route` reports whether `model` is a gateway route right now. A present
+/// `settings_dir` is read directly; `None` resolves `$CLAUDE_CONFIG_DIR` or the
+/// user home with the same rules as the agent integration.
 #[must_use]
 pub fn inheriting_subagent_model(
     agent_id: &str,
     body: &[u8],
+    settings_dir: Option<&std::path::Path>,
     gateway_origin: &str,
     is_route: impl Fn(&str) -> bool,
 ) -> Option<InheritingSubagent> {
-    hofund_plugin_agent_claude::inheriting_subagent_from_env(
-        agent_id,
-        body,
-        gateway_origin,
-        is_route,
-    )
-    .map(|setting| InheritingSubagent {
+    let found = match settings_dir {
+        Some(dir) => hofund_plugin_agent_claude::inheriting_subagent_model(
+            agent_id,
+            body,
+            dir,
+            gateway_origin,
+            is_route,
+        ),
+        None => hofund_plugin_agent_claude::inheriting_subagent_from_env(
+            agent_id,
+            body,
+            gateway_origin,
+            is_route,
+        ),
+    };
+    found.map(|setting| InheritingSubagent {
         model: setting.model,
         effort: setting.effort,
     })

@@ -645,13 +645,23 @@ async fn start_inner(
     let gateway_origin = format!("http://{listen}");
     let subagent_routes = snapshot.clone();
     let subagent_config = runtime.config_updates();
+    let subagent_settings = options
+        .agent_session
+        .as_ref()
+        .map(hofund_agent::Session::claude_settings_dir);
     gateway = gateway.with_subagent_model(Arc::new(move |query| {
         let models = subagent_routes.load().models();
         let config = subagent_config.borrow();
-        registry::inheriting_subagent_model(query.agent_id, query.body, &gateway_origin, |model| {
-            models.iter().any(|id| id == model)
-                || config.routes.iter().any(|route| route.model == model)
-        })
+        registry::inheriting_subagent_model(
+            query.agent_id,
+            query.body,
+            subagent_settings.as_deref(),
+            &gateway_origin,
+            |model| {
+                models.iter().any(|id| id == model)
+                    || config.routes.iter().any(|route| route.model == model)
+            },
+        )
     }));
     runtime.set_ask(gateway.ask_backend());
     let model_listener = options.model_listener.take();

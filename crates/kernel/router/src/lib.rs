@@ -349,11 +349,12 @@ pub struct InputCount {
     pub upstream_id: String,
 }
 
-struct Resolved {
+/// A model name resolved to its configured route and upstream hops.
+pub struct Resolved {
     hops: Vec<Hop>,
     at_once: BTreeMap<String, at_once::AtOnceMember>,
-    /// Configured route used for model-scope matching.
-    route: String,
+    /// Configured route used for model-scope matching and dispatch.
+    pub route: String,
     /// Name sent when a hop has no wire model.
     bare: String,
     /// Stable state key for this route pool.
@@ -1812,7 +1813,12 @@ impl Router {
         })
     }
 
-    fn resolve(&self, asked: &str) -> Result<Resolved, RouterError> {
+    /// Resolves a route key, bare wire model, or qualified provider/model id.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same missing-model or ambiguity error as dispatch.
+    pub fn resolve(&self, asked: &str) -> Result<Resolved, RouterError> {
         if let Some(route) = self
             .routes
             .get(asked)

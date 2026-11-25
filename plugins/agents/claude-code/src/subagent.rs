@@ -63,7 +63,7 @@ pub fn inheriting_subagent_model(
 
 /// [`inheriting_subagent_model`] using `$CLAUDE_CONFIG_DIR` or `~/.claude`.
 ///
-/// An empty override is ignored. Callers that have a directory already should
+/// Empty and relative overrides are ignored. Callers that have a directory already should
 /// pass it to [`inheriting_subagent_model`] so tests never read a real home.
 #[must_use]
 pub fn inheriting_subagent_from_env(
@@ -96,16 +96,7 @@ fn setting_in_directory(
 }
 
 fn settings_directory() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR")
-        && !dir.is_empty()
-    {
-        return Some(PathBuf::from(dir));
-    }
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-    if home.is_empty() {
-        return None;
-    }
-    Some(PathBuf::from(home).join(".claude"))
+    Some(hofund_agent::Session::from_process_env().claude_settings_dir())
 }
 
 fn read_limited(path: &Path) -> Option<Vec<u8>> {
@@ -333,5 +324,35 @@ mod tests {
         assert!(
             inheriting_subagent_model("claude-code", &general, &missing, ORIGIN, served).is_none()
         );
+    }
+
+    #[test]
+    fn d267_relative_override_and_windows_home_match_connect() {
+        let home = tempfile::tempdir().expect("home");
+        let settings = home.path().join(".claude");
+        std::fs::create_dir(&settings).expect("settings dir");
+        write_settings(&settings, "sub", ORIGIN);
+        let session =
+            hofund_agent::Session::from_env_iter(home.path(), [("CLAUDE_CONFIG_DIR", "relative")]);
+        let dir = session.claude_settings_dir();
+        let got = inheriting_subagent_model("claude-code", &explore(), &dir, ORIGIN, served)
+            .expect("relative override reads the home file");
+        assert_eq!(got.model, "sub");
+
+        let profile = tempfile::tempdir().expect("profile");
+        let windows_home = hofund_agent::home_dir_from_env(
+            Some(home.path().as_os_str().to_os_string()),
+            Some(profile.path().as_os_str().to_os_string()),
+            true,
+        );
+        assert_eq!(windows_home, profile.path());
+        let settings = windows_home.join(".claude");
+        std::fs::create_dir(&settings).expect("Windows settings dir");
+        write_settings(&settings, "sub", ORIGIN);
+        let session = hofund_agent::Session::new(windows_home).with_claude_config_dir("relative");
+        let dir = session.claude_settings_dir();
+        let got = inheriting_subagent_model("claude-code", &explore(), &dir, ORIGIN, served)
+            .expect("Windows order reads the profile file");
+        assert_eq!(got.model, "sub");
     }
 }

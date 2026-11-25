@@ -534,3 +534,51 @@ async fn d267_count_tokens_uses_the_pick() {
     assert_eq!(seen.effort, Some(Effort::High));
     assert_eq!(seen.bridge_effort.as_deref(), Some("high"));
 }
+
+#[tokio::test]
+async fn d267_account_only_key_bar_keeps_the_asked_model() {
+    let harness = harness(Some(choice("sub", None)), &[]);
+    let (status, body) = send(
+        harness.app,
+        "/v1/messages",
+        &payload("lead", true, None),
+        true,
+        Some(Identity {
+            accounts: vec!["prov/preset:prov:lead".to_owned()],
+            ..Identity::default()
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(only(&harness.lead).model, "lead");
+    assert!(harness.sub.seen.lock().expect("sub").is_empty());
+    let note = harness.book.recent()[0]
+        .subagent
+        .clone()
+        .expect("account bar");
+    assert_eq!(note.kept, "the gateway key may not use it");
+}
+
+#[tokio::test]
+async fn d267_qualified_target_resolves_and_follows_key_scope() {
+    let harness = harness(Some(choice("prov/sub", None)), &[]);
+    let (status, body) = send(
+        harness.app,
+        "/v1/messages",
+        &payload("lead", true, None),
+        true,
+        Some(Identity {
+            models: vec!["prov/sub".to_owned()],
+            ..Identity::default()
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(harness.lead.seen.lock().expect("lead").is_empty());
+    assert_eq!(only(&harness.sub).model, "sub");
+    let decision = &harness.book.recent()[0];
+    assert_eq!(decision.tries[0].model, "sub");
+    let note = decision.subagent.clone().expect("qualified target");
+    assert_eq!(note.to, "prov/sub");
+    assert!(note.kept.is_empty());
+}

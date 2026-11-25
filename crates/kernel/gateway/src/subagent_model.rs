@@ -77,30 +77,25 @@ pub(crate) fn prepare(
         };
     }
     let router = app.snapshot.load();
-    let served = router.models();
     let disabled = app.model_catalog.as_ref().is_some_and(|catalog| {
         catalog
             .visibility()
             .disabled_pattern(&choice.model)
             .is_some()
     });
-    let restricted = !identity.models.is_empty();
-    let allowed = router
-        .models_scoped(Some(&route_scope(identity)))
-        .iter()
-        .any(|id| id == &choice.model);
     let asked = request.model.clone();
     if disabled {
         return keep(&asked, &choice.model, "it is disabled");
     }
-    if !served.iter().any(|id| id == &choice.model) {
+    let Ok(resolved) = router.resolve(&choice.model) else {
         return keep(&asked, &choice.model, "the gateway does not serve it now");
-    }
-    if restricted && !allowed {
+    };
+    let restricted = !identity.models.is_empty() || !identity.accounts.is_empty();
+    if restricted && !router.admits(&choice.model, Some(&route_scope(identity))) {
         return keep(&asked, &choice.model, "the gateway key may not use it");
     }
     let mut routed = request.clone();
-    retarget(&mut routed, &choice.model, choice.effort_label.as_deref());
+    retarget(&mut routed, &resolved.route, choice.effort_label.as_deref());
     Prepared {
         request: Some(routed),
         note: Some(SubagentRoute::new(asked, choice.model, "")),

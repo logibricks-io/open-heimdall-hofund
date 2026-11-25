@@ -262,6 +262,14 @@ impl Session {
         self
     }
 
+    /// Returns the directory containing the Claude settings file.
+    #[must_use]
+    pub fn claude_settings_dir(&self) -> PathBuf {
+        self.claude_config_dir
+            .clone()
+            .unwrap_or_else(|| self.home.join(".claude"))
+    }
+
     /// Sets `CODEX_HOME`. Empty and relative paths are treated as unset.
     #[must_use]
     pub fn with_codex_home(mut self, path: impl Into<PathBuf>) -> Self {
@@ -538,10 +546,22 @@ pub trait AgentAdapter: Sync {
 }
 
 fn home_dir() -> PathBuf {
-    #[cfg(windows)]
-    let found = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
-    #[cfg(not(windows))]
-    let found = std::env::var_os("HOME");
+    home_dir_from_env(
+        std::env::var_os("HOME"),
+        std::env::var_os("USERPROFILE"),
+        cfg!(windows),
+    )
+}
+
+/// Resolves injected home variables for platform-specific path tests.
+#[doc(hidden)]
+#[must_use]
+pub fn home_dir_from_env(
+    home: Option<OsString>,
+    userprofile: Option<OsString>,
+    windows: bool,
+) -> PathBuf {
+    let found = if windows { userprofile.or(home) } else { home };
     found.map_or_else(|| PathBuf::from("."), PathBuf::from)
 }
 

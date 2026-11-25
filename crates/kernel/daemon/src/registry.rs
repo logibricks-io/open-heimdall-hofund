@@ -23,15 +23,21 @@ pub(crate) use hofund_plugin_registry::{
 pub(crate) fn inheriting_subagent_model(
     agent_id: &str,
     body: &[u8],
+    settings_dir: Option<&std::path::Path>,
     gateway_origin: &str,
     is_route: impl Fn(&str) -> bool,
 ) -> Option<hofund_gateway::SubagentModelChoice> {
-    hofund_plugin_registry::inheriting_subagent_model(agent_id, body, gateway_origin, is_route).map(
-        |found| hofund_gateway::SubagentModelChoice {
-            model: found.model,
-            effort_label: found.effort,
-        },
+    hofund_plugin_registry::inheriting_subagent_model(
+        agent_id,
+        body,
+        settings_dir,
+        gateway_origin,
+        is_route,
     )
+    .map(|found| hofund_gateway::SubagentModelChoice {
+        model: found.model,
+        effort_label: found.effort,
+    })
 }
 
 /// Registry operations needed to construct and serve the daemon.
