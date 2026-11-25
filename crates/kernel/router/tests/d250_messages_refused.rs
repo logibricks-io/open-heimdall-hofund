@@ -68,6 +68,9 @@ impl Member for Fake {
             .lock()
             .expect("seen")
             .push(format!("{}:{}:count", request.model, self.protocol));
+        if self.protocol == "messages" {
+            return Err(PluginError::status_error(self.status, self.body));
+        }
         Ok(CountOutcome::Counted(9))
     }
 
@@ -76,6 +79,9 @@ impl Member for Fake {
             .lock()
             .expect("seen")
             .push(format!("{}:forward", self.protocol));
+        if self.protocol == "messages" {
+            return Err(PluginError::status_error(self.status, self.body));
+        }
         Ok(RawAnswer::new(200, None, b"{}".to_vec()))
     }
 }
@@ -203,6 +209,63 @@ async fn d250_count_and_forward_honour_the_unfit_mark() {
     let forwarded = router.forward(&call).await.expect("chat forwards");
     assert_eq!(forwarded.answer.status(), 200);
     assert_eq!(seen.lock().expect("seen").as_slice(), ["chat:forward"]);
+}
+
+#[tokio::test]
+async fn d250_count_and_forward_store_a_first_refusal() {
+    for count_first in [true, false] {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let fitness = ApiFitness::default();
+        let first = router(&["model-a"], fitness.clone(), &seen, &[], 403, REFUSAL);
+        let call = || {
+            Forward::new("model-a", "/v1/messages", |model| {
+                Ok(RawBody::new(
+                    "application/json",
+                    format!("{{\"model\":\"{model}\"}}"),
+                ))
+            })
+            .expect("forward call")
+        };
+        if count_first {
+            let count = first
+                .count(&hofund_router::Request::new("model-a"), "messages")
+                .await
+                .expect("first count refusal asks Chat");
+            assert_eq!(count.tokens, 9);
+        } else {
+            first
+                .forward(&call())
+                .await
+                .expect("first forward refusal asks Chat");
+        }
+        let suffix = if count_first { "count" } else { "forward" };
+        let expected = |protocol| {
+            if count_first {
+                format!("model-a:{protocol}:{suffix}")
+            } else {
+                format!("{protocol}:forward")
+            }
+        };
+        assert_eq!(
+            seen.lock().expect("seen").as_slice(),
+            [expected("messages"), expected("chat")]
+        );
+
+        seen.lock().expect("seen").clear();
+        let reloaded = router(&["model-a"], fitness, &seen, &[], 403, REFUSAL);
+        if count_first {
+            reloaded
+                .count(&hofund_router::Request::new("model-a"), "messages")
+                .await
+                .expect("reload remembers the count refusal");
+        } else {
+            reloaded
+                .forward(&call())
+                .await
+                .expect("reload remembers the forward refusal");
+        }
+        assert_eq!(seen.lock().expect("seen").as_slice(), [expected("chat")]);
+    }
 }
 
 #[tokio::test]
