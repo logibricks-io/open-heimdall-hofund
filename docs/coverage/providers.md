@@ -107,6 +107,7 @@ Per vendor (magpie `internal/gateway` unless noted):
 - xAI: tool schema `pattern` rewritten for Rust regex (`grok_schema.go`); namespace rules (`grok_namespace.go`).
 - Grammar-compiled routers (OpenRouter ModelRun via Cline): `oneOf` -> `anyOf` (`oneof_schema.go`).
 - Gemini 3: keep and return `thought_signature` on function calls, including through the OpenAI-compatible API `extra_content.google.thought_signature` (`gemini_signature.go`, `gemini_sigstore.go`).
+- Gemini free-form objects: an unrestricted object below a tool root goes as a string described as `A JSON object, written as JSON text.` and a string containing a complete JSON object at that path is restored in the reply, whole or streamed, on Chat, Responses, and Messages (`gemini_free_objects.go`). D-249 implements this for every provider, including Copilot and relays and the Responses WebSocket, with non-Gemini and native Generative Language controls in `d249_*` tests.
 - Code Assist envelope `{model, project, request}` / `{response}` (`codeassist.go`).
 - Bedrock Mantle: `/v1` vs `/openai/v1` prefix by model, retry the other on "isn't supported on this route" (`mantle.go`).
 - Assistant prefill refused (OpenCode Go Claude, Volcengine Agent Plan, Vertex Gemini): end the conversation on a user message (`prefill.go`).

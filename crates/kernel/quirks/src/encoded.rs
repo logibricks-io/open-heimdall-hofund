@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use hofund_ir::Request;
+use hofund_ir::{FreeObjectPaths, Request, Tool};
 
 use crate::betas::apply_learned_betas;
 use crate::foreign_thinking::without_foreign_thinking;
@@ -102,6 +102,7 @@ const AFTER_TOKEN_FIELD: &[EncodedRule] = &[
     copilot_grok_responses_custom,
     kimi_tool_enum_types,
     kimi_tool_ref_types,
+    gemini_free_objects,
     gemini_tool_types,
     kimi_locked_sampling,
 ];
@@ -884,6 +885,129 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         && haystack
             .windows(needle.len())
             .any(|window| window == needle)
+}
+
+const FREE_OBJECT_HINT: &str = "A JSON object, written as JSON text.";
+
+/// Finds tool arguments that a Gemini model receives as JSON-text objects.
+#[must_use]
+pub fn gemini_free_object_paths(
+    protocol: &str,
+    model: &str,
+    tools: &[Tool],
+) -> Option<FreeObjectPaths> {
+    if !matches!(
+        protocol,
+        "openai-chat" | "openai-responses" | "anthropic-messages"
+    ) || !gemini_named(model)
+    {
+        return None;
+    }
+    FreeObjectPaths::from_tools(tools)
+}
+
+fn gemini_free_objects(context: EncodedContext<'_>, body: &[u8]) -> Vec<u8> {
+    if !matches!(
+        context.protocol,
+        "openai-chat" | "openai-responses" | "anthropic-messages"
+    ) {
+        return body.to_vec();
+    }
+    let Some(root) = json::parse(body) else {
+        return body.to_vec();
+    };
+    let model = root.get("model").and_then(Node::text).unwrap_or_default();
+    if !gemini_named(model) {
+        return body.to_vec();
+    }
+    let Some(tools) = root.get("tools") else {
+        return body.to_vec();
+    };
+    let mut roots = Vec::new();
+    json::tool_roots(tools, &mut roots);
+    let mut edits = Vec::new();
+    for root in roots {
+        collect_gemini_free_objects(root, true, 0, body, &mut edits);
+    }
+    json::apply(body, edits)
+}
+
+fn collect_gemini_free_objects(
+    node: &Node,
+    is_root: bool,
+    depth: u32,
+    body: &[u8],
+    edits: &mut Vec<Edit>,
+) {
+    if depth > 32 {
+        return;
+    }
+    if !is_root && gemini_free_object(node, body) {
+        let description = node
+            .get("description")
+            .and_then(Node::text)
+            .map(str::trim)
+            .filter(|description| !description.is_empty())
+            .map_or_else(
+                || FREE_OBJECT_HINT.to_owned(),
+                |description| format!("{description} ({FREE_OBJECT_HINT})"),
+            );
+        let mut replacement = format!(
+            "{{\"type\":\"string\",\"description\":{}}}",
+            encode_json_string(&description)
+        )
+        .into_bytes();
+        if node.get("title").and_then(Node::text).is_some()
+            && let Some(title) = node.get("title")
+        {
+            replacement.pop();
+            replacement.extend_from_slice(b",\"title\":");
+            replacement.extend_from_slice(&body[title.start..title.end]);
+            replacement.push(b'}');
+        }
+        edits.push(Edit::new(node.start, node.end, replacement));
+        return;
+    }
+    if let Some(properties) = node.get("properties").and_then(Node::members) {
+        for property in properties {
+            collect_gemini_free_objects(&property.value, false, depth + 1, body, edits);
+        }
+    }
+    if let Some(items) = node.get("items").filter(|items| items.is_object()) {
+        collect_gemini_free_objects(items, false, depth + 1, body, edits);
+    }
+}
+
+fn gemini_free_object(node: &Node, body: &[u8]) -> bool {
+    if node.get("type").and_then(Node::text) != Some("object") {
+        return false;
+    }
+    if node.get("properties").is_some_and(|properties| {
+        properties
+            .members()
+            .is_none_or(|properties| !properties.is_empty())
+    }) {
+        return false;
+    }
+    if node
+        .get("additionalProperties")
+        .is_some_and(|value| &body[value.start..value.end] == b"false")
+    {
+        return false;
+    }
+    ![
+        "patternProperties",
+        "anyOf",
+        "oneOf",
+        "allOf",
+        "$ref",
+        "enum",
+        "const",
+        "not",
+        "if",
+    ]
+    .iter()
+    .any(|key| node.get(key).is_some())
 }
 
 fn gemini_tool_types(context: EncodedContext<'_>, body: &[u8]) -> Vec<u8> {

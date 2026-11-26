@@ -49,6 +49,10 @@ pub async fn timeout<F: Future>(duration: std::time::Duration, future: F) -> Opt
     tokio::time::timeout(duration, future).await.ok()
 }
 
+#[cfg(test)]
+mod d249_free_objects;
+mod free_objects;
+
 pub mod account_off;
 pub mod bedrock;
 pub mod checkin;

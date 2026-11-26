@@ -11,6 +11,7 @@ mod attempt;
 pub mod balance;
 mod billing;
 mod error;
+mod free_objects;
 mod generative;
 mod http;
 mod models;

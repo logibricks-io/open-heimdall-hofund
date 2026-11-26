@@ -227,7 +227,7 @@ pub(crate) async fn try_responses(
             },
         );
     }
-    decode_sse(read.sse, inbound, request.stream)
+    decode_sse(read.sse, inbound, request.stream, request)
         .await
         .map_err(TurnFail::Failed)
 }
@@ -418,9 +418,17 @@ async fn decode_sse(
     bytes: Vec<u8>,
     inbound: ProtocolId,
     stream: bool,
+    request: &Request,
 ) -> Result<Completion, PluginError> {
     let response = HttpResponse::new(BodyStream::from_bytes(bytes));
-    wire::decode_upstream_response(response, ProtocolId::OPENAI_RESPONSES, inbound, stream).await
+    wire::decode_upstream_response_for_request(
+        response,
+        ProtocolId::OPENAI_RESPONSES,
+        inbound,
+        stream,
+        request,
+    )
+    .await
 }
 
 fn responses_url(base: &str) -> Result<String, PluginError> {
@@ -599,3 +607,6 @@ fn hex(bytes: &[u8]) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod d249_tests;
