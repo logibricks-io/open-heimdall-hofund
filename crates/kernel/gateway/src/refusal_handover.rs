@@ -474,7 +474,10 @@ impl State {
 fn continuation_error(error: RouterError) -> PluginError {
     match error {
         RouterError::NoRoute { .. } => PluginError::status_error(404, error.to_string()),
-        RouterError::Ambiguous { .. } | RouterError::PreviousResponseNotFound { .. } => {
+        RouterError::Ambiguous { .. }
+        | RouterError::UnaryCompact { .. }
+        | RouterError::CompactionSealed { .. }
+        | RouterError::PreviousResponseNotFound { .. } => {
             PluginError::status_error(400, error.to_string())
         }
         RouterError::ModelScope { .. } | RouterError::AccountScope { .. } => {

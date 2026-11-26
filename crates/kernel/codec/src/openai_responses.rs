@@ -318,6 +318,7 @@ fn decode_request(bytes: &[u8]) -> Result<Request, CodecError> {
         .and_then(Value::as_str)
         .and_then(Effort::from_label);
     crate::service_tier::rewrite_fast_word(&mut object);
+    crate::jsonutil::drop_reserved(&mut object);
     let mut extensions = Extensions::from_map(object);
     if let Some(raw) = raw_tools
         && needs_raw_tools(&raw)

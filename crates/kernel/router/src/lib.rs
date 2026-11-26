@@ -988,6 +988,23 @@ impl Router {
         let asked = request.model.clone();
         let mut resolved = self.resolve(&asked)?;
         resolved.hops = scoped_hops(&asked, &resolved, scope)?;
+        if let Some(only) = conversation.and_then(|item| item.only_member.as_deref()) {
+            resolved
+                .hops
+                .retain(|hop| hop.member.id().to_string() == only);
+            if resolved.hops.is_empty() {
+                return Err(RouterError::CompactionSealed {
+                    member: only.to_owned(),
+                });
+            }
+        }
+        if conversation.is_some_and(|item| item.compact) {
+            let before = resolved.hops.len();
+            resolved.hops.retain(|hop| compact_carrier(hop, &asked));
+            if resolved.hops.is_empty() && before > 0 {
+                return Err(RouterError::UnaryCompact { model: asked });
+            }
+        }
         let before_skip = resolved.hops.clone();
         resolved.hops = self.without_skipped_hops(&asked, &resolved);
         if resolved.hops.is_empty()
@@ -2563,10 +2580,11 @@ impl DispatchState {
                             .unwrap_or("stand-in");
                         trace.set_moved(&answered.upstream_model, why);
                     }
-                    let protocol = self.resolved.hops[answered.index]
-                        .member
-                        .protocol()
-                        .to_owned();
+                    let hop = &self.resolved.hops[answered.index];
+                    let protocol = hop.member.protocol().to_owned();
+                    let member_id = hop.member.id().to_string();
+                    let compact_trigger =
+                        hop.member.attempt().subscription && hop.member.compacts_by_trigger();
                     if has_continuation {
                         if let Some(trace) = self.trace.as_mut() {
                             trace.sync_open();
@@ -2577,6 +2595,8 @@ impl DispatchState {
                             provider_key_id: answered.provider_key_id,
                             upstream_model: answered.upstream_model,
                             protocol,
+                            member_id: member_id.clone(),
+                            compact_trigger,
                             completion: answered.completion,
                             affinity_reason,
                             service_tier_sent: answered.tier_sent,
@@ -2600,6 +2620,8 @@ impl DispatchState {
                         provider_key_id: answered.provider_key_id,
                         upstream_model: answered.upstream_model,
                         protocol,
+                        member_id,
+                        compact_trigger,
                         service_tier_sent: answered.tier_sent,
                         clear_placeholder_served: answered.clear_placeholder_served,
                         completion: answered.completion,
@@ -3485,6 +3507,10 @@ pub struct Routed {
     /// Codec id the answering member speaks. Usage recording uses it to tell
     /// an input total that already includes cache reads from one that does not.
     pub protocol: String,
+    /// Id of the member that produced the completion.
+    pub member_id: String,
+    /// Whether the answering member compacts by appending a trigger.
+    pub compact_trigger: bool,
     /// Why conversation affinity kept or released the previous answerer.
     pub affinity_reason: Option<String>,
     /// The completion. A stream has produced its first content event, a raw
@@ -3561,6 +3587,22 @@ pub enum RouterError {
         /// `provider/route` names, comma-separated.
         candidates: String,
     },
+    /// No eligible member serves unary compaction for this model.
+    #[error(
+        "/responses/compact is not supported for {model}: it is relayed only to a provider whose own API is Responses (an API key's provider asking the model on Responses) or an account that asks the model on Responses, and none of those serves {model}; compact on /responses instead"
+    )]
+    UnaryCompact {
+        /// The requested model.
+        model: String,
+    },
+    /// A sealed compaction item belongs to a member that is not available.
+    #[error(
+        "the conversation's compaction was sealed by `{member}` and that provider cannot take this request"
+    )]
+    CompactionSealed {
+        /// Member id that sealed the item.
+        member: String,
+    },
     /// An attempt cannot resolve the response id the client named.
     #[error("Previous response with id '{id}' not found.")]
     PreviousResponseNotFound {
@@ -3581,6 +3623,22 @@ pub enum RouterError {
         /// Seconds until the next period reset, when known.
         retry_after: Option<u64>,
     },
+}
+
+fn compact_carrier(hop: &Hop, model: &str) -> bool {
+    let attempt = hop.member.attempt();
+    let responses = hofund_plugin_api::ProtocolId::OPENAI_RESPONSES.as_str();
+    let speaks = hop.member.protocol() == responses
+        || attempt.wire_protocol == responses
+        || hop.member.serves_responses(model);
+    if !speaks {
+        return false;
+    }
+    if attempt.subscription {
+        hop.member.compacts_by_trigger()
+    } else {
+        hop.member.protocol() == responses || attempt.wire_protocol == responses
+    }
 }
 
 fn cooling_labels(

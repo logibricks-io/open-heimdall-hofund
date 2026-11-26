@@ -1368,3 +1368,70 @@ fn retry_keeps_the_model_protocol() {
     assert_eq!(uris(&host)[2], responses);
     assert_eq!(uris(&host)[4], responses);
 }
+
+#[test]
+fn d247_compact_keeps_client_seals_on_responses() {
+    let cases = [
+        (
+            r#"{"model":"gpt-5","input":[{"type":"compaction","encrypted_content":"SEAL-A","id":"cmp_1"},{"type":"compaction_summary","encrypted_content":"SEAL-B"},{"role":"user","content":"next"}]}"#,
+            json!([
+                {"type":"compaction","encrypted_content":"SEAL-A","id":"cmp_1"},
+                {"type":"compaction_summary","encrypted_content":"SEAL-B"},
+                {"role":"user","content":"next"},
+                {"type":"compaction_trigger"}
+            ]),
+        ),
+        (
+            r#"{"model":"gpt-5","input":"remember this"}"#,
+            json!([
+                {"type":"message","role":"user","content":[{"type":"input_text","text":"remember this"}]},
+                {"type":"compaction_trigger"}
+            ]),
+        ),
+        (
+            r#"{"model":"gpt-5","input":[{"type":"compaction","encrypted_content":"SEAL"},{"type":"compaction_trigger"}]}"#,
+            json!([
+                {"type":"compaction","encrypted_content":"SEAL"},
+                {"type":"compaction_trigger"}
+            ]),
+        ),
+    ];
+    for (original, want) in cases {
+        let dir = tempfile::tempdir().expect("dir");
+        let host = host(&dir);
+        let id = seed(&host);
+        host.http().enqueue(session_reply("tid=1", 3600));
+        host.http().enqueue(models_reply());
+        host.http()
+            .enqueue(b"event: response.completed\ndata: {}\n\n".to_vec());
+        let mut request = request_for("gpt-5", ProtocolId::OPENAI_RESPONSES);
+        request
+            .extensions
+            .insert("hofund_responses_compact", json!(true));
+        request
+            .extensions
+            .insert("hofund_responses_compact_body", json!(original));
+        block_on(upstream_for(&host, &id).execute(request, ProtocolId::OPENAI_RESPONSES))
+            .expect("compact");
+        let call = host
+            .http()
+            .calls()
+            .into_iter()
+            .find(|call| call.uri().ends_with("/responses"))
+            .expect("responses call");
+        assert!(!call.uri().contains("/responses/compact"), "{}", call.uri());
+        let body: json::Value = json::from_slice(call.body()).expect("recorded JSON");
+        assert_eq!(body["input"], want, "{original}");
+        assert_eq!(
+            body["input"]
+                .as_array()
+                .expect("input")
+                .iter()
+                .filter(|item| {
+                    item.get("type").and_then(json::Value::as_str) == Some("compaction_trigger")
+                })
+                .count(),
+            1
+        );
+    }
+}

@@ -7,6 +7,7 @@ use hofund_plugin_api::{
     AccountId, Completion, ContentPart, CredentialStyle, HostContext, PluginError, ProbeQuery,
     ProbeReport, ProtocolId, Request, Role, UpstreamProvider,
 };
+use hofund_plugin_sdk::json::{self, Value};
 use hofund_plugin_sdk::oauth::{TokenCache, same_secret, secret_text};
 use hofund_plugin_sdk::wire::{self, Target};
 
@@ -102,10 +103,14 @@ impl CopilotUpstream {
         &self,
         session: &Session,
         protocol: ProtocolId,
-        request: Request,
+        mut request: Request,
         inbound: ProtocolId,
         auto: Option<&AutoSession>,
     ) -> Result<Completion, PluginError> {
+        let original = take_compact(&mut request);
+        if original.is_some() {
+            request.stream = true;
+        }
         let request = image_cap::within(&self.book, &self.account, request);
         let mut headers = session_request_headers(&request, session);
         if let Some(token) = auto.and_then(|picked| picked.token.as_ref()) {
@@ -115,6 +120,7 @@ impl CopilotUpstream {
             ));
         }
         if protocol == ProtocolId::OPENAI_RESPONSES
+            && original.is_none()
             && self.book.responses_socket(&self.account, &request.model)
         {
             match crate::socket::try_responses(
@@ -141,6 +147,14 @@ impl CopilotUpstream {
                 reasoning::hooks(&self.book, &self.host, &self.account, &request.model)
         {
             target = target.rewrite(rewrite).observe(observe);
+        }
+        if let Some(original) = original
+            && protocol == ProtocolId::OPENAI_RESPONSES
+        {
+            target = target.rewrite(std::sync::Arc::new(move |body| {
+                append_trigger(body, Some(&original));
+                Vec::new()
+            }));
         }
         wire::execute(
             self.host.http(),
@@ -233,6 +247,14 @@ struct Prepared {
 
 #[hofund_plugin_sdk::async_trait]
 impl UpstreamProvider for CopilotUpstream {
+    fn compacts_by_trigger(&self) -> bool {
+        true
+    }
+
+    fn serves_responses(&self, model: &str) -> bool {
+        self.book.serves_responses(&self.account, model)
+    }
+
     async fn execute(
         &self,
         request: Request,
@@ -332,6 +354,76 @@ pub(crate) fn initiator(request: &Request) -> &'static str {
                 .any(|part| matches!(part, ContentPart::ToolResult(_)))
     });
     if typed { "user" } else { "agent" }
+}
+
+const COMPACT_FLAG: &str = "hofund_responses_compact";
+const COMPACT_BODY: &str = "hofund_responses_compact_body";
+
+fn take_compact(request: &mut Request) -> Option<String> {
+    let flagged = request
+        .extensions
+        .get(COMPACT_FLAG)
+        .and_then(Value::as_bool)
+        == Some(true);
+    let original = match request.extensions.remove(COMPACT_BODY) {
+        Some(Value::String(text)) => text,
+        _ => String::new(),
+    };
+    request.extensions.remove(COMPACT_FLAG);
+    flagged.then_some(original)
+}
+
+/// Replaces `input` with the client's own items, then one trigger when the
+/// last item is not already that trigger. A string input is one user message.
+/// Without a readable client body, the encoded input is normalized the same way.
+fn append_trigger(body: &mut json::Map<String, Value>, original: Option<&str>) {
+    if let Some(items) = original.and_then(client_items) {
+        body.insert("input".to_owned(), Value::Array(with_trigger(items)));
+        return;
+    }
+    let input = body
+        .entry("input")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    let items = match input {
+        Value::String(text) => vec![user_text(text)],
+        Value::Array(items) => std::mem::take(items),
+        _ => return,
+    };
+    *input = Value::Array(with_trigger(items));
+}
+
+fn client_items(original: &str) -> Option<Vec<Value>> {
+    if original.is_empty() {
+        return None;
+    }
+    let Value::Object(client) = json::from_str::<Value>(original).ok()? else {
+        return None;
+    };
+    Some(match client.get("input") {
+        Some(Value::String(text)) => vec![user_text(text)],
+        Some(Value::Array(items)) => items.clone(),
+        _ => Vec::new(),
+    })
+}
+
+fn user_text(text: &str) -> Value {
+    json::json!({
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": text}],
+    })
+}
+
+fn with_trigger(mut items: Vec<Value>) -> Vec<Value> {
+    let already = items
+        .last()
+        .and_then(|item| item.get("type"))
+        .and_then(Value::as_str)
+        == Some("compaction_trigger");
+    if !already {
+        items.push(json::json!({"type": "compaction_trigger"}));
+    }
+    items
 }
 
 /// Whether any message carries an image, including inside a tool result.

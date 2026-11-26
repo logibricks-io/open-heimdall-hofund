@@ -730,6 +730,7 @@ fn decode_request(bytes: &[u8]) -> Result<Request, CodecError> {
     }
     let stream = take_bool(&mut object, "stream")?.unwrap_or(false);
     crate::service_tier::rewrite_fast_word(&mut object);
+    crate::jsonutil::drop_reserved(&mut object);
     Ok(Request::new(model)
         .with_messages(messages)
         .with_tools(tools)

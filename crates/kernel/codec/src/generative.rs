@@ -147,6 +147,7 @@ fn decode_request(bytes: &[u8]) -> Result<Request, CodecError> {
         Some(config) => decode_generation(config)?,
         None => GenerationParams::default(),
     };
+    crate::jsonutil::drop_reserved(&mut object);
     let mut extensions = Extensions::from_map(object);
     if !decoded_tools.extras.is_empty() {
         extensions.insert("toolExtras", Value::Array(decoded_tools.extras));

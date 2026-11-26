@@ -648,6 +648,50 @@ impl ObserveState {
     }
 }
 
+const COMPACT_FLAG: &str = "hofund_responses_compact";
+const COMPACT_BODY: &str = "hofund_responses_compact_body";
+
+fn compact_flag(request: &Request) -> bool {
+    request
+        .extensions
+        .get(COMPACT_FLAG)
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+}
+
+fn compact_original(request: &Request) -> Option<String> {
+    request
+        .extensions
+        .get(COMPACT_BODY)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
+fn model_field(body: &[u8]) -> Option<String> {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()?
+        .get("model")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// Client JSON with the wire model written in and `stream` removed.
+fn relay_compact_body(original: &str, model: Option<&str>) -> Vec<u8> {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(original) else {
+        return original.as_bytes().to_vec();
+    };
+    if let Some(object) = value.as_object_mut() {
+        if let Some(model) = model.filter(|model| !model.is_empty()) {
+            object.insert(
+                "model".to_owned(),
+                serde_json::Value::String(model.to_owned()),
+            );
+        }
+        object.remove("stream");
+    }
+    serde_json::to_vec(&value).unwrap_or_else(|_| original.as_bytes().to_vec())
+}
+
 /// Encodes and posts `request` as [`execute`] does and stops at the status.
 ///
 /// A caller that retries elsewhere on a refused call can tell a refusal (an
@@ -668,6 +712,8 @@ pub async fn send(
 ) -> Result<Sent, PluginError> {
     let (codec, prepare, path) = route(target.protocol)?;
     let cross_protocol = codec.id() != inbound.as_str();
+    let compact_original = compact_original(&request);
+    let compact = compact_flag(&request);
     let streaming = request.stream;
     let method = if streaming {
         Method::Stream
@@ -702,8 +748,16 @@ pub async fn send(
                 )?,
             }
         };
+        let mut url = url;
+        if compact && url.ends_with("/responses") {
+            url.push_str("/compact");
+        }
         let body = prepare_body(target, codec, request, prepare, inbound)?;
         let (body, added) = rewritten(target.rewrite.as_ref(), body);
+        let body = match compact_original {
+            Some(original) => relay_compact_body(&original, model_field(&body).as_deref()),
+            None => body,
+        };
         let mut call = call(target, codec, secret, url.clone())?;
         for (name, value) in added {
             call = call.replace_header(&name, value, true);
@@ -2088,6 +2142,21 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&out).expect("json");
         assert_eq!(value["a"], 2);
         assert_eq!(value["z"], 1);
+    }
+
+    #[test]
+    fn d247_relay_body_rewrites_the_model_and_drops_stream() {
+        let original = r#"{"model":"fake/m1","stream":true,"input":[{"type":"compaction","encrypted_content":"gAAAAearlier=="}]}"#;
+        let body = super::relay_compact_body(original, Some("m1"));
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(value["model"], "m1");
+        assert!(value.get("stream").is_none());
+        assert_eq!(value["input"][0]["encrypted_content"], "gAAAAearlier==");
+        assert!(
+            !std::str::from_utf8(&body)
+                .expect("utf8")
+                .contains("\"stream\":true")
+        );
     }
 
     fn messages_request(system: &str, user: &str) -> Request {

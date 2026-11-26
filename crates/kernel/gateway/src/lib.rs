@@ -23,6 +23,7 @@ mod readonly;
 mod realtime;
 mod refusal_handover;
 mod relisten;
+mod responses_compact;
 mod responses_ws;
 pub mod session_headers;
 mod stream_timing;
@@ -134,6 +135,8 @@ struct Inner {
     pricer: Option<Arc<hofund_model_catalog::EffectivePricer>>,
     /// Ordered client header names for [`session_of`], including plugin extras.
     session_header_names: Vec<String>,
+    /// Who sealed a compaction item, so a later turn can be pinned to them.
+    owners: responses_compact::Owners,
 }
 
 struct TokenState {
@@ -581,6 +584,7 @@ impl Gateway {
                 model_catalog: None,
                 pricer: None,
                 session_header_names: hofund_codec::kernel_session_header_names(),
+                owners: responses_compact::Owners::new(),
             }),
         }
     }
@@ -1244,7 +1248,9 @@ fn codec_routes(inner: &Inner) -> readonly::RouteSet {
                 &["GET", "POST"],
                 "/responses",
                 post(complete).get(responses_ws::get),
-            );
+            )
+            .route(&["POST"], "/v1/responses/compact", post(complete))
+            .route(&["POST"], "/responses/compact", post(complete));
     }
     if messages {
         routes = routes.route(&["POST"], "/v1/messages/count_tokens", post(complete));
@@ -1426,6 +1432,8 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
                         PluginError::status_error(404, error.to_string()),
                     ),
                     RouterError::Ambiguous { .. }
+                    | RouterError::UnaryCompact { .. }
+                    | RouterError::CompactionSealed { .. }
                     | RouterError::PreviousResponseNotFound { .. } => (
                         String::new(),
                         PluginError::status_error(400, error.to_string()),
@@ -2017,7 +2025,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
         .await;
     }
     let matched = match_generate(&path);
-    let codec_path = if path == "/responses" {
+    let codec_path = if path == "/responses" || responses_compact::is_path(&path) {
         "/v1/responses"
     } else {
         path.as_str()
@@ -2159,6 +2167,20 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
         ));
     }
     model_request.caller = Some(advisor::stamp_caller(&identity));
+    if responses_compact::is_path(&path) {
+        // Compact is a unary route. A client `stream` flag must not make the
+        // gateway answer `text/event-stream` or ask a key provider to stream.
+        model_request.stream = false;
+        model_request
+            .extensions
+            .insert(responses_compact::FLAG, serde_json::Value::Bool(true));
+        if let Ok(text) = std::str::from_utf8(&bytes) {
+            model_request.extensions.insert(
+                responses_compact::BODY,
+                serde_json::Value::String(text.to_owned()),
+            );
+        }
+    }
     let client_headers = client_request_headers(&headers);
     if !client_headers.is_empty() {
         model_request.extensions.insert(
@@ -2233,13 +2255,21 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
         track.stop_waiting(marker, Arc::clone(&app.usage), &model_request, &identity);
     }
     let turn = turn_in(dispatch_request);
-    let conversation = hofund_router::affinity::Conversation::new(
+    let mut conversation = hofund_router::affinity::Conversation::new(
         conversation_key(&dispatch_request.model, &identity_headers, &bytes),
         turn.number,
         turn.within,
     )
     .with_body(bytes.to_vec())
     .with_named_session(!routing_session.is_empty());
+    if responses_compact::is_path(&path) {
+        conversation = conversation.with_compact();
+    }
+    if codec.id() == ProtocolId::OPENAI_RESPONSES.as_str()
+        && let Some(member) = app.owners.member_for(&bytes)
+    {
+        conversation = conversation.with_only_member(member);
+    }
     let router = app.snapshot.load();
     let inner_hook = ask.as_ref().map(|ask| ask.attempt());
     let attempt: Option<Arc<dyn AttemptHook>> =
@@ -2335,6 +2365,52 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     };
     match result {
         Ok(mut routed) => {
+            if responses_compact::is_path(&path) {
+                match responses_compact::finish(
+                    &app.owners,
+                    &bytes,
+                    &routed.member_id,
+                    &routed.upstream_id,
+                    routed.compact_trigger,
+                    routed.completion,
+                )
+                .await
+                {
+                    Ok(completion) => routed.completion = completion,
+                    Err(message) => {
+                        let ledger = RequestLedger {
+                            session_id: ledger_session.clone(),
+                            native_session_id: routing_session.clone(),
+                            endpoint: endpoint.clone(),
+                            kind: kind.clone(),
+                        };
+                        write_usage_app(
+                            app.as_ref(),
+                            &UsageMeta::new(
+                                &model_request,
+                                &routed.upstream_id,
+                                &model_request.model,
+                                started,
+                                &identity,
+                                &client_agent,
+                            )
+                            .with_ledger(&ledger),
+                            None,
+                            StatusCode::BAD_GATEWAY,
+                        );
+                        track.end_with(
+                            Some(routed.upstream_id.clone()),
+                            StatusCode::BAD_GATEWAY.as_u16(),
+                            None,
+                            None,
+                        );
+                        return with_named_session(
+                            coded(codec.as_ref(), StatusCode::BAD_GATEWAY, &message),
+                            &ledger.session_id,
+                        );
+                    }
+                }
+            }
             let continuation = held_continuation(codec.as_ref(), &model_request, &mut routed);
             success(
                 app,
@@ -2552,7 +2628,10 @@ fn held_response(
 fn stream_error(error: &RouterError) -> (StatusCode, String) {
     match error {
         RouterError::NoRoute { .. } => (StatusCode::NOT_FOUND, error.to_string()),
-        RouterError::Ambiguous { .. } | RouterError::PreviousResponseNotFound { .. } => {
+        RouterError::Ambiguous { .. }
+        | RouterError::UnaryCompact { .. }
+        | RouterError::CompactionSealed { .. }
+        | RouterError::PreviousResponseNotFound { .. } => {
             (StatusCode::BAD_REQUEST, error.to_string())
         }
         RouterError::ModelScope { .. } | RouterError::AccountScope { .. } => {
@@ -2656,7 +2735,10 @@ async fn count_tokens(
         Err(error) => {
             let (status, message, retry_after) = match &error {
                 RouterError::NoRoute { .. } => (StatusCode::NOT_FOUND, error.to_string(), None),
-                RouterError::Ambiguous { .. } | RouterError::PreviousResponseNotFound { .. } => {
+                RouterError::Ambiguous { .. }
+                | RouterError::UnaryCompact { .. }
+                | RouterError::CompactionSealed { .. }
+                | RouterError::PreviousResponseNotFound { .. } => {
                     (StatusCode::BAD_REQUEST, error.to_string(), None)
                 }
                 RouterError::ModelScope { .. } | RouterError::AccountScope { .. } => {
@@ -2725,6 +2807,8 @@ fn unrouted_watched(path: &str) -> bool {
             | "/chat/completions"
             | "/v1/responses"
             | "/responses"
+            | "/v1/responses/compact"
+            | "/responses/compact"
             | "/v1/messages"
             | "/messages"
     ) || (path.starts_with("/v1beta/models/")
@@ -2849,6 +2933,8 @@ fn request_header_pairs(headers: &HeaderMap) -> Vec<(&str, &str)> {
 fn usage_kind(path: &str) -> String {
     if path.contains("tools/call") {
         "mcp".to_owned()
+    } else if responses_compact::is_path(path) {
+        "compact".to_owned()
     } else {
         String::new()
     }
@@ -3352,7 +3438,9 @@ fn failure(
             None,
         ),
         RouterError::PreviousResponseNotFound { .. } => unreachable!(),
-        RouterError::Ambiguous { .. } => (
+        RouterError::Ambiguous { .. }
+        | RouterError::UnaryCompact { .. }
+        | RouterError::CompactionSealed { .. } => (
             StatusCode::BAD_REQUEST,
             String::new(),
             error.to_string(),
