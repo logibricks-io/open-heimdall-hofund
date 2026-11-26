@@ -481,6 +481,7 @@ fn continuation_error(error: RouterError) -> PluginError {
             PluginError::status_error(403, error.to_string())
         }
         RouterError::SpendCapReached { retry_after } => crate::spend_cap_plugin_error(retry_after),
+        RouterError::Pinned { status, message } => PluginError::status_error(status, message),
         RouterError::Upstream { error, .. } => error,
     }
 }

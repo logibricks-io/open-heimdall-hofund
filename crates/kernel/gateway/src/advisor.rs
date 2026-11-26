@@ -138,6 +138,9 @@ fn plugin_error(error: &hofund_router::RouterError, identity: &Identity) -> Plug
         hofund_router::RouterError::NoRoute { .. } => {
             PluginError::status_error(404, error.to_string())
         }
+        hofund_router::RouterError::Pinned { status, message } => {
+            PluginError::status_error(*status, message.clone())
+        }
         other => PluginError::status_error(502, other.to_string()),
     }
 }

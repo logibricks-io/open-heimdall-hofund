@@ -84,6 +84,7 @@ pub(crate) struct Table {
     measurements: Mutex<Option<Arc<dyn Measurements>>>,
     model_catalog: Mutex<Option<Arc<hofund_model_catalog::ModelCatalog>>>,
     spend_cap_gate: Mutex<Option<Arc<crate::spend_caps::SpendCapGate>>>,
+    accounts: Mutex<Vec<hofund_router::account_pin::AccountFace>>,
     snapshot: Snapshot,
 }
 
@@ -346,6 +347,7 @@ fn build_table(
         measurements: Mutex::new(None),
         model_catalog: Mutex::new(None),
         spend_cap_gate: Mutex::new(None),
+        accounts: Mutex::new(Vec::new()),
         snapshot,
     });
     let stored = build_specs(&table, built, routes)?;
@@ -632,7 +634,12 @@ impl Table {
                 },
             ));
         }
-        self.snapshot.store(router);
+        let accounts = self.accounts.lock().expect("accounts").clone();
+        self.snapshot.store(router.with_accounts(accounts));
+    }
+
+    pub(crate) fn set_accounts(&self, accounts: Vec<hofund_router::account_pin::AccountFace>) {
+        *self.accounts.lock().expect("accounts") = accounts;
     }
 
     pub(crate) fn set_model_catalog(&self, catalog: Arc<hofund_model_catalog::ModelCatalog>) {

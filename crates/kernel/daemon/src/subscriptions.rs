@@ -23,6 +23,7 @@ use hofund_plugin_api::{
 };
 use hofund_plugin_host::HttpLimits;
 use hofund_router::Cooldowns;
+use hofund_router::account_pin::AccountFace;
 use hofund_router::quota::{QuotaStore, WindowInfo};
 use tokio::time::Instant;
 
@@ -77,6 +78,9 @@ pub(crate) struct SubscriptionState {
     at_once: u64,
     stale_replica_quota: bool,
     members: Mutex<Vec<SubscriptionMember>>,
+    /// Every account that passed the routing-label check, including ones that
+    /// still need sign-in. Ready accounts are on.
+    listed: Mutex<Vec<AccountFace>>,
     ask: Arc<AskSlot>,
 }
 
@@ -185,6 +189,7 @@ pub(crate) fn build(
                 at_once,
                 stale_replica_quota,
                 members: Mutex::new(Vec::new()),
+                listed: Mutex::new(Vec::new()),
                 ask: slot,
             }),
         );
@@ -226,6 +231,11 @@ impl SubscriptionState {
         self.members.lock().expect("subscription members").clone()
     }
 
+    /// Accounts last resolved for the list and pin catalog.
+    pub(crate) fn listed(&self) -> Vec<AccountFace> {
+        self.listed.lock().expect("subscription accounts").clone()
+    }
+
     /// Rereads the accounts and rebuilds the member list. Returns whether
     /// the ordered list of account ids changed.
     pub(crate) async fn resolve(&self, cooldowns: &Arc<Cooldowns>) -> bool {
@@ -245,11 +255,15 @@ impl SubscriptionState {
                 %error,
                 "prepare accounts failed; treating this subscription as having no accounts"
             );
-            let changed = !self.members().is_empty();
-            if changed {
+            let members_changed = !self.members().is_empty();
+            let faces_changed = !self.listed().is_empty();
+            if members_changed {
                 *self.members.lock().expect("subscription members") = Vec::new();
             }
-            return changed;
+            if faces_changed {
+                *self.listed.lock().expect("subscription accounts") = Vec::new();
+            }
+            return members_changed || faces_changed;
         }
         let accounts = match self.host.accounts().list().await {
             Ok(accounts) => accounts,
@@ -260,6 +274,7 @@ impl SubscriptionState {
         };
         let routing_id = self.config.id.as_str();
         let mut ready = Vec::new();
+        let mut faces = Vec::new();
         for account in accounts {
             if let Accounts::One(id) = &self.config.accounts
                 && account.id().as_str() != id
@@ -284,28 +299,53 @@ impl SubscriptionState {
                 }
             }
             crate::sign_in::note_account_hook();
-            match self.instance.account_status(account.id(), &self.host).await {
-                Ok(AccountStatus::Ready) => ready.push(account),
-                Ok(_) => {}
-                Err(error) => tracing::warn!(
-                    subscription = %self.config.id,
-                    account = %account.id(),
-                    %error,
-                    "account status failed; leaving the account out"
-                ),
+            let on = match self.instance.account_status(account.id(), &self.host).await {
+                Ok(AccountStatus::Ready) => true,
+                Ok(_) => false,
+                Err(error) => {
+                    tracing::warn!(
+                        subscription = %self.config.id,
+                        account = %account.id(),
+                        %error,
+                        "account status failed; leaving the account out"
+                    );
+                    continue;
+                }
+            };
+            let member = MemberId::from_parts(self.plugin.clone(), account.id().clone());
+            faces.push(
+                AccountFace::account(
+                    self.config.id.clone(),
+                    account.id().as_str(),
+                    account.label(),
+                    "",
+                    on,
+                )
+                .with_member(member.to_string()),
+            );
+            if on {
+                ready.push(account);
             }
         }
         ready.sort_by(|left, right| {
             (left.label(), left.id().as_str()).cmp(&(right.label(), right.id().as_str()))
         });
+        faces.sort_by(|left, right| left.id.cmp(&right.id));
         let previous = self.members();
-        let unchanged = previous.len() == ready.len()
+        let members_unchanged = previous.len() == ready.len()
             && previous
                 .iter()
                 .zip(&ready)
                 .all(|(member, account)| member.account == *account.id());
-        if unchanged {
+        let faces_unchanged = self.listed() == faces;
+        if members_unchanged && faces_unchanged {
             return false;
+        }
+        if !faces_unchanged {
+            *self.listed.lock().expect("subscription accounts") = faces;
+        }
+        if members_unchanged {
+            return true;
         }
         let mut members = Vec::with_capacity(ready.len());
         for account in &ready {
