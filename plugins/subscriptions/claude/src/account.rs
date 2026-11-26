@@ -111,7 +111,9 @@ pub(crate) async fn read_usage(
     host: &HostContext,
     configured: Option<&PathBuf>,
     account: &AccountId,
+    egress: &crate::egress::Egress,
 ) -> Result<Vec<hofund_plugin_api::QuotaWindow>, PluginError> {
+    crate::egress::guard(egress, host, account).await?;
     let lease = host.accounts().lease(account, LEASE_WAIT).await?;
     let blob = SecretObject::parse(lease.secret())?;
     if crate::setup_token::is_setup_token(&blob) {
@@ -213,7 +215,9 @@ pub(crate) async fn ask(
     configured: Option<&PathBuf>,
     account: &AccountId,
     model: &str,
+    egress: &crate::egress::Egress,
 ) -> Result<(), PluginError> {
+    crate::egress::guard(egress, host, account).await?;
     let lease = host.accounts().lease(account, LEASE_WAIT).await?;
     let _run = crate::run_lock::mark(account, host)?;
     let blob = SecretObject::parse(lease.secret())?;

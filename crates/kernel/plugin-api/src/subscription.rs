@@ -503,4 +503,36 @@ pub trait Subscription: Send + Sync + 'static {
         let _ = (account, host);
         Ok(())
     }
+
+    /// Warning when this subscription's way out cannot serve.
+    ///
+    /// Absent when the subscription does not check, or the last reading was
+    /// supported or unknown. An unknown reading holds nothing.
+    fn way_out_warning(&self) -> Option<String> {
+        None
+    }
+
+    /// Looks up the way out when this subscription's cadence says to.
+    ///
+    /// The daemon calls this on the account tick. A subscription that does not
+    /// check returns success.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the subscription cannot read what it needs.
+    /// A failed lookup is not an error.
+    async fn maintain_way_out(&self, host: &HostContext) -> Result<(), PluginError> {
+        let _ = host;
+        Ok(())
+    }
+
+    /// Looks up the way out now.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] when the subscription cannot read what it needs.
+    async fn recheck_way_out(&self, host: &HostContext) -> Result<(), PluginError> {
+        let _ = host;
+        Ok(())
+    }
 }

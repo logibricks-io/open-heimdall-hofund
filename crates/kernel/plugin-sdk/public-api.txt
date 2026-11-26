@@ -161,6 +161,7 @@ mod wire
 netproxy::ProxyError
 netproxy::env_for_bun_with
 netproxy::env_with
+netproxy::fn interface_addrs () -> Vec < String >
 netproxy::for_bun
 netproxy::is_socks
 netproxy::parse_proxy

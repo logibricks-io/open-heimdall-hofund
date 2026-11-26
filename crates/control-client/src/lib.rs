@@ -527,6 +527,18 @@ impl Client {
         self.get("/v1/hofund/providers").await
     }
 
+    /// Looks up every subscription's way out now.
+    pub async fn recheck_way_out(
+        &self,
+    ) -> Result<hofund_control_proto::WayOutCheckResponse, ClientError> {
+        self.request(
+            http::Method::POST,
+            "/v1/hofund/way-out/check",
+            Some(json_body(&hofund_control_proto::WayOutCheckRequest::new())?),
+        )
+        .await
+    }
+
     /// Lists a provider's upstream API keys without their secrets.
     pub async fn provider_keys(&self, id: &str) -> Result<ProviderKeysResponse, ClientError> {
         self.get(&format!("/v1/hofund/providers/{}/keys", encode_segment(id)))

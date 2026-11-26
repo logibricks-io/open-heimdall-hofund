@@ -460,6 +460,18 @@ impl DaemonControl {
     }
 }
 
+fn way_out_warning_lines(runtime: &crate::runtime::Runtime) -> Vec<String> {
+    let mut lines = Vec::new();
+    for state in runtime.subscription_states().values() {
+        if let Some(text) = state.instance().way_out_warning()
+            && !lines.contains(&text)
+        {
+            lines.push(text);
+        }
+    }
+    lines
+}
+
 impl ControlState for DaemonControl {
     fn health(&self) -> HealthResponse {
         let mut health = HealthResponse::default();
@@ -608,6 +620,7 @@ impl ControlState for DaemonControl {
         let models = Arc::clone(&self.models);
         let registry = Arc::clone(&self.registry);
         let cooldowns = Arc::clone(&self.cooldowns);
+        let runtime = self.runtime.clone();
         Box::pin(async move {
             let mut response = ProviderListResponse::default();
             response.providers = config
@@ -619,7 +632,35 @@ impl ControlState for DaemonControl {
                     )
                 })
                 .collect();
+            if let Some(runtime) = runtime {
+                response.way_out_warnings = way_out_warning_lines(&runtime);
+            }
             let _ = rests;
+            Ok(response)
+        })
+    }
+
+    fn recheck_way_out(&self) -> ControlFuture<'_, hofund_control_proto::WayOutCheckResponse> {
+        let runtime = self.runtime.clone();
+        Box::pin(async move {
+            let Some(runtime) = runtime else {
+                return Ok(hofund_control_proto::WayOutCheckResponse::default());
+            };
+            for state in runtime.subscription_states().values() {
+                state
+                    .instance()
+                    .recheck_way_out(state.host())
+                    .await
+                    .map_err(|_| {
+                        ControlFailure::from(ControlError::new(
+                            ControlErrorKind::Internal,
+                            "the way out could not be checked",
+                            "control",
+                        ))
+                    })?;
+            }
+            let mut response = hofund_control_proto::WayOutCheckResponse::default();
+            response.warnings = way_out_warning_lines(&runtime);
             Ok(response)
         })
     }

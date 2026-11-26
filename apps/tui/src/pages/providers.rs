@@ -29,6 +29,7 @@ pub struct ProviderPage {
     disk_revision: String,
     mode: Mode,
     balances: Vec<String>,
+    way_out: Vec<String>,
     confirm: bool,
     read_token: u64,
     models_token: Option<u64>,
@@ -124,7 +125,7 @@ impl ProviderPage {
         match &self.mode {
             Mode::List => (
                 "j/k row   enter models   a add   e key   t test   m refresh   b balances",
-                "o on/off   u listed   w address   f family   dd delete   r reload",
+                "o on/off   u listed   w address   f family   dd delete   r reload   g check",
             ),
             Mode::Models(_) => (
                 "j/k model   enter toggle   x reset   ctrl+r refresh   esc back",
@@ -193,10 +194,16 @@ impl ProviderPage {
             self.disk_revision = disk_revision;
         }
         self.loaded = true;
+        // Warnings are applied by [`Self::set_way_out`] so a list reload can clear them.
         self.cursor = selected
             .and_then(|id| self.rows.iter().position(|row| row.id == id))
             .unwrap_or(0)
             .min(self.rows.len().saturating_sub(1));
+    }
+
+    /// Shows way-out warnings above the provider list. Empty clears them.
+    pub fn set_way_out(&mut self, warnings: Vec<String>) {
+        self.way_out = warnings;
     }
 
     /// Opens or refreshes the model picker.
@@ -387,6 +394,9 @@ impl ProviderPage {
             KeyCode::Char('t') => self.with_selected(|id| {
                 PageEffect::mutation("testing provider", ControlIntent::TestProvider { id })
             }),
+            KeyCode::Char('g') => {
+                PageEffect::mutation("checking the way out", ControlIntent::RecheckWayOut)
+            }
             KeyCode::Char('b') => PageEffect::read(ControlIntent::LoadBalances),
             KeyCode::Char('a') => {
                 self.mode = Mode::Presets {
@@ -929,6 +939,12 @@ impl ProviderPage {
 
     fn list_lines(&self, height: u16, theme: &Theme) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
+        for warning in &self.way_out {
+            lines.push(Line::from(Span::styled(
+                format!("  {warning}"),
+                theme.text_style(),
+            )));
+        }
         if !self.balances.is_empty() {
             lines.push(Line::from(Span::styled(
                 format!("  balances: {}", self.balances.join("  ")),
@@ -1188,6 +1204,17 @@ mod tests {
             revision(),
         );
         page
+    }
+
+    #[test]
+    fn d245_check_again_queues_a_way_out_check() {
+        let mut page = loaded();
+        page.set_way_out(vec!["outside".to_owned()]);
+        let effect = page.on_key(character('g'));
+        assert!(matches!(
+            effect.intents.as_slice(),
+            [ControlIntent::RecheckWayOut]
+        ));
     }
 
     #[test]

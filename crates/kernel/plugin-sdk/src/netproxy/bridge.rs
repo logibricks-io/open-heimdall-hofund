@@ -253,19 +253,25 @@ fn socks_handshake(stream: &mut TcpStream, socks: &Url, target: &str) -> io::Res
 }
 
 fn parse_host_port(target: &str) -> io::Result<(String, u16)> {
+    // An HTTP proxy request uses absolute form (`http://host:port/path`).
+    // That string contains a colon in the scheme, so it must be parsed as a
+    // URL before the `host:port` split used for a CONNECT target.
+    if target.starts_with("http://") || target.starts_with("https://") {
+        let url = Url::parse(target).map_err(|error| io::Error::other(error.to_string()))?;
+        let host = url.host_str().unwrap_or("").to_owned();
+        if host.is_empty() {
+            return Err(io::Error::other("bad proxy target"));
+        }
+        let port = url
+            .port_or_known_default()
+            .unwrap_or(if url.scheme() == "https" { 443 } else { 80 });
+        return Ok((host, port));
+    }
     if let Some((host, port)) = target.split_once(':') {
         let port = port
             .parse::<u16>()
             .map_err(|error| io::Error::other(error.to_string()))?;
         return Ok((host.to_owned(), port));
-    }
-    if target.starts_with("http://") || target.starts_with("https://") {
-        let url = Url::parse(target).map_err(|error| io::Error::other(error.to_string()))?;
-        let host = url.host_str().unwrap_or("").to_owned();
-        let port = url
-            .port_or_known_default()
-            .unwrap_or(if url.scheme() == "https" { 443 } else { 80 });
-        return Ok((host, port));
     }
     Err(io::Error::other("bad proxy target"))
 }
@@ -280,4 +286,19 @@ pub(crate) fn redact(url: &Url) -> String {
     let _ = out.set_username("");
     let _ = out.set_password(None);
     out.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_host_port;
+
+    #[test]
+    fn d245_absolute_form_target_keeps_the_host() {
+        let (host, port) = parse_host_port("http://127.0.0.1:9/cdn-cgi/trace").expect("absolute");
+        assert_eq!(host, "127.0.0.1");
+        assert_eq!(port, 9);
+        let (host, port) = parse_host_port("example.test:443").expect("connect");
+        assert_eq!(host, "example.test");
+        assert_eq!(port, 443);
+    }
 }

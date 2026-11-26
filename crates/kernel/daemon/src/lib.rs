@@ -114,9 +114,10 @@ pub use provider_rename::{ProviderRenameFailAfter, set_rename_fail_after};
 pub use registry::{CompiledPreset, DaemonRegistry, RegistryAdapter};
 pub use sign_in::{
     AccountListing, INTERRUPTED_EXIT, QuotaLine, QuotaListing, SIGN_IN_DEADLINE, SignInError,
-    SignInOptions, SubscriptionListing, configured_subscription_risks, quota_json,
+    SignInOptions, SubscriptionListing, configured_subscription_risks, quota_json, recheck_way_out,
     subscription_account_hooks, subscription_list, subscription_quota, subscription_refresh,
     subscription_risk_lines, subscription_sign_in, subscription_sign_out, subscriptions_json,
+    way_out_warnings,
 };
 #[doc(hidden)]
 pub use subscriptions::subscription_plugin_builds;

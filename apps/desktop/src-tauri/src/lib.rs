@@ -193,6 +193,9 @@ async fn dispatch(app: &tauri::AppHandle, id: &str) {
         "gateway-stop" => {
             let _ = control.stop().await;
         }
+        "way-out-check" => {
+            let _ = control.recheck_way_out().await;
+        }
         "usage" => {
             focus_usage_window(app);
         }
@@ -226,6 +229,12 @@ fn publish(app: &tauri::AppHandle, snapshot: &Snapshot) -> Result<(), String> {
         let menu = build_menu(app, snapshot).map_err(|error| error.to_string())?;
         tray.set_menu(Some(menu))
             .map_err(|error| error.to_string())?;
+        let tip = if snapshot.warnings.is_empty() {
+            None
+        } else {
+            Some(snapshot.warnings.join("\n"))
+        };
+        let _ = tray.set_tooltip(tip);
     }
     app.emit("snapshot", snapshot)
         .map_err(|error| error.to_string())

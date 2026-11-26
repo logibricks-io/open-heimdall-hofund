@@ -5,7 +5,12 @@ function render(snapshot) {
   status.textContent = snapshot.running
     ? `Gateway running at ${snapshot.listen}`
     : `Gateway stopped. Configured listen ${snapshot.listen}`;
-  const lines = [snapshot.route, snapshot.today, ...snapshot.quotas].filter(Boolean);
+  const lines = [
+    ...(snapshot.warnings || []),
+    snapshot.route,
+    snapshot.today,
+    ...snapshot.quotas,
+  ].filter(Boolean);
   const trayStatus = document.querySelector("#tray-status");
   trayStatus.textContent = lines.join("\n");
   trayStatus.hidden = lines.length === 0;

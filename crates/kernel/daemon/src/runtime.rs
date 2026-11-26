@@ -1007,6 +1007,17 @@ impl Runtime {
         upstreams
     }
 
+    /// Looks up each subscription's way out when its own cadence says to.
+    ///
+    /// A lookup failure is not logged: the message can carry a proxy address.
+    async fn maintain_way_out(&self) {
+        for state in self.subscription_states().values() {
+            if let Err(error) = state.instance().maintain_way_out(state.host()).await {
+                let _ = error;
+            }
+        }
+    }
+
     /// Returns sampled history from the shared store.
     pub(crate) fn quota_histories(
         &self,
@@ -1032,6 +1043,7 @@ impl Runtime {
                     () = runtime.wake.notified() => {}
                 }
                 runtime.refresh_subscriptions().await;
+                runtime.maintain_way_out().await;
                 runtime.poll_quotas(tokio::time::Instant::now()).await;
                 runtime.poll_models(tokio::time::Instant::now()).await;
                 if last_login.elapsed() >= crate::agent_login::LOGIN_SWITCH_EVERY {

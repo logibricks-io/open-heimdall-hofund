@@ -54,6 +54,8 @@ pub(crate) struct Snapshot {
     pub quotas: Vec<String>,
     /// Risk lines for subscriptions whose new enrollment is withdrawn.
     pub risks: Vec<String>,
+    /// Way-out warnings. Empty when the last reading was fine or unknown.
+    pub warnings: Vec<String>,
     /// The latest action error, or empty.
     pub message: String,
     /// Every catalog adapter, in catalog order.
@@ -80,20 +82,35 @@ pub(crate) fn menu_entries(snapshot: &Snapshot) -> Vec<MenuEntry> {
     } else {
         "stopped"
     };
-    let mut entries = vec![
-        MenuEntry {
-            id: "status".to_owned(),
-            label: format!("Gateway: {state}"),
+    let mut entries = Vec::new();
+    for (index, warning) in snapshot.warnings.iter().enumerate() {
+        entries.push(MenuEntry {
+            id: format!("way-out:{index}"),
+            label: warning.clone(),
             enabled: false,
             checked: None,
-        },
-        MenuEntry {
-            id: "listen".to_owned(),
-            label: format!("Listen: {}", snapshot.listen),
-            enabled: false,
+        });
+    }
+    if snapshot.running && !snapshot.warnings.is_empty() {
+        entries.push(MenuEntry {
+            id: "way-out-check".to_owned(),
+            label: "Check again".to_owned(),
+            enabled: true,
             checked: None,
-        },
-    ];
+        });
+    }
+    entries.push(MenuEntry {
+        id: "status".to_owned(),
+        label: format!("Gateway: {state}"),
+        enabled: false,
+        checked: None,
+    });
+    entries.push(MenuEntry {
+        id: "listen".to_owned(),
+        label: format!("Listen: {}", snapshot.listen),
+        enabled: false,
+        checked: None,
+    });
     for (id, label) in [("route", &snapshot.route), ("today", &snapshot.today)] {
         if !label.is_empty() {
             entries.push(MenuEntry {
@@ -297,6 +314,16 @@ impl Control {
         Ok(())
     }
 
+    /// Looks up the way out again while the gateway is running.
+    pub(crate) async fn recheck_way_out(&mut self) -> Result<(), String> {
+        let pending = self.server.as_ref().map(hofund_daemon::recheck_way_out);
+        let result = match pending {
+            Some(pending) => pending.await.map_err(|error| error.to_string()),
+            None => Err("the gateway is stopped".to_owned()),
+        };
+        self.store(result)
+    }
+
     /// Refreshes the retained route, daily usage, and quota text.
     pub(crate) async fn refresh_tray(&mut self) {
         // Build the future before awaiting so no `&Running` (not `Sync`)
@@ -421,6 +448,11 @@ impl Control {
             } else {
                 self.stopped_risks.clone()
             },
+            warnings: self
+                .server
+                .as_ref()
+                .map(hofund_daemon::way_out_warnings)
+                .unwrap_or_default(),
             message: self.message.clone(),
             agents,
         }
@@ -555,6 +587,7 @@ mod tests {
             today: "Today: 1 request, 12.3k tokens".to_owned(),
             quotas: vec!["Work: 42% · 18%".to_owned(), "Plan: 12 credits".to_owned()],
             risks: Vec::new(),
+            warnings: Vec::new(),
             message: String::new(),
             agents: Vec::new(),
         };
@@ -611,6 +644,37 @@ mod tests {
     }
 
     #[test]
+    fn d245_way_out_warning_precedes_status_and_check_again_needs_a_running_gateway() {
+        let base = Snapshot {
+            running: true,
+            listen: "127.0.0.1:3425".to_owned(),
+            route: String::new(),
+            today: String::new(),
+            quotas: Vec::new(),
+            risks: Vec::new(),
+            warnings: vec!["outside".to_owned()],
+            message: String::new(),
+            agents: Vec::new(),
+        };
+        let running = menu_entries(&base);
+        assert_eq!(running[0].id, "way-out:0");
+        assert_eq!(running[0].label, "outside");
+        assert!(!running[0].enabled);
+        assert_eq!(running[1].id, "way-out-check");
+        assert_eq!(running[1].label, "Check again");
+        assert!(running[1].enabled);
+        assert_eq!(running[2].id, "status");
+
+        let stopped = Snapshot {
+            running: false,
+            ..base
+        };
+        let entries = menu_entries(&stopped);
+        assert_eq!(entries[0].id, "way-out:0");
+        assert!(entries.iter().all(|entry| entry.id != "way-out-check"));
+    }
+
+    #[test]
     fn d221_the_menu_shows_a_saved_account_risk_line() {
         let snapshot = Snapshot {
             running: false,
@@ -619,6 +683,7 @@ mod tests {
             today: String::new(),
             quotas: Vec::new(),
             risks: vec!["saved-account risk line".to_owned()],
+            warnings: Vec::new(),
             message: String::new(),
             agents: Vec::new(),
         };

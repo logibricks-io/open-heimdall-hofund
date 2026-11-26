@@ -42,6 +42,7 @@ fn load_providers(app: &mut App, ids: &[&str]) {
             providers: ids.iter().copied().map(provider).collect(),
             presets: Vec::new(),
             disk_revision: revision(0x11),
+            warnings: Vec::new(),
             presets_error: None,
         }),
     });
@@ -198,6 +199,7 @@ fn key_read_after_address_keeps_the_address_prompt() {
             providers: vec![local],
             presets: Vec::new(),
             disk_revision: revision(0x11),
+            warnings: Vec::new(),
             presets_error: None,
         }),
     });

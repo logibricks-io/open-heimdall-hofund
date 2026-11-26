@@ -126,6 +126,13 @@ pub use session::{
 pub use subscription::{
     AccountEnrollment, DynSubscriptionFactory, Subscription, SubscriptionFactory,
 };
+
+/// Header a plugin sets so the host picks the outbound proxy for that one call.
+///
+/// The value `direct` connects with no proxy. Any other value is a proxy URL.
+/// An absent header keeps the handle's profile, including an environment proxy.
+/// The host removes this header before the request is sent.
+pub const OUTBOUND_PROXY: &str = "x-hofund-outbound-proxy";
 pub use upstream::{
     BuildContext, CredentialStyle, DynUpstreamFactory, HeaderName, ListKind, UpstreamFactory,
     UpstreamProvider, UpstreamSpec,

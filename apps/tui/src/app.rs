@@ -725,6 +725,7 @@ impl App {
                     snapshot.presets,
                     snapshot.disk_revision,
                 );
+                app.providers.set_way_out(snapshot.warnings);
             }
             Err(message) => app.set_flash_ttl(message, false),
         });
@@ -1344,6 +1345,7 @@ mod tests {
                 providers: vec![row, other],
                 presets: vec![preset],
                 disk_revision: "ab".repeat(32),
+                warnings: Vec::new(),
                 presets_error: None,
             }),
         });
@@ -1530,6 +1532,7 @@ mod tests {
                 providers: vec![provider("first"), provider("second")],
                 presets: Vec::new(),
                 disk_revision: nibble.repeat(32),
+                warnings: Vec::new(),
                 presets_error: None,
             }),
         });

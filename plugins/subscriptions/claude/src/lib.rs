@@ -29,6 +29,7 @@ mod catalog_cache;
 mod cli;
 mod creds;
 mod discover;
+mod egress;
 mod import;
 mod keychain;
 mod launcher;
@@ -36,6 +37,7 @@ mod limits;
 mod lock;
 mod models;
 mod proxy;
+mod regions;
 mod run_lock;
 mod said_out;
 mod setup_token;
@@ -98,6 +100,8 @@ pub struct ClaudeConfig {
     command: Option<PathBuf>,
     /// Cap on concurrent Claude Code processes; `None` uses the memory heuristic.
     runs_most: Option<usize>,
+    /// When true, an unsupported way out holds a Claude request. Off by default.
+    region_hold: bool,
 }
 
 impl ValidConfig for ClaudeConfig {}
@@ -114,6 +118,7 @@ impl SubscriptionFactory for ClaudeFactory {
             vec![
                 ("command".to_owned(), Schema::string()),
                 ("claude-runs-most".to_owned(), Schema::integer()),
+                ("region-hold".to_owned(), Schema::boolean()),
             ],
             &[],
         )
@@ -125,6 +130,7 @@ impl SubscriptionFactory for ClaudeFactory {
         for key in raw.keys() {
             if key != "command"
                 && key != "claude-runs-most"
+                && key != "region-hold"
                 && key != hofund_plugin_sdk::daily_warmup::TIMES_KEY
             {
                 return Err(ConfigError::new("unknown key").with_path(key));
@@ -160,7 +166,20 @@ impl SubscriptionFactory for ClaudeFactory {
                     .with_path("claude-runs-most"));
             }
         };
-        Ok(ClaudeConfig { command, runs_most })
+        let region_hold = match raw.get("region-hold") {
+            None => false,
+            Some(RawValue::Boolean(value)) => *value,
+            Some(_) => {
+                return Err(
+                    ConfigError::new("region-hold must be a boolean").with_path("region-hold")
+                );
+            }
+        };
+        Ok(ClaudeConfig {
+            command,
+            runs_most,
+            region_hold,
+        })
     }
 
     fn build(
@@ -175,6 +194,7 @@ impl SubscriptionFactory for ClaudeFactory {
             pending: Mutex::new(HashMap::new()),
             bridge: bridge::Bridge::with_room(bridge::room::Room::from_config(cfg.runs_most)),
             limits: limits::Store::new(),
+            egress: Arc::new(egress::Egress::new(cfg.region_hold)),
         }))
     }
 }
@@ -211,6 +231,8 @@ struct Claude {
     bridge: bridge::Bridge,
     /// Header-derived allowance kept per account.
     limits: limits::Store,
+    /// Way-out readings and the opt-in hold, shared with each upstream.
+    egress: Arc<egress::Egress>,
 }
 
 impl Claude {
@@ -537,7 +559,7 @@ impl Claude {
         let disk = reading_path.as_deref().and_then(limits::load_reading);
         let (prev, prev_at) = self.limits.snapshot_prior(account, disk);
         self.limits.mark_usage_tried(account, now);
-        match account::read_usage(host, self.command.as_ref(), account).await {
+        match account::read_usage(host, self.command.as_ref(), account, &self.egress).await {
             Ok(windows) => {
                 said_out::clear_good_read(host, account, &windows, now);
                 let stored = self
@@ -752,13 +774,16 @@ impl Subscription for Claude {
         account: &AccountId,
         host: &HostContext,
     ) -> Result<Arc<dyn UpstreamProvider>, PluginError> {
-        Ok(std::sync::Arc::new(upstream::ClaudeUpstream::new(
-            account.clone(),
-            host.clone(),
-            self.command.clone(),
-            self.bridge.clone(),
-            self.limits.clone(),
-        )))
+        Ok(std::sync::Arc::new(
+            upstream::ClaudeUpstream::new(
+                account.clone(),
+                host.clone(),
+                self.command.clone(),
+                self.bridge.clone(),
+                self.limits.clone(),
+            )
+            .with_egress(Arc::clone(&self.egress)),
+        ))
     }
 
     async fn write_agent_sign_in(
@@ -794,7 +819,19 @@ impl Subscription for Claude {
         host: &HostContext,
         model: &str,
     ) -> Result<(), PluginError> {
-        account::ask(host, self.command.as_ref(), account, model).await
+        account::ask(host, self.command.as_ref(), account, model, &self.egress).await
+    }
+
+    fn way_out_warning(&self) -> Option<String> {
+        self.egress.warning()
+    }
+
+    async fn maintain_way_out(&self, host: &HostContext) -> Result<(), PluginError> {
+        self.egress.maintain(host).await
+    }
+
+    async fn recheck_way_out(&self, host: &HostContext) -> Result<(), PluginError> {
+        self.egress.recheck(host).await
     }
 
     async fn discover_agent_sign_in(

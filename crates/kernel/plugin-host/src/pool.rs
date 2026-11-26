@@ -33,6 +33,8 @@ const DEFAULT_READ: Duration = Duration::from_secs(60);
 pub struct HttpProfile {
     proxy: Option<String>,
     insecure: bool,
+    /// When true, the client ignores `HTTP_PROXY` and related environment variables.
+    no_env_proxy: bool,
 }
 
 impl HttpProfile {
@@ -42,13 +44,23 @@ impl HttpProfile {
         Self {
             proxy: None,
             insecure: false,
+            no_env_proxy: false,
         }
+    }
+
+    /// Connects with no proxy, including no environment proxy.
+    #[must_use]
+    pub fn without_env_proxy(mut self) -> Self {
+        self.proxy = None;
+        self.no_env_proxy = true;
+        self
     }
 
     /// Sends through `proxy`. `reqwest` parses the URL when the client is built.
     #[must_use]
     pub fn with_proxy(mut self, proxy: impl Into<String>) -> Self {
         self.proxy = Some(proxy.into());
+        self.no_env_proxy = false;
         self
     }
 
@@ -403,6 +415,12 @@ fn build_client(key: &ClientKey) -> Result<reqwest::Client, PluginError> {
             }
         },
     }
+    if key.profile.no_env_proxy || key.profile.proxy.is_some() {
+        // An explicit proxy is the way out for every host. The process
+        // NO_PROXY list must not skip it, or a loopback trace target and a
+        // host named in that list would leave by another path.
+        builder = builder.no_proxy();
+    }
     if let Some(proxy) = &key.profile.proxy {
         let proxy = reqwest::Proxy::all(proxy)
             .map_err(|error| PluginError::config(format!("http proxy is invalid: {error}")))?;
@@ -531,15 +549,40 @@ fn take_sends() -> usize {
     })
 }
 
+fn profile_for_request(
+    base: &HttpProfile,
+    request: &mut HttpRequest<Body>,
+) -> Result<HttpProfile, PluginError> {
+    let Some(value) = request
+        .headers_mut()
+        .remove(hofund_plugin_api::OUTBOUND_PROXY)
+    else {
+        return Ok(base.clone());
+    };
+    // `to_str` refuses a sensitive value. The proxy URL is sensitive when it
+    // can carry a password, and the bytes are still the address to dial.
+    let text = std::str::from_utf8(value.as_bytes())
+        .map_err(|_| PluginError::internal("outbound proxy header is not text"))?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(base.clone());
+    }
+    if trimmed.eq_ignore_ascii_case("direct") {
+        return Ok(base.clone().without_env_proxy());
+    }
+    Ok(base.clone().with_proxy(trimmed))
+}
+
 #[async_trait]
 impl HttpBackend for PooledHttp {
     async fn send(
         &self,
-        request: HttpRequest<Body>,
+        mut request: HttpRequest<Body>,
     ) -> Result<HttpResponse<BodyStream>, PluginError> {
         #[cfg(test)]
         note_send();
-        let client = client_for_unary(&self.profile, self.limits, &request)?;
+        let profile = profile_for_request(&self.profile, &mut request)?;
+        let client = client_for_unary(&profile, self.limits, &request)?;
         let method = reqwest::Method::from_bytes(request.method().as_str().as_bytes())
             .map_err(|error| PluginError::internal(error.to_string()))?;
         let url = request.uri().to_string();
@@ -713,6 +756,84 @@ mod tests {
             .body(Body::empty())
             .expect("request");
         PooledHttp::direct().send(request).await.expect("send")
+    }
+
+    #[tokio::test]
+    async fn d245_outbound_proxy_header_is_stripped() {
+        let _guard = exclusive().await;
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let hits_thread = std::sync::Arc::clone(&hits);
+        let seen_thread = std::sync::Arc::clone(&seen);
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("timeout");
+            let mut buf = [0_u8; 2048];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            *seen_thread.lock().expect("seen") = String::from_utf8_lossy(&buf[..n]).into_owned();
+            hits_thread.fetch_add(1, Ordering::SeqCst);
+            let body = b"ok";
+            let header = format!(
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(header.as_bytes()).expect("write");
+            stream.write_all(body).expect("write");
+        });
+        let mut request = HttpRequest::builder()
+            .method("GET")
+            .uri(format!("http://127.0.0.1:{port}/cdn-cgi/trace"))
+            .body(Body::empty())
+            .expect("request");
+        request.headers_mut().insert(
+            hofund_plugin_api::OUTBOUND_PROXY,
+            http::HeaderValue::from_static("direct"),
+        );
+        let response = PooledHttp::direct().send(request).await.expect("direct");
+        assert_eq!(response.status().as_u16(), 200);
+        let captured = seen.lock().expect("seen").clone();
+        assert!(
+            !captured
+                .to_ascii_lowercase()
+                .contains("x-hofund-outbound-proxy"),
+            "{captured}"
+        );
+        let mut missed = HttpRequest::builder()
+            .method("GET")
+            .uri(format!("http://127.0.0.1:{port}/again"))
+            .body(Body::empty())
+            .expect("request");
+        missed.headers_mut().insert(
+            hofund_plugin_api::OUTBOUND_PROXY,
+            http::HeaderValue::from_static("http://127.0.0.1:1"),
+        );
+        assert!(PooledHttp::direct().send(missed).await.is_err());
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn d245_sensitive_proxy_header_is_dialed_not_ignored() {
+        let _guard = exclusive().await;
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let port = listener.local_addr().expect("addr").port();
+        let mut request = HttpRequest::builder()
+            .method("GET")
+            .uri(format!("http://127.0.0.1:{port}/cdn-cgi/trace"))
+            .body(Body::empty())
+            .expect("request");
+        let mut proxy = http::HeaderValue::from_static("http://127.0.0.1:1");
+        proxy.set_sensitive(true);
+        request
+            .headers_mut()
+            .insert(hofund_plugin_api::OUTBOUND_PROXY, proxy);
+        assert!(PooledHttp::direct().send(request).await.is_err());
+        let missed = listener.accept().expect_err("origin must not be dialed");
+        assert_eq!(missed.kind(), std::io::ErrorKind::WouldBlock);
     }
 
     #[tokio::test]

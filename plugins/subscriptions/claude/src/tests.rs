@@ -2261,6 +2261,7 @@ fn claude_for(host: &TestHost) -> crate::Claude {
         pending: std::sync::Mutex::new(std::collections::HashMap::new()),
         bridge: crate::bridge::Bridge::new(),
         limits: crate::limits::Store::new(),
+        egress: std::sync::Arc::new(crate::egress::Egress::new(false)),
     }
 }
 

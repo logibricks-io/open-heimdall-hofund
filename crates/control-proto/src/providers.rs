@@ -101,6 +101,9 @@ pub struct ProviderListResponse {
     pub version: u32,
     /// Configured providers.
     pub providers: Vec<ProviderSummary>,
+    /// Warnings about a subscription's way out. Empty when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub way_out_warnings: Vec<String>,
 }
 
 impl Default for ProviderListResponse {
@@ -108,6 +111,7 @@ impl Default for ProviderListResponse {
         Self {
             version: API_VERSION,
             providers: Vec::new(),
+            way_out_warnings: Vec::new(),
         }
     }
 }
@@ -649,6 +653,51 @@ fn validate_provider_id(field: &str, id: &str) -> Result<(), ControlError> {
         ));
     }
     Ok(())
+}
+
+/// Asks the daemon to look up every subscription's way out now.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(deny_unknown_fields)]
+pub struct WayOutCheckRequest {
+    /// Body wire version.
+    pub version: u32,
+}
+
+impl WayOutCheckRequest {
+    /// Constructs a version-current check request.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            version: API_VERSION,
+        }
+    }
+}
+
+impl Default for WayOutCheckRequest {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Warnings after a way-out check.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct WayOutCheckResponse {
+    /// Body wire version.
+    pub version: u32,
+    /// Warnings about a subscription's way out. Empty when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+impl Default for WayOutCheckResponse {
+    fn default() -> Self {
+        Self {
+            version: API_VERSION,
+            warnings: Vec::new(),
+        }
+    }
 }
 
 fn provider_field_error(field: &str, reason: &str, message: &str) -> ControlError {
