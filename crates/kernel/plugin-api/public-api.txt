@@ -1315,6 +1315,7 @@ Subscription::fn account_enrollment (& self) -> AccountEnrollment
 Subscription::fn flow (& self) -> & SignInFlow
 Subscription::fn id (& self) -> & PluginId
 Subscription::fn upstream (& self , account : & AccountId , host : & HostContext ,) -> Result < Arc < dyn UpstreamProvider > , PluginError >
+Subscription::fn way_out_place (& self) -> Option < String >
 Subscription::fn way_out_warning (& self) -> Option < String >
 SubscriptionFactory
 SubscriptionFactory::Config
