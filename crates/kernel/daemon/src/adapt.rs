@@ -147,6 +147,9 @@ pub(crate) fn provider_error(error: PluginError) -> ProviderError {
     if error.credit_soon() {
         converted = converted.with_credit_soon();
     }
+    if error.skips_failover_same_plugin() {
+        converted = converted.skip_failover_same_plugin();
+    }
     if error.is_account_restricted() {
         converted = converted.account_restricted();
     }

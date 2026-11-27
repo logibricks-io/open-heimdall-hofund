@@ -699,6 +699,7 @@ fn plugin_error(error: ProviderError) -> PluginError {
     let retry_after = error.retry_after;
     let credit = error.is_credit();
     let cooldown = error.cools();
+    let skip_failover_same_plugin = error.skips_failover_same_plugin();
     let account_restricted = error.is_account_restricted();
     let ordinary_failure = error.is_ordinary_failure();
     let subscription_suspended = error.is_subscription_suspended();
@@ -732,6 +733,9 @@ fn plugin_error(error: ProviderError) -> PluginError {
     }
     if let Some(after) = retry_after {
         converted = converted.with_retry_after(after);
+    }
+    if skip_failover_same_plugin {
+        converted = converted.skip_failover_same_plugin();
     }
     if account_restricted {
         converted = converted.account_restricted();
@@ -788,6 +792,16 @@ mod tests {
         let plugin = super::plugin_error(credit);
         assert!(!plugin.is_account_restricted());
         assert!(plugin.is_credit());
+    }
+
+    #[test]
+    fn d273_plugin_error_keeps_sibling_skip() {
+        let marked = hofund_provider::ProviderError::status(405, "account restricted")
+            .account_restricted()
+            .skip_failover_same_plugin();
+        let plugin = super::plugin_error(marked);
+        assert!(plugin.is_account_restricted());
+        assert!(plugin.skips_failover_same_plugin());
     }
 
     fn raw(id: &str) -> RawTable {
