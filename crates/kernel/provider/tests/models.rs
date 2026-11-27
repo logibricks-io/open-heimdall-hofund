@@ -160,6 +160,36 @@ async fn d271_explicit_null_monthly_usage_marks_only_free_models() {
     assert!(legacy.costs_nothing());
 }
 
+#[test]
+fn d271_zero_price_refusal_scope_requires_the_gate() {
+    let paid = hofund_plugin_api::ModelSpec::new("paid", None)
+        .expect("paid model")
+        .with_prices(1, 2, 0);
+    let zero_priced = hofund_plugin_api::ModelSpec::new("zero_priced", None)
+        .expect("zero-priced model")
+        .with_prices(0, 0, 0);
+    let models = [paid, zero_priced];
+
+    assert!(!hofund_provider::catalog_scopes_refusal(
+        &models,
+        "zero_priced",
+        false,
+        false,
+    ));
+    assert!(hofund_provider::catalog_scopes_refusal(
+        &models,
+        "zero_priced",
+        false,
+        true,
+    ));
+    assert!(!hofund_provider::catalog_scopes_refusal(
+        &models, "paid", true, false,
+    ));
+    assert!(hofund_provider::catalog_scopes_refusal(
+        &models, "paid", true, true,
+    ));
+}
+
 #[tokio::test]
 async fn d271_all_zero_text_price_is_recorded_only_for_the_gated_preset() {
     let body = json!({"data": [{"id": "legacy-zero", "cost": {"text": {

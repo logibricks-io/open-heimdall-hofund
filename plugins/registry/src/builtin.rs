@@ -1065,6 +1065,15 @@ mod tests {
                     .list_models(&hofund_plugin_api::ListQuery::new())
                     .await
                     .expect("list");
+            } else {
+                let paid =
+                    hofund_plugin_api::ModelSpec::new("paid-model", None).expect("paid model");
+                let legacy_zero = hofund_plugin_api::ModelSpec::new("legacy-zero", None)
+                    .expect("zero-priced model");
+                provider.remember_listed(&[
+                    paid.with_prices(1, 2, 0),
+                    legacy_zero.with_prices(0, 0, 0),
+                ]);
             }
             let result = provider
                 .execute(
