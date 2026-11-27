@@ -388,6 +388,83 @@ async fn client_error_does_not_try_the_next_upstream() {
 }
 
 #[tokio::test]
+async fn d274_legal_refusal_fails_over_for_every_body_shape() {
+    for body in [
+        "",
+        "Unavailable For Legal Reasons",
+        r#"{"error":{"message":"The request was blocked.","type":"invalid_request_error"}}"#,
+    ] {
+        let first_hits = Arc::new(AtomicUsize::new(0));
+        let second_hits = Arc::new(AtomicUsize::new(0));
+        let router = router(vec![
+            fake("first", &first_hits, Kind::Status(451, body)),
+            fake("second", &second_hits, Kind::Unary),
+        ]);
+        let routed = dispatch(&router, "demo").await.expect("failover");
+        assert_eq!(routed.upstream_id, "second", "{body}");
+        assert_eq!(first_hits.load(Ordering::SeqCst), 1, "{body}");
+        assert_eq!(second_hits.load(Ordering::SeqCst), 1, "{body}");
+    }
+}
+
+#[tokio::test]
+async fn d274_remote_gateway_refusal_fails_over() {
+    let second_hits = Arc::new(AtomicUsize::new(0));
+    let body = r#"{"error":{"code":null,"message":"first: The request was blocked. (HTTP 451)\ngateway: m refused this request (safety filter: 451) via first","type":"invalid_request_error"}}"#;
+    let router = router(vec![
+        fake(
+            "first",
+            &Arc::new(AtomicUsize::new(0)),
+            Kind::Status(400, body),
+        ),
+        fake("second", &second_hits, Kind::Unary),
+    ]);
+    let routed = dispatch(&router, "demo").await.expect("failover");
+    assert_eq!(routed.upstream_id, "second");
+    assert_eq!(second_hits.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn d274_r1_extracted_remote_refusal_text_fails_over() {
+    let second_hits = Arc::new(AtomicUsize::new(0));
+    let text = "first: The request was blocked. (HTTP 451)\ngateway: m refused this request (safety filter: 451) via first";
+    let router = router(vec![
+        fake(
+            "first",
+            &Arc::new(AtomicUsize::new(0)),
+            Kind::Status(400, text),
+        ),
+        fake("second", &second_hits, Kind::Unary),
+    ]);
+    let routed = dispatch(&router, "demo").await.expect("failover");
+    assert_eq!(routed.upstream_id, "second");
+    assert_eq!(second_hits.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn d274_last_legal_refusal_is_told_as_a_safety_refusal() {
+    let router = router(vec![fake(
+        "first",
+        &Arc::new(AtomicUsize::new(0)),
+        Kind::Status(451, "The request was blocked."),
+    )]);
+    let error = match dispatch(&router, "demo").await {
+        Ok(_) => panic!("expected the refusal"),
+        Err(error) => error,
+    };
+    let RouterError::Upstream { error, .. } = error else {
+        panic!("unexpected error");
+    };
+    assert_eq!(error.status(), Some(400));
+    assert!(error.message().contains("The request was blocked."));
+    assert!(
+        error
+            .message()
+            .contains("demo refused this request (safety filter: 451) via first")
+    );
+}
+
+#[tokio::test]
 async fn stream_error_before_an_event_fails_over() {
     let router = router(vec![
         fake(

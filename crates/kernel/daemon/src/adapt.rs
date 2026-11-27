@@ -18,19 +18,45 @@ use hofund_provider::{AttemptRoute, Completion, CountOutcome, Provider, Provider
 pub(crate) struct ProviderAdapter {
     id: String,
     inner: Arc<dyn UpstreamProvider>,
+    configured_base: String,
+    learn_v1: Option<Arc<dyn Fn(String) + Send + Sync>>,
 }
 
 impl ProviderAdapter {
     /// `id` is the configured provider id, recorded on routes and usage.
     pub(crate) fn new(id: impl Into<String>, inner: Arc<dyn UpstreamProvider>) -> Self {
+        let configured_base = inner.attempt_base();
         Self {
             id: id.into(),
             inner,
+            configured_base,
+            learn_v1: None,
         }
     }
 
     pub(crate) fn upstream(&self) -> Arc<dyn UpstreamProvider> {
         Arc::clone(&self.inner)
+    }
+
+    pub(crate) fn with_v1_learning(
+        mut self,
+        learn: impl Fn(String) + Send + Sync + 'static,
+    ) -> Self {
+        self.learn_v1 = Some(Arc::new(learn));
+        self
+    }
+
+    fn note_v1(&self) {
+        let current = self.inner.attempt_base();
+        if current == self.configured_base {
+            return;
+        }
+        if hofund_plugin_sdk::transport::missing_v1_base(&self.configured_base).as_deref()
+            == Some(current.as_str())
+            && let Some(learn) = &self.learn_v1
+        {
+            learn(current);
+        }
     }
 }
 
@@ -84,11 +110,9 @@ impl Provider for ProviderAdapter {
         inbound_protocol: &str,
     ) -> Result<Completion, ProviderError> {
         let inbound = protocol(inbound_protocol)?;
-        let completion = self
-            .inner
-            .execute(request, inbound)
-            .await
-            .map_err(provider_error)?;
+        let completion = self.inner.execute(request, inbound).await;
+        self.note_v1();
+        let completion = completion.map_err(provider_error)?;
         Ok(provider_completion(completion))
     }
 
@@ -146,6 +170,9 @@ pub(crate) fn provider_error(error: PluginError) -> ProviderError {
     }
     if error.credit_soon() {
         converted = converted.with_credit_soon();
+    }
+    if error.skips_failover_same_plugin() {
+        converted = converted.skip_failover_same_plugin();
     }
     if error.is_account_restricted() {
         converted = converted.account_restricted();

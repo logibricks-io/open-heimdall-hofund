@@ -351,7 +351,7 @@ impl State {
     }
 
     fn resume(&mut self, continuation: RouteContinuation) {
-        let future = continuation.dispatch();
+        let future = continuation.dispatch_safety_refusal();
         self.phase = 4;
         self.ready_future = Some(Box::pin(future));
     }

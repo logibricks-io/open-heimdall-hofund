@@ -190,7 +190,9 @@ pub(crate) fn allows(error: &PluginError, connect_errors: bool, statuses: &BTree
     if overflowed(status, &text) {
         return false;
     }
-    if statuses.contains(&status)
+    if status == 451
+        || safety_refused(error)
+        || statuses.contains(&status)
         || api_refused(status, &text)
         || model_retired(status, error.message(), &text)
         || status >= 400 && edge_blocked(&text)
@@ -219,12 +221,21 @@ pub(crate) fn outgrown(error: &PluginError) -> bool {
         .is_some_and(|status| status == 413 || overflowed(status, &words_of(error.message())))
 }
 
+/// Whether a safety filter refused the request rather than the account.
+pub(crate) fn safety_refused(error: &PluginError) -> bool {
+    legal_refused(error) || policy_refusal(error.message())
+}
+
+fn legal_refused(error: &PluginError) -> bool {
+    error.status() == Some(451) && !region_refused(error)
+}
+
 /// Whether the vendor refused the request's content. An allowance failure is
 /// not a refusal: those members can still be the reason a too-small member is
 /// asked last.
 pub(crate) fn content_refused(error: &PluginError) -> bool {
     let message = error.message();
-    skips_provider(error) || REFUSED_WORDS.is_match(message) || policy_refusal(message)
+    skips_provider(error) || REFUSED_WORDS.is_match(message) || safety_refused(error)
 }
 
 /// Whether `error` says the vendor refuses the request's content on every
@@ -287,11 +298,11 @@ pub(crate) fn rests(error: &PluginError) -> bool {
     let message = error.message();
     if error
         .status()
-        .is_some_and(|status| api_refused(status, message))
+        .is_some_and(|status| status == 451 || api_refused(status, message))
         || too_long(400, message)
         || REFUSED_WORDS.is_match(message)
         || PROTECTION_WORDS.is_match(message)
-        || policy_refusal(message)
+        || safety_refused(error)
         || message.contains(EMPTY_REPLY)
         || region_refused(error)
     {
@@ -471,9 +482,16 @@ fn reasoning_back_refused(message: &str) -> bool {
     false
 }
 
-/// Whether a JSON error body is the vendor's safety filter refusing the
-/// request (`reference: internal/gateway/fallback.go:3381-3425`).
+static REMOTE_REFUSAL: LazyLock<Regex> = LazyLock::new(|| {
+    re(r"(?:^|\n)[a-z][a-z0-9_-]*: [^\n]* refused this request \(safety filter: [^)\s]+\) via ")
+});
+
+/// Whether an error body or its extracted message is the vendor's safety
+/// filter refusing the request (`reference: internal/gateway/fallback.go:3381-3425`).
 fn policy_refusal(raw: &str) -> bool {
+    if REMOTE_REFUSAL.is_match(raw) {
+        return true;
+    }
     let Ok(serde_json::Value::Object(body)) = serde_json::from_str::<serde_json::Value>(raw) else {
         return false;
     };
@@ -493,6 +511,53 @@ fn policy_refusal(raw: &str) -> bool {
         || code == "1301" && message.contains("\u{654f}\u{611f}")
         || code == "invalid_prompt" && FLAGGED_WORDS.is_match(message)
         || message.trim() == HIGH_RISK_REFUSAL
+        || REMOTE_REFUSAL.is_match(message)
+}
+
+/// Tells an exhausted legal refusal not already worded as a policy refusal
+/// as this gateway's own safety refusal.
+pub(crate) fn refusal_told(error: PluginError, model: &str, upstream: &str) -> PluginError {
+    if !legal_refused(&error) || policy_refusal(error.message()) {
+        return error;
+    }
+    let billed = error.billed().cloned();
+    let mut said = error_message(error.message())
+        .unwrap_or_else(|| error.message().trim().to_owned())
+        .trim()
+        .to_owned();
+    if said.is_empty() {
+        said = "Unavailable For Legal Reasons".to_owned();
+    }
+    if said.len() > 1000 {
+        let mut end = 1000;
+        while !said.is_char_boundary(end) {
+            end -= 1;
+        }
+        said.truncate(end);
+        said.push_str("...");
+    }
+    let message = format!(
+        "{said} (HTTP 451)\nhofund: {model} refused this request (safety filter: 451) via {upstream}"
+    );
+    let mut told = PluginError::status_error(400, message).without_cooldown();
+    if let Some(billed) = billed {
+        told = told.with_billed(billed);
+    }
+    told
+}
+
+fn error_message(raw: &str) -> Option<String> {
+    let serde_json::Value::Object(body) = serde_json::from_str(raw).ok()? else {
+        return None;
+    };
+    let error = match body.get("error") {
+        Some(serde_json::Value::Object(error)) => error,
+        _ => &body,
+    };
+    error
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -754,6 +819,67 @@ mod tests {
     }
 
     #[test]
+    fn d274_legal_refusals_fail_over_and_rest_nobody() {
+        for body in [
+            "",
+            "Unavailable For Legal Reasons",
+            r#"{"error":{"message":"The request was blocked.","type":"invalid_request_error"}}"#,
+            r#"{"error":{"type":"censorship_blocked","message":"The content was blocked."}}"#,
+        ] {
+            let error = PluginError::status_error(451, body);
+            assert!(allows(&error, false, &none()), "{body}");
+            assert!(content_refused(&error), "{body}");
+            assert!(!rests(&error), "{body}");
+        }
+    }
+
+    #[test]
+    fn d274_regional_legal_refusal_is_not_a_content_refusal() {
+        let error = PluginError::status_error(
+            451,
+            r#"{"error":{"code":"unsupported_country_region_territory","message":"Country, region, or territory not supported"}}"#,
+        );
+        assert!(allows(&error, false, &none()));
+        assert!(!content_refused(&error));
+        assert!(!rests(&error));
+    }
+
+    #[test]
+    fn d274_remote_gateway_refusal_is_an_error_not_answer_text() {
+        let body = r#"{"error":{"code":null,"message":"first: The request was blocked. (HTTP 451)\ngateway: m refused this request (safety filter: 451) via first","type":"invalid_request_error"}}"#;
+        let error = PluginError::status_error(400, body);
+        assert!(policy_refusal(body));
+        assert!(allows(&error, false, &none()));
+        assert!(content_refused(&error));
+        assert!(!rests(&error));
+        assert!(!policy_refusal(
+            r#"{"choices":[{"message":{"content":"gateway: m refused this request (safety filter: 451) via first"}}]}"#
+        ));
+    }
+
+    #[test]
+    fn d274_r1_extracted_remote_refusal_text_is_recognized() {
+        let text = "first: The request was blocked. (HTTP 451)\ngateway: m refused this request (safety filter: 451) via first";
+        let error = PluginError::status_error(400, text);
+        assert!(policy_refusal(text));
+        assert!(allows(&error, false, &none()));
+        assert!(content_refused(&error));
+        assert!(!rests(&error));
+        assert!(!policy_refusal(
+            r#"{"choices":[{"message":{"content":"gateway: m refused this request (safety filter: 451) via first"}}]}"#
+        ));
+    }
+
+    #[test]
+    fn d274_r1_recognized_legal_policy_refusal_is_not_rewritten() {
+        let body = r#"{"error":{"code":"content_filter","message":"The request was blocked."}}"#;
+        let error = PluginError::status_error(451, body);
+        let told = refusal_told(error, "demo", "first");
+        assert_eq!(told.status(), Some(451));
+        assert_eq!(told.message(), body);
+    }
+
+    #[test]
     fn every_list_compiles() {
         for list in [
             &QUOTA_WORDS,
@@ -771,6 +897,7 @@ mod tests {
             &POLICY_CODE,
             &SENSITIVE_CODE,
             &FLAGGED_WORDS,
+            &REMOTE_REFUSAL,
         ] {
             assert!(!list.as_str().is_empty());
         }

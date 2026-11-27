@@ -369,11 +369,14 @@ transport::fn is_allocation_quota_rate (status : u16 , body : & [u8]) -> bool
 transport::fn is_context_overflow_error (status : u16 , body : & [u8]) -> bool
 transport::fn is_credit_error (status : u16 , body : & [u8]) -> bool
 transport::fn is_quota_error (status : u16 , body : & [u8]) -> bool
+transport::fn missing_v1_base (base_url : & str) -> Option < String >
+transport::fn not_an_api_reply (status : u16 , content_type : & str , content_encoding : & str , head : & [u8] ,) -> Option < String >
 transport::fn parse_reset_after_headers (headers : & http :: HeaderMap , now : std :: time :: SystemTime ,) -> Option < Duration >
 transport::fn parse_retry_after (value : & str , now : std :: time :: SystemTime) -> Option < Duration >
 transport::fn parse_retry_after_headers (headers : & http :: HeaderMap , now : std :: time :: SystemTime ,) -> Option < Duration >
 transport::fn reset_after_from_body (body : & [u8] , now : std :: time :: SystemTime) -> Option < Duration >
 transport::fn retry_after_from_body (body : & [u8]) -> Option < Duration >
+transport::fn served_page (message : & str) -> bool
 transport::fn status_for_error (body : & [u8]) -> u16
 transport::fn text_response (status : u16 , body : impl AsRef < [u8] >) -> HttpResponse
 url
@@ -395,8 +398,10 @@ wire::Target::const fn request_body_gzip (mut self , enabled : bool) -> Self
 wire::Target::fn base_url (& self) -> & str
 wire::Target::fn classify_status (mut self , classify : StatusClassify) -> Self
 wire::Target::fn credential (mut self , credential : CredentialStyle) -> Self
+wire::Target::fn current_base (& self) -> String
 wire::Target::fn headers (mut self , headers : Vec < (String , String) >) -> Self
 wire::Target::fn method_root (mut self , root : & 'static str) -> Self
+wire::Target::fn missing_v1_retry (mut self , state : Arc < Mutex < Option < String > > >) -> Self
 wire::Target::fn model_root (mut self , root : & 'static str) -> Self
 wire::Target::fn new (protocol : ProtocolId , base_url : impl Into < String >) -> Self
 wire::Target::fn observe (mut self , observe : Observe) -> Self
