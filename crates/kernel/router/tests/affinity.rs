@@ -175,6 +175,240 @@ async fn c3c_strict_dispatch_passes_on_error_without_failover() {
 }
 
 #[tokio::test]
+async fn d274_strict_refusal_asks_left_out_members_and_moves_the_stick() {
+    let first_hits = Arc::new(AtomicUsize::new(0));
+    let second_hits = Arc::new(AtomicUsize::new(0));
+    let first = fake("first", &first_hits, vec![answer(), answer()]);
+    let second = fake(
+        "second",
+        &second_hits,
+        vec![Err(PluginError::status_error(451, "blocked"))],
+    );
+    let state = AffinityState::in_memory();
+    state.answered(
+        "demo|session",
+        "preset:second:row",
+        "demo",
+        1,
+        CacheUsage {
+            input: Some(3000),
+            read: 0,
+            write: 3000,
+            write_hour: 0,
+        },
+    );
+    let router = router(first, second, state.clone(), Stays::Strict);
+    let routed = router
+        .dispatch_with_context(
+            &hofund_router::Request::new("demo"),
+            "test",
+            Some(&conversation()),
+            None,
+        )
+        .await
+        .expect("left-out member answers the refusal");
+    assert_eq!(routed.upstream_id, "first");
+    assert_eq!(first_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(second_hits.load(Ordering::SeqCst), 1);
+
+    let next = Conversation::new("demo|session", 2, false);
+    let routed = router
+        .dispatch_with_context(
+            &hofund_router::Request::new("demo"),
+            "test",
+            Some(&next),
+            None,
+        )
+        .await
+        .expect("new answerer keeps the conversation");
+    assert_eq!(routed.upstream_id, "first");
+    assert_eq!(first_hits.load(Ordering::SeqCst), 2);
+    assert_eq!(second_hits.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn d274_strict_policy_refusal_asks_left_out_members() {
+    for error in [
+        PluginError::status_error(
+            400,
+            r#"{"error":{"code":"content_filter","message":"blocked"}}"#,
+        ),
+        PluginError::status_error(
+            400,
+            r#"{"error":{"code":null,"message":"gateway: m refused this request (safety filter: 451) via second"}}"#,
+        ),
+    ] {
+        let first_hits = Arc::new(AtomicUsize::new(0));
+        let second_hits = Arc::new(AtomicUsize::new(0));
+        let first = fake("first", &first_hits, vec![answer()]);
+        let second = fake("second", &second_hits, vec![Err(error)]);
+        let state = AffinityState::in_memory();
+        state.answered(
+            "demo|session",
+            "preset:second:row",
+            "demo",
+            1,
+            CacheUsage {
+                input: Some(3000),
+                read: 0,
+                write: 3000,
+                write_hour: 0,
+            },
+        );
+        let router = router(first, second, state, Stays::Strict);
+        let routed = router
+            .dispatch_with_context(
+                &hofund_router::Request::new("demo"),
+                "test",
+                Some(&conversation()),
+                None,
+            )
+            .await
+            .expect("left-out member answers the refusal");
+        assert_eq!(routed.upstream_id, "first");
+        assert_eq!(first_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(second_hits.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn d274_strict_stream_continuation_keeps_left_out_members() {
+    let first_hits = Arc::new(AtomicUsize::new(0));
+    let second_hits = Arc::new(AtomicUsize::new(0));
+    let first = fake("first", &first_hits, vec![answer()]);
+    let thinking = Ok(Completion::Stream(Box::pin(futures_util::stream::iter(
+        vec![Ok(hofund_ir::StreamEvent::ThinkingDelta(
+            hofund_ir::ThinkingDelta {
+                index: 0,
+                text: "thinking".to_owned(),
+                extensions: hofund_ir::Extensions::new(),
+            },
+        ))],
+    ))));
+    let second = fake("second", &second_hits, vec![thinking]);
+    let state = AffinityState::in_memory();
+    state.answered(
+        "demo|session",
+        "preset:second:row",
+        "demo",
+        1,
+        CacheUsage {
+            input: Some(3000),
+            read: 0,
+            write: 3000,
+            write_hour: 0,
+        },
+    );
+    let router = router(first, second, state, Stays::Strict);
+    let mut routed = router
+        .dispatch_with_context(
+            &hofund_router::Request::new("demo"),
+            "test",
+            Some(&conversation()),
+            None,
+        )
+        .await
+        .expect("stream starts");
+    let continuation = routed
+        .take_continuation()
+        .expect("Strict leaves a member for a streamed refusal");
+    let routed = continuation.dispatch().await.expect("failover");
+    assert_eq!(routed.upstream_id, "first");
+    assert_eq!(first_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(second_hits.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn d274_strict_every_member_refusing_returns_safety_refusal() {
+    let first_hits = Arc::new(AtomicUsize::new(0));
+    let second_hits = Arc::new(AtomicUsize::new(0));
+    let first = fake(
+        "first",
+        &first_hits,
+        vec![Err(PluginError::status_error(451, "blocked"))],
+    );
+    let second = fake(
+        "second",
+        &second_hits,
+        vec![Err(PluginError::status_error(451, "blocked"))],
+    );
+    let state = AffinityState::in_memory();
+    state.answered(
+        "demo|session",
+        "preset:second:row",
+        "demo",
+        1,
+        CacheUsage {
+            input: Some(3000),
+            read: 0,
+            write: 3000,
+            write_hour: 0,
+        },
+    );
+    let router = router(first, second, state, Stays::Strict);
+    let error = match router
+        .dispatch_with_context(
+            &hofund_router::Request::new("demo"),
+            "test",
+            Some(&conversation()),
+            None,
+        )
+        .await
+    {
+        Ok(_) => panic!("every member should refuse"),
+        Err(error) => error,
+    };
+    let hofund_router::RouterError::Upstream { error, .. } = error else {
+        panic!("unexpected error");
+    };
+    assert_eq!(error.status(), Some(400));
+    assert!(error.message().contains("safety filter: 451"));
+    assert_eq!(first_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(second_hits.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn d274_strict_own_failures_stay_with_the_answerer() {
+    for error in [
+        PluginError::status_error(429, "rate limited"),
+        PluginError::quota_status(429, "quota exhausted"),
+        PluginError::status_error(500, "unavailable"),
+    ] {
+        let first_hits = Arc::new(AtomicUsize::new(0));
+        let second_hits = Arc::new(AtomicUsize::new(0));
+        let first = fake("first", &first_hits, vec![answer()]);
+        let second = fake("second", &second_hits, vec![Err(error)]);
+        let state = AffinityState::in_memory();
+        state.answered(
+            "demo|session",
+            "preset:second:row",
+            "demo",
+            1,
+            CacheUsage {
+                input: Some(3000),
+                read: 0,
+                write: 3000,
+                write_hour: 0,
+            },
+        );
+        let router = router(first, second, state, Stays::Strict);
+        assert!(
+            router
+                .dispatch_with_context(
+                    &hofund_router::Request::new("demo"),
+                    "test",
+                    Some(&conversation()),
+                    None,
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(first_hits.load(Ordering::SeqCst), 0);
+        assert_eq!(second_hits.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
 async fn c2f_nearly_spent_stuck_account_is_bypassed() {
     let first_hits = Arc::new(AtomicUsize::new(0));
     let second_hits = Arc::new(AtomicUsize::new(0));

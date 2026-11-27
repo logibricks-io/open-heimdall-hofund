@@ -399,6 +399,8 @@ struct Ordered {
     hops: Vec<Hop>,
     /// Other APIs of a member, asked only after that member's API is refused.
     protocol_alternates: Vec<Hop>,
+    /// Members Strict left out, asked only after a safety refusal.
+    strict_left: Vec<Hop>,
     hand_on: Vec<Hop>,
     reserves: BTreeMap<String, usize>,
     affinity: Option<ReplyRoute>,
@@ -1102,6 +1104,7 @@ impl Router {
             } else {
                 Vec::new()
             },
+            strict_left: ordered.strict_left,
             protocol_alternates,
             resolved,
             policy: self.policy.clone(),
@@ -1597,7 +1600,18 @@ impl Router {
                     .order(conversation, resolved.stays, &resolved.routing, &candidates);
             (decision, candidates)
         });
-        let (ordered, strict) = if let Some((decision, _)) = &decision {
+        let (ordered, strict, strict_left) = if let Some((decision, _)) = &decision {
+            let kept = decision.order.iter().copied().collect::<BTreeSet<_>>();
+            let strict_left = if decision.strict {
+                ordered
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| !kept.contains(index))
+                    .map(|(_, hop)| hop.clone())
+                    .collect()
+            } else {
+                Vec::new()
+            };
             (
                 decision
                     .order
@@ -1605,9 +1619,10 @@ impl Router {
                     .map(|index| ordered[*index].clone())
                     .collect::<Vec<_>>(),
                 decision.strict,
+                strict_left,
             )
         } else {
-            (ordered, false)
+            (ordered, false, Vec::new())
         };
         if decision.as_ref().is_some_and(|(decision, _)| decision.kept)
             && let Some(kept) = ordered.first()
@@ -1633,6 +1648,7 @@ impl Router {
         Ordered {
             hops,
             protocol_alternates,
+            strict_left,
             hand_on,
             reserves,
             affinity: conversation
@@ -2108,6 +2124,7 @@ struct DispatchState {
     hook: Option<Arc<dyn AttemptHook>>,
     rest_left: bool,
     hand_on: Vec<Hop>,
+    strict_left: Vec<Hop>,
     protocol_alternates: Vec<Hop>,
     resolved: Resolved,
     policy: FailoverPolicy,
@@ -2403,9 +2420,15 @@ impl DispatchState {
     /// own failure that is not momentary. The probe's failure is not known
     /// yet, and this check does not record the 30-second guard. A momentary
     /// rest, or a rate rest still inside that guard, must not make the probe
-    /// skip its queue wait.
+    /// skip its queue wait. Strict's separate reserve counts only for a
+    /// refusal, but the attempt cannot know which failure will arrive.
     fn another_candidate_follows(&self, index: usize) -> bool {
-        if self.hand_on_follows(HandOnFailure::Own) {
+        if self
+            .strict_left
+            .iter()
+            .any(|hop| self.askable_left_out(hop))
+            || self.hand_on_follows(HandOnFailure::Own)
+        {
             return true;
         }
         for hop in self.resolved.hops.iter().skip(index + 1) {
@@ -2515,6 +2538,19 @@ impl DispatchState {
         (start..self.resolved.hops.len()).collect()
     }
 
+    fn take_strict_refusal(&mut self) -> Option<Vec<usize>> {
+        if self.strict_left.is_empty() || !decision::safety_refused(&self.last.as_ref()?.1) {
+            return None;
+        }
+        let mut asking = Vec::new();
+        for hop in std::mem::take(&mut self.strict_left) {
+            if self.askable_left_out(&hop) {
+                asking.extend(self.push_primary_with_alternates(hop));
+            }
+        }
+        (!asking.is_empty()).then_some(asking)
+    }
+
     fn take_hand_on(&mut self) -> Option<Vec<usize>> {
         let error = &self.last.as_ref()?.1;
         let allows = self.policy.allows(error) || decision::asks_next(error);
@@ -2544,12 +2580,13 @@ impl DispatchState {
             match self.round(&asking, &mut busy, &mut ending).await {
                 Ok(Some(answered)) => {
                     let next = answered.index + 1;
-                    let has_continuation = self
-                        .resolved
-                        .hops
-                        .iter()
-                        .skip(next)
-                        .any(|hop| !self.protocol_alternate_idle(hop));
+                    let has_continuation = !self.strict_left.is_empty()
+                        || self
+                            .resolved
+                            .hops
+                            .iter()
+                            .skip(next)
+                            .any(|hop| !self.protocol_alternate_idle(hop));
                     let affinity_reason = self
                         .affinity
                         .as_ref()
@@ -2617,6 +2654,13 @@ impl DispatchState {
                 }
             }
             if ending != Ending::Answered
+                && let Some(next) = self.take_strict_refusal()
+            {
+                asking = next;
+                busy.clear();
+                continue;
+            }
+            if ending != Ending::Answered
                 && let Some(next) = self.take_hand_on()
             {
                 asking = next;
@@ -2663,29 +2707,27 @@ impl DispatchState {
             }
             break;
         }
-        let error_message = self
-            .last
-            .as_ref()
-            .map(|(_, error)| error.message().to_owned());
+        let last = self.last.map(|(upstream_id, error)| {
+            let model = self.last_model.as_deref().unwrap_or(&self.request.model);
+            let error = if decision::region_refused(&error) {
+                decision::with_region_agent_note(error, model)
+            } else {
+                decision::refusal_told(error, model, &upstream_id)
+            };
+            (upstream_id, error)
+        });
+        let error_message = last.as_ref().map(|(_, error)| error.message().to_owned());
         if let Some(trace) = self.trace.take() {
             trace.finish(
                 None,
                 None,
-                self.last.as_ref().and_then(|(_, error)| error.status()),
+                last.as_ref().and_then(|(_, error)| error.status()),
                 error_message.as_deref(),
                 None,
             );
         }
-        match self.last {
-            Some((upstream_id, error)) => {
-                let model = self.last_model.as_deref().unwrap_or(&self.request.model);
-                let error = if decision::region_refused(&error) {
-                    decision::with_region_agent_note(error, model)
-                } else {
-                    error
-                };
-                Err(RouterError::Upstream { upstream_id, error })
-            }
+        match last {
+            Some((upstream_id, error)) => Err(RouterError::Upstream { upstream_id, error }),
             None => {
                 let detail = if self.missing_detail.is_empty() {
                     String::new()
@@ -3467,8 +3509,14 @@ impl RouteContinuation {
     /// # Errors
     ///
     /// Returns the same errors as [`Router::dispatch`].
-    pub async fn dispatch(self) -> Result<Routed, RouterError> {
-        self.state.run(self.next).await
+    pub async fn dispatch(mut self) -> Result<Routed, RouterError> {
+        let next = self.next;
+        for hop in std::mem::take(&mut self.state.strict_left) {
+            if self.state.askable_left_out(&hop) {
+                self.state.push_primary_with_alternates(hop);
+            }
+        }
+        self.state.run(next).await
     }
 }
 
