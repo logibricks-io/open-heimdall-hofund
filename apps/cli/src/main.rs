@@ -1369,6 +1369,9 @@ const ROUTES_HELP: &str = "\
 usage: hofund routes [--config PATH]
 
 Print each configured route model, its routing strategy, and its stays mode.
+`pace-drain` (before expiry, one by one) stays on the seat whose allowance a
+reset would waste soonest until that seat is used up or fails. `pace-then-drain`
+and `expiry-one-by-one` are names for it.
 ";
 
 const MODEL_HELP: &str = "\

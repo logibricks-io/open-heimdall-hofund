@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- D-275: routing `pace-drain` (before expiry, one by one; also `pace-then-drain` and `expiry-one-by-one`) picks the seat whose allowance a reset would waste soonest, then stays on it until it is used up, resting, or refused for a whole-member quota or credit, and picks the next the same way. A learner is asked once and is not kept. Trial credits at a full allowance stay eligible. The stick is per pool and `forget` clears it. Verified with deterministic seat fixtures only.
 - D-259: a dropped Claude bridge request shelves a session cut at a known end (the saved session the run started from, or the preceding assistant row whose stop reason is `end_turn`) and lets the run go. A different next turn resumes that cut and is told only that turn. A request for the same turn waits without missing a completed cut, and an in-flight client disconnect records 499. Cancellation uses the request after advisor and stage-D mutations. Pre-drain shutdown and agent sign-in account handover suppress late cuts. A new run, a request carrying client cache marks, and a run that does not persist a session keep nothing; retiring, replacing, expiring, or trimming a shelf entry deletes its bridge-written copy.
 
 ### Fixed

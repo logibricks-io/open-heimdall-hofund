@@ -411,6 +411,9 @@ struct RoundMove {
     pool: String,
     picked: String,
     choices: Vec<(String, String)>,
+    /// Drain records the member that answered. Pace-drain keeps the seat
+    /// chosen while ordering, so a later answer must not replace it.
+    answer_sticks: bool,
 }
 
 #[derive(Default)]
@@ -1757,9 +1760,10 @@ impl Router {
                             .map(|hop| (hop.member.id().to_string(), key.clone()))
                     })
                     .collect(),
+                answer_sticks: false,
             });
         }
-        if groups.len() > 1 && routing == "drain" {
+        if groups.len() > 1 && (routing == "drain" || routing == "pace-drain") {
             moves.drain.push(RoundMove {
                 pool: pool.to_owned(),
                 picked: groups[order[0]].0.clone(),
@@ -1771,6 +1775,7 @@ impl Router {
                             .map(|hop| (hop.member.id().to_string(), key.clone()))
                     })
                     .collect(),
+                answer_sticks: routing == "drain",
             });
         }
         let mut ordered = order
@@ -2986,6 +2991,9 @@ impl DispatchState {
                     }
                     let member_id = routing_member_label(&hop);
                     for pool_move in &self.drain_moves {
+                        if !pool_move.answer_sticks {
+                            continue;
+                        }
                         if let Some((_, key)) = pool_move
                             .choices
                             .iter()
@@ -3189,12 +3197,32 @@ impl DispatchState {
                     } else {
                         *ending = Ending::Other;
                     }
+                    if patience::spent(&error) && !error.scopes_model() {
+                        self.mark_pace_drain(&hop);
+                    }
                     self.last = Some((upstream_id, error));
                     self.last_model = Some(upstream_model);
                 }
             }
         }
         Ok(None)
+    }
+
+    /// A whole-member quota or credit refusal marks the unit this hop belongs
+    /// to, so pace-drain leaves it on the next request even if the allowance
+    /// renews first. Drain ignores that mark. A model-scoped refusal does not
+    /// move the pool.
+    fn mark_pace_drain(&self, hop: &Hop) {
+        let member_id = routing_member_label(hop);
+        for pool_move in &self.drain_moves {
+            if let Some((_, key)) = pool_move
+                .choices
+                .iter()
+                .find(|(member, _)| *member == member_id)
+            {
+                self.strategies.drained(key);
+            }
+        }
     }
 
     /// A vendor-timed quota or credit rest is not probed unless a renewed

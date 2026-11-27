@@ -19,12 +19,24 @@ use crate::ui::list_window;
 
 const REVISION_LEN: usize = 64;
 const ROUTINGS: &[&str] = &[
-    "smart", "order", "rotate", "usage", "pace", "weight", "free", "fast", "cheap", "drain", "fit",
+    "smart",
+    "order",
+    "rotate",
+    "usage",
+    "pace",
+    "weight",
+    "free",
+    "fast",
+    "cheap",
+    "drain",
+    "pace-drain",
+    "fit",
 ];
 
 fn routing_label(name: &str) -> &str {
     match name {
         "fit" => "small context first",
+        "pace-drain" => "before expiry, one by one",
         other => other,
     }
 }
@@ -1481,8 +1493,18 @@ mod tests {
     }
 
     #[test]
+    fn d275_pace_drain_follows_drain_and_is_labelled() {
+        assert_eq!(next_name(super::ROUTINGS, "drain"), "pace-drain");
+        assert_eq!(next_name(super::ROUTINGS, "pace-drain"), "fit");
+        assert_eq!(
+            super::routing_label("pace-drain"),
+            "before expiry, one by one"
+        );
+    }
+
+    #[test]
     fn d239_fit_follows_drain_and_is_labelled() {
-        assert_eq!(next_name(super::ROUTINGS, "drain"), "fit");
+        assert_eq!(next_name(super::ROUTINGS, "pace-drain"), "fit");
         assert_eq!(next_name(super::ROUTINGS, "fit"), "smart");
         assert_eq!(super::routing_label("fit"), "small context first");
         assert_eq!(super::routing_label("cheap"), "cheap");

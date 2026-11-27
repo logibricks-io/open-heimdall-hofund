@@ -92,7 +92,7 @@ List: `internal/tui/routing.go:updateGroups`, `viewGroups`. Open group: `updateG
 | `enter`, space | List, visible group | Open group | G-4 |
 | `enter`, space | List, **hidden** found row under cursor | No open. Flash that `u` restores it (`routing.go:updateGroups` hidden branch) | G-4 restore hint only |
 | `n` | List | Ask for a name, then pick the first member (`pickMsg`). Works on hidden rows too | G-4 create |
-| `o` | List and group, visible | Next strategy (`nextRouting`) | G-4. Cycle matches `routing.go:routings`: the reference stores **smart** as an empty routing id; hofund config and `ROUTING_NAMES` use the string `smart`, and group PATCH sends `routing: "smart"`. Then order, rotate, usage, pace, weight, free, fast, cheap, drain, fit, expiring, manual. Hofund `ROUTING_NAMES` has no `expiring` or `manual`; skip both in the TUI cycle. `fit` is labelled small context first |
+| `o` | List and group, visible | Next strategy (`nextRouting`) | G-4. Cycle matches `routing.go:routings`: the reference stores **smart** as an empty routing id; hofund config and `ROUTING_NAMES` use the string `smart`, and group PATCH sends `routing: "smart"`. Then order, rotate, usage, pace, weight, free, fast, cheap, drain, pace-drain, fit, expiring, manual. Hofund `ROUTING_NAMES` has no `expiring` or `manual`; skip both in the TUI cycle. `pace-drain` is labelled before expiry, one by one. `fit` is labelled small context first |
 | `o` | List, hidden row | No strategy change; same restore hint as enter | None |
 | `d` `d` | List, visible | Delete group | G-4 |
 | `d` `d` | List, hidden row | No delete; restore hint | None |

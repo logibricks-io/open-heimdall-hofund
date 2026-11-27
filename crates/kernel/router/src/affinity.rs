@@ -197,11 +197,12 @@ pub const SPENT_SHARE: f64 = 98.0;
 
 /// The used share past which `routing` counts an account spent: In order
 /// tries an account in its turn until a window is used up, so only 100%
-/// counts there (`reference: internal/provider/codex_switch.go`,
+/// counts there. Until used up and before expiry, one by one, stay on one
+/// until that same line (`reference: internal/provider/codex_switch.go`,
 /// `SpentShareOf`).
 #[must_use]
 pub fn spent_share_of(routing: &str) -> f64 {
-    if routing == "order" || routing == "drain" {
+    if routing == "order" || routing == "drain" || routing == "pace-drain" {
         100.0
     } else {
         SPENT_SHARE

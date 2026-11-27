@@ -57,8 +57,8 @@ With one enabled key, the existing provider member id is unchanged. With
 several enabled keys, each member id carries the key fingerprint in the
 existing `preset:<provider>:<key-id>` form. Rests in `rests.json` follow those
 ids, including per-key credit ladders. Strategy measurements and rounds also
-use member ids, so order, rotate, usage, pace, weight, free, fast, smart, and
-cheap routing all operate on keys. Weighted rounds use each key's weight.
+use member ids, so order, rotate, usage, pace, weight, free, fast, smart,
+cheap, drain, and pace-drain routing all operate on keys. Weighted rounds use each key's weight.
 Conversation affinity can stay with the member that answered without a
 key-specific affinity implementation.
 
