@@ -2231,6 +2231,12 @@ impl ModelsHost {
                 query = query.with_extra_body(extra);
             }
             let result = upstream.probe(&query).await;
+            self.note_v1(
+                &provider.id,
+                planned.wire,
+                &planned.base_url,
+                &upstream.attempt_base(),
+            );
             match result {
                 Ok(report) => {
                     if planned.wire == Wire::Messages
@@ -2299,6 +2305,32 @@ impl ModelsHost {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .update(provider, |state| state.auth = Some(choice.into()));
+    }
+
+    pub(crate) fn v1_learning(
+        &self,
+        provider: &str,
+        wire: Wire,
+    ) -> impl Fn(String) + Send + Sync + 'static {
+        let state = Arc::clone(&self.state);
+        let provider = provider.to_owned();
+        let wire = wire_name(wire).to_owned();
+        move |base| {
+            state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .update(&provider, |state| {
+                    state.bases.insert(wire.clone(), base.clone());
+                });
+        }
+    }
+
+    fn note_v1(&self, provider: &str, wire: Wire, configured: &str, current: &str) {
+        if let Some(fixed) = hofund_plugin_sdk::transport::missing_v1_base(configured)
+            && fixed == current
+        {
+            self.v1_learning(provider, wire)(fixed);
+        }
     }
 
     fn extra_body(
