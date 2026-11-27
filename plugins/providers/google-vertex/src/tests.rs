@@ -164,6 +164,38 @@ fn a_refresh_token_is_minted_once_and_reused() {
 }
 
 #[test]
+fn d270_vertex_sends_xhigh_only_when_advertised() {
+    block_on(async {
+        let dir = tempfile::tempdir().expect("scratch");
+        let host = TestHost::open(plugin(), dir.path());
+        let creds = write_creds(dir.path(), &person());
+        host.http().enqueue(token_body("ya29.minted"));
+        let provider = build(&host, &local(&creds, ""));
+        for (model, expected) in [
+            ("gemini-4-neon", "xhigh"),
+            ("gemini-4-argon", "high"),
+            ("gemini-4-unknown", "high"),
+        ] {
+            host.http().enqueue(REPLY);
+            let mut request = Request::new(model);
+            request.params.effort = Some(hofund_plugin_api::Effort::Xhigh);
+            provider
+                .execute(request, ProtocolId::OPENAI_CHAT)
+                .await
+                .expect("completion");
+            let calls = host.http().calls();
+            let sent: Value =
+                hofund_plugin_sdk::json::from_slice(calls.last().expect("request").body())
+                    .expect("request json");
+            assert_eq!(
+                sent["generationConfig"]["thinkingConfig"]["thinkingLevel"], expected,
+                "{model}"
+            );
+        }
+    });
+}
+
+#[test]
 fn a_service_account_signs_a_jwt_and_streams() {
     block_on(async {
         let dir = tempfile::tempdir().expect("scratch");
