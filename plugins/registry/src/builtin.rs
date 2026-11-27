@@ -115,6 +115,7 @@ pub fn openai_compat(
     let secret =
         (!endpoint.api_key.is_empty()).then(|| SecretString::from(endpoint.api_key.clone()));
     let allocation_quota_rate = matches!(endpoint.preset.as_deref(), Some("qwen" | "qwen-cn"));
+    let zero_price_free = endpoint.preset.as_deref() == Some("opencode-go");
     let adapter = Arc::new(OpenAiCompat::new(protocol, endpoint).map_err(build_error)?);
     let bridged = Bridged {
         inner: adapter.clone(),
@@ -135,6 +136,7 @@ pub fn openai_compat(
         secret,
         counts: false,
         bridged,
+        zero_price_free,
     }))
 }
 
@@ -182,6 +184,7 @@ struct Direct {
     secret: Option<SecretString>,
     counts: bool,
     bridged: Bridged,
+    zero_price_free: bool,
 }
 
 #[async_trait]
@@ -210,7 +213,7 @@ impl UpstreamProvider for Direct {
                         | ProtocolId::ANTHROPIC_MESSAGES
                 ) =>
             {
-                Err(scope_plugin_refusal(&self.bridged, &model, error).await)
+                Err(scope_plugin_refusal(&self.bridged, &model, error, self.zero_price_free).await)
             }
             Err(error) => Err(error),
         }
@@ -265,7 +268,12 @@ impl UpstreamProvider for Direct {
     }
 }
 
-async fn scope_plugin_refusal(bridged: &Bridged, model: &str, error: PluginError) -> PluginError {
+async fn scope_plugin_refusal(
+    bridged: &Bridged,
+    model: &str,
+    error: PluginError,
+    zero_price_free: bool,
+) -> PluginError {
     let quota_or_credit =
         error.kind() == hofund_plugin_api::PluginErrorKind::Quota || error.is_credit();
     if !quota_or_credit && error.status() != Some(429) {
@@ -281,7 +289,8 @@ async fn scope_plugin_refusal(bridged: &Bridged, model: &str, error: PluginError
     let mut free = false;
     let mut paid = false;
     for listed in list.models() {
-        let explicitly_free = listed.free() == Some(true);
+        let explicitly_free =
+            listed.free() == Some(true) || zero_price_free && listed.costs_nothing();
         free |= explicitly_free;
         paid |= !explicitly_free;
         if listed.id().eq_ignore_ascii_case(model) {
@@ -339,6 +348,7 @@ pub fn anthropic(
     let headers = endpoint.headers.clone();
     let quirks = endpoint.quirks;
     let preset = endpoint.preset.clone();
+    let zero_price_free = endpoint.preset.as_deref() == Some("opencode-go");
     let secret =
         (!endpoint.api_key.is_empty()).then(|| SecretString::from(endpoint.api_key.clone()));
     let adapter = Arc::new(Anthropic::new(endpoint).map_err(build_error)?);
@@ -359,6 +369,7 @@ pub fn anthropic(
         secret,
         counts: true,
         bridged,
+        zero_price_free,
     }))
 }
 
@@ -450,6 +461,7 @@ pub fn generative(
         secret,
         counts: true,
         bridged: Bridged { inner: adapter },
+        zero_price_free: false,
     }))
 }
 
@@ -924,6 +936,73 @@ mod tests {
                 "{id}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn d271_go_zero_price_fallback_scopes_refusals_only_for_go() {
+        use hofund_plugin_api::ProtocolId;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": [
+                    {"id": "paid-model", "go": {"monthly_usage": {"go": 200}}},
+                    {"id": "legacy-zero", "cost": {"text": {
+                        "input": {"price": 0, "cache": {"read": 0, "write": 0}},
+                        "output": {"price": 0}
+                    }}}
+                ]})),
+            )
+            .expect(3)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(429).set_body_string(
+                r#"{"error":{"message":"usage limit reached (weekly)","type":"rate_limit_error"}}"#,
+            ))
+            .expect(3)
+            .mount(&server)
+            .await;
+        let root = tempfile::tempdir().expect("state");
+        let host = hofund_kit_upstream::runtime_host(
+            hofund_plugin_api::PluginId::from_static("d271"),
+            "test-key",
+            root.path(),
+            hofund_kit_upstream::HttpLimits::new(
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(2),
+            ),
+        )
+        .expect("host");
+        for (model, preset, scoped) in [
+            ("paid-model", "opencode-go", true),
+            ("legacy-zero", "opencode-go", true),
+            ("legacy-zero", "other-relay", false),
+        ] {
+            let mut endpoint =
+                hofund_provider::Endpoint::new("test", format!("{}/v1", server.uri()));
+            endpoint.preset = Some(preset.to_owned());
+            endpoint.api_key = "test-key".to_owned();
+            let provider =
+                super::openai_compat(hofund_provider::OpenAiProtocol::Chat, endpoint, &host)
+                    .expect("provider");
+            let result = provider
+                .execute(
+                    hofund_plugin_api::Request::new(model),
+                    ProtocolId::OPENAI_CHAT,
+                )
+                .await;
+            let error = match result {
+                Ok(_) => panic!("refusal answered successfully"),
+                Err(error) => error,
+            };
+            assert_eq!(error.scopes_model(), scoped, "{model} at {preset}");
+        }
+        server.verify().await;
     }
 
     #[tokio::test]

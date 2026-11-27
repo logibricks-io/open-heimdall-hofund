@@ -340,6 +340,34 @@ fn counted_window(row: &Value, name: &str, seconds: u64) -> Option<PlanWindow> {
     )
 }
 
+fn open_code_free(row: &Value) -> bool {
+    let explicit = row
+        .get("go")
+        .and_then(Value::as_object)
+        .and_then(|go| go.get("monthly_usage"))
+        .is_some_and(Value::is_null);
+    explicit || all_zero_cost(row.get("cost"))
+}
+
+fn all_zero_cost(cost: Option<&Value>) -> bool {
+    let Some(text) = cost.and_then(|cost| cost.get("text")) else {
+        return false;
+    };
+    let Some(input) = text.get("input") else {
+        return false;
+    };
+    let zero = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_f64)
+            .is_some_and(|price| price == 0.0)
+    };
+    let zero_or_absent = |value: Option<&Value>| value.is_none_or(|value| zero(Some(value)));
+    zero(input.get("price"))
+        && zero(text.get("output").and_then(|output| output.get("price")))
+        && zero_or_absent(input.get("cache").and_then(|cache| cache.get("read")))
+        && zero_or_absent(input.get("cache").and_then(|cache| cache.get("write")))
+}
+
 pub(crate) async fn read_open_code(
     query: &PlanQuery,
     host: &HostContext,
@@ -388,12 +416,7 @@ pub(crate) async fn read_open_code(
                 .and_then(Value::as_array)
                 .map_or(&[][..], Vec::as_slice)
             {
-                let explicitly_free = row
-                    .get("go")
-                    .and_then(Value::as_object)
-                    .and_then(|go| go.get("monthly_usage"))
-                    .is_some_and(Value::is_null);
-                if explicitly_free
+                if open_code_free(row)
                     && let Some(id) = row.get("id").and_then(Value::as_str)
                     && !id.is_empty()
                 {

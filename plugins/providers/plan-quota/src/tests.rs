@@ -290,7 +290,11 @@ fn d271_open_code_windows_exclude_only_explicit_free_models() {
                 {"id": "missing", "go": {}},
                 {"id": "number", "go": {"monthly_usage": 0}},
                 {"id": "object", "go": {"monthly_usage": {}}},
-                {"id": "string", "go": "free"}
+                {"id": "string", "go": "free"},
+                {"id": "legacy-zero", "cost": {"text": {
+                    "input": {"price": 0, "cache": {"read": 0, "write": 0}},
+                    "output": {"price": 0}
+                }}}
             ]})))
             .expect(1)
             .mount(&server)
@@ -303,7 +307,7 @@ fn d271_open_code_windows_exclude_only_explicit_free_models() {
         for window in cards[0].windows() {
             let debug = format!("{window:?}");
             assert!(
-                debug.contains("excluded_models: [\"free-model\"]"),
+                debug.contains("excluded_models: [\"free-model\", \"legacy-zero\"]"),
                 "{debug}"
             );
             assert!(!debug.contains("paid-model"), "{debug}");

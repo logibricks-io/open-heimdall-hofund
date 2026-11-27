@@ -597,6 +597,9 @@ pub(crate) fn model_spec(row: &Value, gemini: bool) -> Result<Option<ModelSpec>,
     {
         model = model.with_free(true);
     }
+    if all_zero_cost(row.get("cost")) {
+        model = model.with_prices(0, 0, 0);
+    }
     model = model
         .with_context(positive(row.get("context_length")))
         .with_max_output(positive(row.get("max_output_tokens")))
@@ -629,6 +632,25 @@ pub(crate) fn model_spec(row: &Value, gemini: bool) -> Result<Option<ModelSpec>,
     };
     model = model.with_endpoints(endpoints);
     Ok(Some(model))
+}
+
+fn all_zero_cost(cost: Option<&Value>) -> bool {
+    let Some(text) = cost.and_then(|cost| cost.get("text")) else {
+        return false;
+    };
+    let Some(input) = text.get("input") else {
+        return false;
+    };
+    let zero = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_f64)
+            .is_some_and(|price| price == 0.0)
+    };
+    let zero_or_absent = |value: Option<&Value>| value.is_none_or(|value| zero(Some(value)));
+    zero(input.get("price"))
+        && zero(text.get("output").and_then(|output| output.get("price")))
+        && zero_or_absent(input.get("cache").and_then(|cache| cache.get("read")))
+        && zero_or_absent(input.get("cache").and_then(|cache| cache.get("write")))
 }
 
 fn positive(value: Option<&Value>) -> u64 {

@@ -128,7 +128,11 @@ async fn d271_explicit_null_monthly_usage_marks_only_free_models() {
             {"id": "object", "go": {"monthly_usage": {}}},
             {"id": "string", "go": "free"},
             {"id": "array", "go": [null]},
-            {"id": "absent"}
+            {"id": "absent"},
+            {"id": "legacy-zero", "cost": {"text": {
+                "input": {"price": 0, "cache": {"read": 0, "write": 0}},
+                "output": {"price": 0}
+            }}}
         ]})))
         .expect(1)
         .mount(&server)
@@ -137,7 +141,7 @@ async fn d271_explicit_null_monthly_usage_marks_only_free_models() {
         .list_models(&ListQuery::new())
         .await
         .expect("list");
-    assert_eq!(listed.models().len(), 8);
+    assert_eq!(listed.models().len(), 9);
     for model in listed.models() {
         assert_eq!(
             model.free(),
@@ -146,6 +150,12 @@ async fn d271_explicit_null_monthly_usage_marks_only_free_models() {
             model.id()
         );
     }
+    let legacy = listed
+        .models()
+        .iter()
+        .find(|model| model.id() == "legacy-zero")
+        .expect("zero-priced row");
+    assert!(legacy.costs_nothing());
 }
 
 #[tokio::test]
