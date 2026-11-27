@@ -273,13 +273,22 @@ fn generation(model: &str) -> u32 {
         .unwrap_or(0)
 }
 
+fn fit_effort(request: &mut Request) {
+    if request.params.effort == Some(hofund_plugin_api::Effort::Xhigh)
+        && !base::efforts_for(&request.model).contains(&"xhigh")
+    {
+        request.params.effort = Some(hofund_plugin_api::Effort::High);
+    }
+}
+
 #[hofund_plugin_sdk::async_trait]
 impl UpstreamProvider for Vertex {
     async fn execute(
         &self,
-        request: Request,
+        mut request: Request,
         inbound: ProtocolId,
     ) -> Result<Completion, PluginError> {
+        fit_effort(&mut request);
         let token = self.token().await?;
         wire::execute(
             self.host.http(),
@@ -293,9 +302,10 @@ impl UpstreamProvider for Vertex {
 
     async fn count_input(
         &self,
-        request: Request,
+        mut request: Request,
         inbound: ProtocolId,
     ) -> Result<CountOutcome, PluginError> {
+        fit_effort(&mut request);
         let token = self.token().await?;
         wire::count_input(
             self.host.http(),
@@ -311,7 +321,16 @@ impl UpstreamProvider for Vertex {
         let _ = query;
         let specs = base::models_for(&self.location)
             .iter()
-            .map(|id| ModelSpec::new(*id, None))
+            .map(|id| {
+                ModelSpec::new(*id, None).map(|model| {
+                    model.with_efforts(
+                        base::efforts_for(id)
+                            .iter()
+                            .map(|level| (*level).to_owned())
+                            .collect(),
+                    )
+                })
+            })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(ModelList::new(specs, None).with_kind(ListKind::Catalog))
     }

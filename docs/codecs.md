@@ -78,9 +78,11 @@ through `high`, with `xhigh` added for later model generations
 none, and `includeThoughts` alone does not request effort. The camelCase and
 snake_case field spellings are both read.
 `ultra` is read as `max` and written as `max`. D-270 gates encoded `xhigh` on a
-model-id generation of at least 4; earlier generations and `max` stay at `high`.
-This gate does not fit an unsupported effort to the model's advertised reasoning
-levels. D-203 tracks that separate catalog-fitting behavior.
+model-id generation of at least 4; earlier generations stay at `high`. The custom
+provider and Vertex plugin first fit `xhigh` against provider-side advertised
+level lists, so Argon and models with unknown levels go out as `high` while the
+known Neon entry can use `xhigh`. Full catalog-driven nearest-level fitting is
+D-203. At generation 4 and later, `max` also remains `high` pending that fitting.
 
 ## Trait
 
