@@ -29,6 +29,8 @@ pub struct ProviderSnapshot {
     pub providers: Vec<ProviderSummary>,
     /// Way-out warnings from the provider list. Empty when there are none.
     pub warnings: Vec<String>,
+    /// Address and region of a subscription way out. Empty when none is known.
+    pub way_out_place: String,
     /// Preset catalog. Empty when that read failed.
     pub presets: Vec<PresetEntry>,
     /// Disk revision from status, when the read succeeded.
@@ -1125,6 +1127,7 @@ async fn load_providers(client: &Client) -> Result<ProviderSnapshot, String> {
     Ok(ProviderSnapshot {
         providers: providers.providers,
         warnings: providers.way_out_warnings,
+        way_out_place: providers.way_out_place,
         presets,
         disk_revision,
         presets_error,

@@ -56,6 +56,8 @@ pub(crate) struct Snapshot {
     pub risks: Vec<String>,
     /// Way-out warnings. Empty when the last reading was fine or unknown.
     pub warnings: Vec<String>,
+    /// Address and region of the way out. Empty when none is known.
+    pub way_out: String,
     /// The latest action error, or empty.
     pub message: String,
     /// Every catalog adapter, in catalog order.
@@ -83,6 +85,14 @@ pub(crate) fn menu_entries(snapshot: &Snapshot) -> Vec<MenuEntry> {
         "stopped"
     };
     let mut entries = Vec::new();
+    if !snapshot.way_out.is_empty() {
+        entries.push(MenuEntry {
+            id: "way-out-place".to_owned(),
+            label: format!("Way out: {}", snapshot.way_out),
+            enabled: false,
+            checked: None,
+        });
+    }
     for (index, warning) in snapshot.warnings.iter().enumerate() {
         entries.push(MenuEntry {
             id: format!("way-out:{index}"),
@@ -95,6 +105,13 @@ pub(crate) fn menu_entries(snapshot: &Snapshot) -> Vec<MenuEntry> {
         entries.push(MenuEntry {
             id: "way-out-check".to_owned(),
             label: "Check again".to_owned(),
+            enabled: true,
+            checked: None,
+        });
+    } else if snapshot.running && !snapshot.way_out.is_empty() {
+        entries.push(MenuEntry {
+            id: "way-out-check".to_owned(),
+            label: "Check".to_owned(),
             enabled: true,
             checked: None,
         });
@@ -453,6 +470,11 @@ impl Control {
                 .as_ref()
                 .map(hofund_daemon::way_out_warnings)
                 .unwrap_or_default(),
+            way_out: self
+                .server
+                .as_ref()
+                .map(hofund_daemon::way_out_place)
+                .unwrap_or_default(),
             message: self.message.clone(),
             agents,
         }
@@ -588,6 +610,7 @@ mod tests {
             quotas: vec!["Work: 42% · 18%".to_owned(), "Plan: 12 credits".to_owned()],
             risks: Vec::new(),
             warnings: Vec::new(),
+            way_out: String::new(),
             message: String::new(),
             agents: Vec::new(),
         };
@@ -653,6 +676,7 @@ mod tests {
             quotas: Vec::new(),
             risks: Vec::new(),
             warnings: vec!["outside".to_owned()],
+            way_out: String::new(),
             message: String::new(),
             agents: Vec::new(),
         };
@@ -675,6 +699,29 @@ mod tests {
     }
 
     #[test]
+    fn d279_menu_shows_the_address_region_and_check() {
+        let snapshot = Snapshot {
+            running: true,
+            listen: "127.0.0.1:3425".to_owned(),
+            route: String::new(),
+            today: String::new(),
+            quotas: Vec::new(),
+            risks: Vec::new(),
+            warnings: Vec::new(),
+            way_out: "203.0.113.9 · US".to_owned(),
+            message: String::new(),
+            agents: Vec::new(),
+        };
+        let entries = menu_entries(&snapshot);
+        assert_eq!(entries[0].id, "way-out-place");
+        assert_eq!(entries[0].label, "Way out: 203.0.113.9 · US");
+        assert!(!entries[0].enabled);
+        assert_eq!(entries[1].id, "way-out-check");
+        assert_eq!(entries[1].label, "Check");
+        assert!(entries[1].enabled);
+    }
+
+    #[test]
     fn d221_the_menu_shows_a_saved_account_risk_line() {
         let snapshot = Snapshot {
             running: false,
@@ -684,6 +731,7 @@ mod tests {
             quotas: Vec::new(),
             risks: vec!["saved-account risk line".to_owned()],
             warnings: Vec::new(),
+            way_out: String::new(),
             message: String::new(),
             agents: Vec::new(),
         };

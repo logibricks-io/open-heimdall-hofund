@@ -472,6 +472,15 @@ fn way_out_warning_lines(runtime: &crate::runtime::Runtime) -> Vec<String> {
     lines
 }
 
+fn way_out_place_line(runtime: &crate::runtime::Runtime) -> String {
+    for state in runtime.subscription_states().values() {
+        if let Some(text) = state.instance().way_out_place() {
+            return text;
+        }
+    }
+    String::new()
+}
+
 impl ControlState for DaemonControl {
     fn health(&self) -> HealthResponse {
         let mut health = HealthResponse::default();
@@ -634,6 +643,7 @@ impl ControlState for DaemonControl {
                 .collect();
             if let Some(runtime) = runtime {
                 response.way_out_warnings = way_out_warning_lines(&runtime);
+                response.way_out_place = way_out_place_line(&runtime);
             }
             let _ = rests;
             Ok(response)
@@ -661,6 +671,7 @@ impl ControlState for DaemonControl {
             }
             let mut response = hofund_control_proto::WayOutCheckResponse::default();
             response.warnings = way_out_warning_lines(&runtime);
+            response.place = way_out_place_line(&runtime);
             Ok(response)
         })
     }

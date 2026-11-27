@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- D-279: Claude's `allowed-ways-out` list of region codes, addresses, and CIDR ranges, when set, alone judges the way out. An empty list still uses the supported-region list. A stored reading is judged again on every read. With `region-hold` on, a reading of any state older than 30 seconds is looked up again first, within 5 seconds, and one lookup is shared. The trace keeps the address beside the region, and the provider row and the menu show that address, the region, and Check. Verified with an injected clock and a loopback trace only.
 - D-259: a dropped Claude bridge request shelves a session cut at a known end (the saved session the run started from, or the preceding assistant row whose stop reason is `end_turn`) and lets the run go. A different next turn resumes that cut and is told only that turn. A request for the same turn waits without missing a completed cut, and an in-flight client disconnect records 499. Cancellation uses the request after advisor and stage-D mutations. Pre-drain shutdown and agent sign-in account handover suppress late cuts. A new run, a request carrying client cache marks, and a run that does not persist a session keep nothing; retiring, replacing, expiring, or trimming a shelf entry deletes its bridge-written copy.
 
 ### Fixed

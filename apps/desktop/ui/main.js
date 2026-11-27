@@ -5,7 +5,15 @@ function render(snapshot) {
   status.textContent = snapshot.running
     ? `Gateway running at ${snapshot.listen}`
     : `Gateway stopped. Configured listen ${snapshot.listen}`;
+  const wayOut = document.querySelector("#way-out");
+  const wayOutCheck = document.querySelector("#way-out-check");
+  const place = snapshot.way_out || "";
+  wayOut.hidden = place.length === 0;
+  wayOut.textContent = place.length === 0 ? "" : `Way out: ${place}`;
+  wayOutCheck.hidden = place.length === 0;
+  wayOutCheck.disabled = !snapshot.running;
   const lines = [
+    place.length === 0 ? "" : `Way out: ${place}`,
     ...(snapshot.warnings || []),
     snapshot.route,
     snapshot.today,
@@ -63,6 +71,9 @@ window.addEventListener("DOMContentLoaded", () => {
   });
   document.querySelector("#refresh").addEventListener("click", () => {
     refresh();
+  });
+  document.querySelector("#way-out-check").addEventListener("click", () => {
+    invoke("check_way_out").then(render).catch(showError);
   });
   if (window.__TAURI__ && window.__TAURI__.event) {
     window.__TAURI__.event.listen("snapshot", (event) => {
