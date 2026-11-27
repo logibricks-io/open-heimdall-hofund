@@ -1,9 +1,8 @@
 //! Reasoning effort, independent of any one protocol's spelling.
 //!
 //! Codecs translate this enum with one table each. Levels a protocol does not
-//! publish are folded to the nearest published level. There is no catalog yet,
-//! so a level is not clamped to a model: an upstream that rejects it returns
-//! that error.
+//! publish are folded to the nearest published level. Fitting a level to a
+//! model's advertised capabilities belongs above this protocol-neutral enum.
 
 use serde::{Deserialize, Serialize};
 
@@ -84,17 +83,19 @@ impl Effort {
 
     /// Generative Language `thinkingConfig.thinkingLevel`.
     ///
-    /// That API publishes `minimal`, `low`, `medium`, and `high`.
-    /// [`Effort::Xhigh`] and [`Effort::Max`] are sent as `high`.
+    /// [`Effort::Xhigh`] is sent as `xhigh` from model generation 4, and as
+    /// `high` before then. [`Effort::Max`] is always sent as `high`.
     /// [`Effort::None`] has no level; the encoder writes `thinkingBudget: 0`.
     #[must_use]
-    pub fn generative_level(self) -> Option<&'static str> {
+    pub fn generative_level(self, generation: u64) -> Option<&'static str> {
         match self {
             Self::None => None,
             Self::Minimal => Some("minimal"),
             Self::Low => Some("low"),
             Self::Medium => Some("medium"),
-            Self::High | Self::Xhigh | Self::Max => Some("high"),
+            Self::High | Self::Max => Some("high"),
+            Self::Xhigh if generation >= 4 => Some("xhigh"),
+            Self::Xhigh => Some("high"),
         }
     }
 }
@@ -119,7 +120,15 @@ mod tests {
         assert_eq!(Effort::from_label("ULTRA"), Some(Effort::Max));
         assert_eq!(Effort::from_label("adaptive"), None);
         assert_eq!(Effort::Minimal.messages_label(), "low");
-        assert_eq!(Effort::Max.generative_level(), Some("high"));
-        assert_eq!(Effort::None.generative_level(), None);
+        assert_eq!(Effort::Max.generative_level(4), Some("high"));
+        assert_eq!(Effort::None.generative_level(0), None);
+    }
+
+    #[test]
+    fn d270_generative_xhigh_needs_generation_four() {
+        assert_eq!(Effort::Xhigh.generative_level(3), Some("high"));
+        assert_eq!(Effort::Xhigh.generative_level(4), Some("xhigh"));
+        assert_eq!(Effort::Xhigh.generative_level(10), Some("xhigh"));
+        assert_eq!(Effort::Max.generative_level(10), Some("high"));
     }
 }

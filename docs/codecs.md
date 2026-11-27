@@ -63,7 +63,7 @@ written back unchanged. Official lists were checked on 2026-10-25.
 | low | `low` | `low` | `low` |
 | medium | `medium` | `medium` | `medium` |
 | high | `high` | `high` | `high` |
-| xhigh | `xhigh` | `xhigh` | `high` |
+| xhigh | `xhigh` | `xhigh` | `xhigh` at model generation 4+, otherwise `high` |
 | max | `max` | `max` | `high` |
 
 Chat and Responses publish all seven labels
@@ -71,14 +71,18 @@ Chat and Responses publish all seven labels
 Messages `output_config.effort` publishes `low` through `max`
 (<https://platform.claude.com/docs/en/build-with-claude/effort>).
 Generative Language `thinkingConfig.thinkingLevel` publishes `minimal`
-through `high`
+through `high`, with `xhigh` added for later model generations
 (<https://ai.google.dev/gemini-api/docs/thinking>). On decode, a positive
 `thinkingBudget` maps to low through 4096, medium through 12000, high through
 24000, and xhigh above that. A negative dynamic budget maps to medium, zero to
 none, and `includeThoughts` alone does not request effort. The camelCase and
 snake_case field spellings are both read.
-`ultra` is read as `max` and written as `max`. Levels are not clamped to a
-model; this version has no catalog.
+`ultra` is read as `max` and written as `max`. D-270 gates encoded `xhigh` on a
+model-id generation of at least 4; earlier generations stay at `high`. The custom
+provider and Vertex plugin first fit `xhigh` against provider-side advertised
+level lists, so Argon and models with unknown levels go out as `high` while the
+known Neon entry can use `xhigh`. Full catalog-driven nearest-level fitting is
+D-203. At generation 4 and later, `max` also remains `high` pending that fitting.
 
 ## Trait
 
