@@ -1419,6 +1419,7 @@ pub(crate) fn into_plugin(error: ProviderError) -> PluginError {
     let credit = error.is_credit();
     let credit_soon = error.credit_soon();
     let cooldown = error.cools();
+    let skip_failover_same_plugin = error.skips_failover_same_plugin();
     let account_restricted = error.is_account_restricted();
     let ordinary_failure = error.is_ordinary_failure();
     let subscription_suspended = error.is_subscription_suspended();
@@ -1463,6 +1464,9 @@ pub(crate) fn into_plugin(error: ProviderError) -> PluginError {
     }
     if let Some(billed) = billed {
         converted = converted.with_billed(billed);
+    }
+    if skip_failover_same_plugin {
+        converted = converted.skip_failover_same_plugin();
     }
     if account_restricted {
         converted = converted.account_restricted();

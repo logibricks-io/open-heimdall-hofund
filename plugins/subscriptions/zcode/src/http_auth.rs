@@ -104,6 +104,8 @@ pub(crate) fn classify_upstream_error(error: PluginError) -> PluginError {
     error
         .with_message(message)
         .with_retry_after(RESTRICTED_COOLDOWN)
+        .account_restricted()
+        .skip_failover_same_plugin()
 }
 
 pub(crate) fn auth_for_http_status(status: u16, context: &str) -> PluginError {

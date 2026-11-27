@@ -919,6 +919,58 @@ fn r57_3012_has_a_risk_control_hint_and_cooldown() {
 }
 
 #[test]
+fn d273_new_3012_suspension_marks_restricted_failover() {
+    let error = crate::http_auth::classify_upstream_error(
+        hofund_plugin_api::PluginError::status_error(
+            405,
+            r#"{"type":"error","error":{"type":"permission_error","message":"Your account has been suspended for misusing the Start Plan, such as proxying it to non-ZCode clients. Please contact support if you believe this is a mistake. (405, code 3012)"}}"#,
+        ),
+    );
+    assert_eq!(error.status(), Some(405));
+    assert!(error.message().contains(crate::http_auth::RESTRICTED_HINT));
+    assert_eq!(
+        error.retry_after(),
+        Some(std::time::Duration::from_secs(2 * 60 * 60))
+    );
+    assert!(error.is_account_restricted());
+    assert!(error.skips_failover_same_plugin());
+}
+
+#[test]
+fn d273_3012_wire_message_shape_marks_restricted_failover() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed_plan_key(&host, "glm.plan.key.secret", "user@zcode.test");
+    host.http().enqueue_response(
+        405,
+        &[],
+        json!({
+            "type": "error",
+            "error": {
+                "type": "permission_error",
+                "message": "Your account has been suspended for misusing the Start Plan, such as proxying it to non-ZCode clients. Please contact support if you believe this is a mistake. (405, code 3012)"
+            }
+        })
+        .to_string(),
+    );
+    let upstream = subscription(&host)
+        .upstream(&id, host.context())
+        .expect("upstream");
+    let query = ProbeQuery::new(ProtocolId::ANTHROPIC_MESSAGES, "glm-5.3").expect("query");
+    let error = block_on(upstream.probe(&query)).expect_err("restricted");
+    assert_eq!(error.status(), Some(405));
+    assert!(
+        error
+            .message()
+            .starts_with("Your account has been suspended")
+    );
+    assert!(error.message().contains("(405, code 3012)"));
+    assert!(error.message().contains(crate::http_auth::RESTRICTED_HINT));
+    assert!(error.is_account_restricted());
+    assert!(error.skips_failover_same_plugin());
+}
+
+#[test]
 fn r57_other_405_errors_do_not_get_the_3012_hint() {
     let error = crate::http_auth::classify_upstream_error(
         hofund_plugin_api::PluginError::status_error(405, "method not allowed (30120)"),

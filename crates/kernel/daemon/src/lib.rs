@@ -68,6 +68,8 @@ mod d250_messages_refused;
 mod d271_free_models;
 #[cfg(test)]
 mod d271_rest_release;
+#[cfg(test)]
+mod d273_restricted_failover;
 mod effort_variants;
 mod events;
 mod log_tail;
