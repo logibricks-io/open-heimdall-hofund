@@ -880,9 +880,10 @@ fn planned_words(text: &str) -> bool {
         || ["daily", "weekly", "monthly"]
             .into_iter()
             .any(|word| text.contains(word))
-        // Allowance, usage, plan, and exhausted-limit wording.
+        // Allowance, usage, usage ceiling, plan, and exhausted-limit wording.
         || text.contains("\u{989d}\u{5ea6}")
         || text.contains("\u{7528}\u{91cf}")
+        || text.contains("\u{4f7f}\u{7528}\u{4e0a}\u{9650}")
         || text.contains("\u{5957}\u{9910}")
         || text.contains("\u{9650}\u{989d}\u{5df2}\u{7528}\u{5b8c}")
 }
@@ -1012,9 +1013,33 @@ fn quota_codes(text: &str) -> bool {
 }
 
 fn resets_at(text: &str) -> bool {
-    (text.contains("reset at") || text.contains("resets at"))
+    ((text.contains("reset at") || text.contains("resets at"))
         && text.contains(|character: char| character.is_ascii_digit())
-        && (text.contains("utc") || text.contains("gmt"))
+        && (text.contains("utc") || text.contains("gmt")))
+        || window_reset_at(text)
+}
+
+fn window_reset_at(text: &str) -> bool {
+    static PATTERN: OnceLock<Option<regex::Regex>> = OnceLock::new();
+    PATTERN
+        .get_or_init(|| {
+            regex::Regex::new(
+                r"(?:\byour limit will reset at|\x{60a8}\x{7684}\x{9650}\x{989d}\x{5c06}\x{5728})\s*\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?(\s*\S{0,3})",
+            )
+            .ok()
+        })
+        .as_ref()
+        .and_then(|pattern| pattern.captures(text))
+        .is_some_and(|captures| {
+            let suffix = captures
+                .get(1)
+                .map_or("", |capture| capture.as_str())
+                .trim_start();
+            !suffix.starts_with(|character: char| {
+                character.is_ascii_digit() || matches!(character, ':' | '+' | '-' | 'z')
+            }) && !suffix.starts_with("utc")
+                && !suffix.starts_with("gmt")
+        })
 }
 
 /// Whether a credit refusal says it can pass soon or for a smaller request.
@@ -2350,6 +2375,91 @@ mod tests {
         .expect_err("quota");
         assert_eq!(error.kind(), PluginErrorKind::Quota);
         assert_eq!(error.reset_after(), Some(Duration::from_secs(4_720)));
+    }
+
+    #[test]
+    fn d269_chinese_window_limits_are_quota_despite_rate_type() {
+        let five_hour = "[1308][\u{5df2}\u{8fbe}\u{5230} 5 \u{5c0f}\u{65f6}\u{7684}\u{4f7f}\u{7528}\u{4e0a}\u{9650}\u{3002}\u{60a8}\u{7684}\u{9650}\u{989d}\u{5c06}\u{5728} 2026-11-10 16:01:04 \u{91cd}\u{7f6e}\u{3002}][202611101433583360720d4c25418e]";
+        let weekly_monthly = "[1310][\u{60a8}\u{5df2}\u{8fbe}\u{5230}\u{6bcf}\u{5468}/\u{6bcf}\u{6708}\u{4f7f}\u{7528}\u{4e0a}\u{9650}\u{ff0c}\u{60a8}\u{7684}\u{9650}\u{989d}\u{5c06}\u{5728} 2026-10-24 20:44:45 \u{91cd}\u{7f6e}\u{3002}][20261020091843ac61fce173a347a5]";
+        let without_reset = "[1308][\u{5df2}\u{8fbe}\u{5230} 5 \u{5c0f}\u{65f6}\u{7684}\u{4f7f}\u{7528}\u{4e0a}\u{9650}\u{3002}]";
+        let reset_only = "\u{60a8}\u{7684}\u{9650}\u{989d}\u{5c06}\u{5728} 2026-11-10 16:01:04 \u{91cd}\u{7f6e}\u{3002}";
+        let messages = |message: &str| {
+            serde_json::json!({
+                "type": "error",
+                "error": {"type": "rate_limit_error", "message": message}
+            })
+        };
+        let chat =
+            |message: &str| serde_json::json!({"error": {"code": "1308", "message": message}});
+        let ascii_json = |value: &serde_json::Value| {
+            serde_json::to_string(value)
+                .expect("JSON")
+                .chars()
+                .map(|character| {
+                    if character.is_ascii() {
+                        character.to_string()
+                    } else {
+                        format!("\\u{:04x}", u32::from(character))
+                    }
+                })
+                .collect::<String>()
+        };
+        let cases = vec![
+            ("1308 messages", messages(five_hour).to_string()),
+            ("1310 messages", messages(weekly_monthly).to_string()),
+            ("1308 escaped messages", ascii_json(&messages(five_hour))),
+            ("1308 escaped chat", ascii_json(&chat(five_hour))),
+            ("1308 chat", chat(five_hour).to_string()),
+            ("1308 without reset", messages(without_reset).to_string()),
+            ("reset sentence alone", messages(reset_only).to_string()),
+            (
+                "English usage limit",
+                messages("You've reached your usage limit").to_string(),
+            ),
+            (
+                "monthly quota with written reset",
+                chat("You have exceeded the monthly usage quota. It will reset at 2026-10-25 23:59:59 +0800 CST.").to_string(),
+            ),
+        ];
+        for (name, body) in cases {
+            assert!(is_quota_error(429, body.as_bytes()), "{name}");
+            let error = classify(429, None, body.into_bytes()).expect_err(name);
+            assert_eq!(error.kind(), PluginErrorKind::Quota, "{name}");
+        }
+    }
+
+    #[test]
+    fn d269_per_minute_limits_stay_rate() {
+        let messages = |message: &str| {
+            serde_json::json!({
+                "type": "error",
+                "error": {"type": "rate_limit_error", "message": message}
+            })
+            .to_string()
+        };
+        for (name, body) in [
+            (
+                "1302 messages",
+                messages(
+                    "[1302][\u{60a8}\u{7684}\u{8d26}\u{6237}\u{5df2}\u{8fbe}\u{5230}\u{901f}\u{7387}\u{9650}\u{5236}\u{ff0c}\u{8bf7}\u{60a8}\u{63a7}\u{5236}\u{8bf7}\u{6c42}\u{9891}\u{7387}][202611051732017a8c6e62fa7d42f5]",
+                ),
+            ),
+            (
+                "1302 chat",
+                serde_json::json!({"error": {"code": "1302", "message": "too many requests"}})
+                    .to_string(),
+            ),
+            (
+                "per-minute usage ceiling",
+                messages(
+                    "\u{6bcf}\u{5206}\u{949f}\u{4f7f}\u{7528}\u{4e0a}\u{9650}\u{5df2}\u{8fbe}\u{5230}\u{ff0c}\u{8bf7}\u{7a0d}\u{540e}\u{518d}\u{8bd5}",
+                ),
+            ),
+        ] {
+            assert!(!is_quota_error(429, body.as_bytes()), "{name}");
+            let error = classify(429, None, body.into_bytes()).expect_err(name);
+            assert_eq!(error.kind(), PluginErrorKind::Status, "{name}");
+        }
     }
 
     #[test]
