@@ -24,6 +24,8 @@ pub(crate) fn classify(error: PluginError) -> PluginError {
     error
         .with_message(message)
         .with_retry_after(RESTRICTED_COOLDOWN)
+        .account_restricted()
+        .skip_failover_same_plugin()
 }
 
 fn restricted(status: u16, body: &[u8]) -> bool {
@@ -94,5 +96,23 @@ mod tests {
         assert!(!restricted(403, br#"{"error":{"code":"011140"}}"#));
         assert!(!restricted(403, br#"{"requestId":"11140"}"#));
         assert!(restricted(403, br#"{"code":11140.0}"#));
+    }
+
+    #[test]
+    fn d273_restricted_4xx_marks_failover_and_skips_siblings() {
+        for status in [400, 405] {
+            let error = classify(PluginError::status_error(
+                status,
+                r#"{"error":{"code":11140,"message":"request illegal"}}"#,
+            ));
+            assert_eq!(error.status(), Some(status));
+            assert!(error.message().ends_with(RESTRICTED_HINT));
+            assert_eq!(
+                error.retry_after(),
+                Some(std::time::Duration::from_secs(2 * 60 * 60))
+            );
+            assert!(error.is_account_restricted(), "{status}");
+            assert!(error.skips_failover_same_plugin(), "{status}");
+        }
     }
 }
