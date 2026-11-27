@@ -294,11 +294,13 @@ CallerLimit
 CallerScope
 CallerScope #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq)
 CallerScope.accounts
+CallerScope.agent
 CallerScope.agent_accounts
 CallerScope.key_name
 CallerScope::fn account_holds_provider (& self , provider : & str) -> bool
 CallerScope::fn holds_accounts (& self) -> bool
 CallerScope::fn new (key_name : impl Into < String > , accounts : Vec < String >) -> Self
+CallerScope::fn with_agent (mut self , agent : impl Into < String >) -> Self
 CallerScope::fn with_agent_accounts (mut self , pins : Vec < String >) -> Self
 CallerStamp
 CheckinAccountStatus

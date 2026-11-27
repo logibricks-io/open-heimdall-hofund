@@ -1289,6 +1289,7 @@ fn codec_routes(inner: &Inner) -> readonly::RouteSet {
 struct InProcess {
     app: std::sync::Weak<Inner>,
     identity: Identity,
+    scope: RouteScope,
     body_bytes: usize,
 }
 
@@ -1307,6 +1308,7 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
                 .map_err(|_| PluginError::internal("the gateway token is not a header value"))?;
         parts.headers.insert(header::AUTHORIZATION, bearer);
         parts.extensions.insert(self.identity.clone());
+        parts.extensions.insert(self.scope.clone());
         let request = Request::from_parts(parts, Body::from(body.bytes().clone()));
         let router = codec_routes(&app).router.with_state(Arc::clone(&app));
         let response = tower::ServiceExt::oneshot(router, request)
@@ -1409,10 +1411,7 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
             track.end_with(None, status.as_u16(), None, None);
             return Err(PluginError::status_error(status.as_u16(), message));
         }
-        match router
-            .forward_scoped(&call, Some(&route_scope(&self.identity)))
-            .await
-        {
+        match router.forward_scoped(&call, Some(&self.scope)).await {
             Ok(forwarded) => {
                 let answer = forwarded.answer;
                 let status =
@@ -1703,12 +1702,15 @@ async fn dispatch_surface(State(app): State<Arc<Inner>>, request: Request) -> Re
     let body_bytes = bytes.len();
     let inbound =
         axum::http::Request::from_parts(parts, hofund_plugin_api::Body::from_bytes(bytes));
+    let scope = agent_scope(&app, &headers, &identity, None);
     let caller =
         hofund_plugin_api::CallerScope::new(identity.key_name.clone(), identity.accounts.clone())
-            .with_agent_accounts(agent_pins(&app, &headers, &identity));
+            .with_agent(scope.agent.clone())
+            .with_agent_accounts(scope.agent_accounts.clone());
     let gateway = Arc::new(InProcess {
         app: Arc::downgrade(&app),
         identity,
+        scope,
         body_bytes,
     });
     let members = app.snapshot.load().member_ids();
@@ -2023,9 +2025,20 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     let uri = request.uri().clone();
     let headers = request.headers().clone();
     let inherited = request.extensions().get::<Identity>().cloned();
+    let inherited_scope = request.extensions().get::<RouteScope>().cloned();
     let stopped_waiting = request.extensions().get::<StoppedWaiting>().cloned();
     if path == "/v1/messages/count_tokens" {
-        return count_tokens(app, headers, uri, request, inherited, "/v1/messages", None).await;
+        return count_tokens(
+            app,
+            headers,
+            uri,
+            request,
+            inherited,
+            inherited_scope,
+            "/v1/messages",
+            None,
+        )
+        .await;
     }
     if let Some(model) = match_count(&path) {
         return count_tokens(
@@ -2034,6 +2047,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
             uri,
             request,
             inherited,
+            inherited_scope,
             GENERATIVE_UNARY,
             Some(model),
         )
@@ -2301,7 +2315,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     let mut dispatch: DispatchFuture = Box::pin({
         let request = dispatch_request.clone();
         let protocol = codec.id().to_owned();
-        let scope = agent_scope(app.as_ref(), &headers, &identity);
+        let scope = agent_scope(app.as_ref(), &headers, &identity, inherited_scope);
         async move {
             if let Some(trace) = trace {
                 router
@@ -2603,6 +2617,7 @@ async fn count_tokens(
     uri: Uri,
     request: Request,
     inherited: Option<Identity>,
+    inherited_scope: Option<RouteScope>,
     codec_key: &str,
     path_model: Option<String>,
 ) -> Response {
@@ -2667,7 +2682,12 @@ async fn count_tokens(
         .count_scoped_conversation(
             counted,
             codec.id(),
-            Some(&agent_scope(app.as_ref(), &headers, &identity)),
+            Some(&agent_scope(
+                app.as_ref(),
+                &headers,
+                &identity,
+                inherited_scope,
+            )),
             Some(&conversation),
         )
         .await
@@ -2897,21 +2917,30 @@ fn route_scope(identity: &Identity) -> RouteScope {
 
 /// Route scope for dispatch, counts, and realtime. The model list keeps
 /// [`route_scope`], so an agent pin does not hide models.
-fn agent_scope(app: &Inner, headers: &HeaderMap, identity: &Identity) -> RouteScope {
+fn agent_scope(
+    app: &Inner,
+    headers: &HeaderMap,
+    identity: &Identity,
+    inherited: Option<RouteScope>,
+) -> RouteScope {
+    if let Some(scope) = inherited {
+        return scope;
+    }
     let mut scope = route_scope(identity);
-    let pins = agent_pins(app, headers, identity);
+    let agent = resolve_client_agent(app, headers, identity);
+    let pins = agent_pins(app, &agent);
     if !pins.is_empty() {
-        scope.agent = resolve_client_agent(app, headers, identity);
+        scope.agent = agent;
         scope.agent_accounts = pins;
     }
     scope
 }
 
-fn agent_pins(app: &Inner, headers: &HeaderMap, identity: &Identity) -> Vec<String> {
+fn agent_pins(app: &Inner, agent: &str) -> Vec<String> {
     let Some(hook) = &app.agent_accounts else {
         return Vec::new();
     };
-    hook(&resolve_client_agent(app, headers, identity))
+    hook(agent)
 }
 
 fn account_scope_message(

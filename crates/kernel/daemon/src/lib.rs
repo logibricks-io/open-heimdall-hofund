@@ -67,6 +67,8 @@ mod d246_relay_effort_ids;
 mod d250_messages_refused;
 #[cfg(test)]
 mod d273_restricted_failover;
+#[cfg(test)]
+mod d278_agent_accounts;
 mod effort_variants;
 mod events;
 mod log_tail;
@@ -597,7 +599,7 @@ async fn start_inner(
     let pin_configs = runtime.config_updates();
     let pin_runtime = Arc::clone(&runtime);
     let agent_accounts: hofund_gateway::AgentAccountHook = Arc::new(move |agent| {
-        let config = pin_configs.borrow().clone();
+        let config = pin_configs.borrow();
         crate::agent_accounts::pins(&config, agent, &pin_runtime.subscription_states())
     });
     let request_agent: hofund_gateway::RequestAgentHook = Arc::new({

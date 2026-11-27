@@ -25,7 +25,11 @@ pub(crate) fn compact_signin_held(scope: &CallerScope, model: &str) -> Option<St
     if !scope.agent_accounts.is_empty()
         && !allows_account(&scope.agent_accounts, "codex", &reference)
     {
-        return Some(held_message(scope, model));
+        return Some(if scope.holds_accounts() {
+            held_message(scope, model)
+        } else {
+            agent_held_message(scope, model)
+        });
     }
     None
 }
@@ -118,6 +122,14 @@ fn held_message(scope: &CallerScope, model: &str) -> String {
         "Native compaction for {model} goes through the account Codex is signed in to, which the gateway key {:?} may not use; it may use {}. Native compaction has no other route: add the signed-in account to the key in hofund's gateway-key settings, or use one of hofund's models, whose compaction goes through a compaction_trigger on /responses and the key's accounts.",
         scope.key_name,
         key_account_names(scope),
+    )
+}
+
+fn agent_held_message(scope: &CallerScope, model: &str) -> String {
+    format!(
+        "Native compaction for {model} goes through the account Codex is signed in to, which agent {:?} may not use; it may use {}. Native compaction has no other route: change the signed-in account in the provider's Accounts by agent setting, or use one of hofund's models, whose compaction goes through a compaction_trigger on /responses and the agent's accounts.",
+        scope.agent,
+        scope.agent_accounts.join(", "),
     )
 }
 
@@ -251,10 +263,14 @@ mod tests {
             assert!(compact_signin_held(&named, "gpt-5").is_none());
         });
         let missed = CallerScope::new("writer", Vec::new())
+            .with_agent("writer")
             .with_agent_accounts(vec!["codex/other-account".to_owned()]);
         with_home(home, || {
             let held = compact_signin_held(&missed, "gpt-5").expect("held");
+            assert!(held.contains("writer"));
+            assert!(held.contains("Accounts by agent"));
             assert!(held.contains("codex/other-account"));
+            assert!(!held.contains("gateway-key settings"));
         });
     }
 

@@ -153,7 +153,12 @@ pub(super) async fn get(State(app): State<Arc<Inner>>, request: Request<Body>) -
     let router = app.snapshot.load();
     let candidates = match router.candidates(
         &model,
-        Some(&super::agent_scope(&app, request.headers(), &identity)),
+        Some(&super::agent_scope(
+            &app,
+            request.headers(),
+            &identity,
+            None,
+        )),
     ) {
         Ok(candidates) => candidates,
         Err(error) => {

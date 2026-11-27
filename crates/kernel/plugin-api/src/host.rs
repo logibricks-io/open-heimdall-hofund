@@ -1388,7 +1388,7 @@ impl PartialEq for GatewayHandle {
 
 impl Eq for GatewayHandle {}
 
-/// Gateway-key account scope for an authenticated inbound surface request.
+/// Account scope for an authenticated inbound surface request.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct CallerScope {
@@ -1396,6 +1396,8 @@ pub struct CallerScope {
     pub key_name: String,
     /// Allowed accounts or provider-key fingerprints. Empty allows every account.
     pub accounts: Vec<String>,
+    /// Agent whose pins apply, for refusal messages.
+    pub agent: String,
     /// Accounts by agent. Empty when this caller has no agent pin.
     ///
     /// A gateway-key account list holds every provider. These pins hold only
@@ -1410,8 +1412,16 @@ impl CallerScope {
         Self {
             key_name: key_name.into(),
             accounts,
+            agent: String::new(),
             agent_accounts: Vec::new(),
         }
+    }
+
+    /// Attaches the agent whose accounts apply.
+    #[must_use]
+    pub fn with_agent(mut self, agent: impl Into<String>) -> Self {
+        self.agent = agent.into();
+        self
     }
 
     /// Attaches the accounts one agent uses alone.
