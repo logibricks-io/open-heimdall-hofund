@@ -848,7 +848,7 @@ mod tests {
             .filter(|name| !name.is_empty())
             .collect();
         assert!(
-            commands.iter().any(|name| *name == "check_way_out"),
+            commands.contains(&"check_way_out"),
             "manifest commands: {commands:?}"
         );
         for name in commands {
