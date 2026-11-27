@@ -112,9 +112,7 @@ impl Provider for Anthropic {
         .await;
         match result {
             Ok(completion) => Ok(completion),
-            Err(error) => {
-                Err(crate::models::scope_refusal(&self.models, &model, error, true).await)
-            }
+            Err(error) => Err(crate::models::scope_refusal(&self.models, &model, error)),
         }
     }
 

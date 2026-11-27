@@ -36,7 +36,12 @@ async fn snapshot(base_url: &str) -> (tempfile::TempDir, hofund_router::Snapshot
     .expect("config");
     let registry: Arc<dyn super::DaemonRegistry> = Arc::new(super::RegistryAdapter);
     let dir = tempfile::tempdir().expect("temp dir");
-    let super::Built { built, limits, .. } = super::providers(
+    let super::Built {
+        built,
+        limits,
+        instances,
+        ..
+    } = super::providers(
         &config,
         &dir.path().join("hofund.toml"),
         None,
@@ -47,6 +52,13 @@ async fn snapshot(base_url: &str) -> (tempfile::TempDir, hofund_router::Snapshot
         &registry,
     )
     .expect("providers");
+    for instance in instances.values() {
+        instance
+            .upstream
+            .list_models(&hofund_plugin_api::ListQuery::new())
+            .await
+            .expect("catalog");
+    }
     let (routes, policy) = super::route_plan(&config, None, Some(&built), &limits);
     let cooldowns = Arc::new(Cooldowns::new(CooldownPolicy::default()));
     let (snapshot, _table) =

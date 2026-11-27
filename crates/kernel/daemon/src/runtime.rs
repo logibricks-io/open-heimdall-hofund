@@ -490,11 +490,12 @@ impl Runtime {
         let quotas = Arc::clone(&self.quotas);
         let registry = Arc::clone(&self.registry);
         host.on_listed(Arc::new(move |provider, models| {
+            let provider = provider.clone();
             let mut members = crate::rests::members_with_exclusions(&quotas);
             if crate::rests::preset_zero_price_free(registry.as_ref(), provider.preset.as_deref())
                 && crate::rests::mixed_free_and_paid(models)
             {
-                members.extend(credit_members(provider));
+                members.extend(credit_members(&provider));
             }
             rests
                 .lock()
@@ -959,20 +960,24 @@ impl Runtime {
     /// models or a mixed catalog has been read for that preset.
     fn release_observed_rests(&self) {
         let mut members = crate::rests::members_with_exclusions(&self.quotas);
-        if let (Some(host), Some(config)) = (self.models.get(), self.config.get()) {
+        let gated = if let (Some(host), Some(config)) = (self.models.get(), self.config.get()) {
             let config = config.borrow();
-            for provider in &config.providers {
-                if !crate::rests::preset_zero_price_free(
-                    self.registry.as_ref(),
-                    provider.preset.as_deref(),
-                ) {
-                    continue;
-                }
-                let cached = host.cached(&provider.id);
-                if crate::rests::mixed_free_and_paid(&cached.models) {
-                    members.extend(credit_members(provider));
-                }
-            }
+            config
+                .providers
+                .iter()
+                .filter(|provider| {
+                    crate::rests::preset_zero_price_free(
+                        self.registry.as_ref(),
+                        provider.preset.as_deref(),
+                    ) && crate::rests::mixed_free_and_paid(&host.cached(&provider.id).models)
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        for provider in &gated {
+            members.extend(credit_members(provider));
         }
         self.rests
             .lock()

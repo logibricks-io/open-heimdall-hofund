@@ -161,7 +161,7 @@ async fn d271_explicit_null_monthly_usage_marks_only_free_models() {
 }
 
 #[tokio::test]
-async fn d271_all_zero_text_price_is_recorded_only_for_the_go_preset() {
+async fn d271_all_zero_text_price_is_recorded_only_for_the_gated_preset() {
     let body = json!({"data": [{"id": "legacy-zero", "cost": {"text": {
         "input": {"price": 0, "cache": {"read": 0, "write": 0}},
         "output": {"price": 0}

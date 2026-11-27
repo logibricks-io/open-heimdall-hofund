@@ -2694,7 +2694,7 @@ mod tests {
     }
 
     #[test]
-    fn d271_zero_price_free_hop_follows_the_go_preset_only() {
+    fn d271_zero_price_free_hop_follows_the_gated_preset_only() {
         let zero = hofund_plugin_api::ModelSpec::new("legacy-zero", None)
             .expect("model")
             .with_prices(0, 0, 0);

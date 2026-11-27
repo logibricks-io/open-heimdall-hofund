@@ -446,13 +446,14 @@ async fn d271_mixed_explicit_free_catalog_scopes_only_the_relevant_refusals() {
             .await;
         let mut request = user_request(false);
         request.model = model.to_owned();
-        let result = OpenAiCompat::new(
-            OpenAiProtocol::Chat,
-            Endpoint::new("test", format!("{}/v1", server.uri())),
-        )
-        .expect("provider")
-        .execute(request, "openai-chat")
-        .await;
+        let mut endpoint = Endpoint::new("test", format!("{}/v1", server.uri()));
+        endpoint.zero_price_free = true;
+        let provider = OpenAiCompat::new(OpenAiProtocol::Chat, endpoint).expect("provider");
+        provider
+            .list_models(&hofund_plugin_api::ListQuery::new())
+            .await
+            .expect("list");
+        let result = provider.execute(request, "openai-chat").await;
         let error = match result {
             Ok(_) => panic!("refusal answered successfully"),
             Err(error) => error,
@@ -483,6 +484,43 @@ async fn d271_mixed_explicit_free_catalog_scopes_only_the_relevant_refusals() {
         Err(error) => error,
     };
     assert!(!error.scopes_model());
+}
+
+#[tokio::test]
+async fn d271_unflagged_refusal_does_not_fetch_models() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [
+            {"id": "paid-model"},
+            {"id": "free-model"}
+        ]})))
+        .expect(0)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(429).set_body_string(
+            r#"{"error":{"message":"rate limit exceeded","type":"rate_limit_error"}}"#,
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut request = user_request(false);
+    request.model = "paid-model".to_owned();
+    let result = OpenAiCompat::new(
+        OpenAiProtocol::Chat,
+        Endpoint::new("plain", format!("{}/v1", server.uri())),
+    )
+    .expect("provider")
+    .execute(request, "openai-chat")
+    .await;
+    let error = match result {
+        Ok(_) => panic!("refusal answered successfully"),
+        Err(error) => error,
+    };
+    assert!(!error.scopes_model());
+    server.verify().await;
 }
 
 #[tokio::test]

@@ -1,5 +1,6 @@
 //! Bounded live model lists and shared row metadata.
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::StreamExt;
@@ -48,6 +49,8 @@ const BOTH_AUTH_REFUSALS: &[&str] = &[
 pub(crate) struct ModelClient {
     pub endpoint: Endpoint,
     pub client: reqwest::Client,
+    /// Last successful live list. Refusal scoping reads this and does not fetch.
+    listed: Arc<Mutex<Option<ModelList>>>,
 }
 
 struct ListFailure(PluginError);
@@ -84,6 +87,7 @@ impl ModelClient {
         Ok(Self {
             endpoint: endpoint.clone(),
             client,
+            listed: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -135,6 +139,10 @@ impl ModelClient {
                     if let Some(choice) = learned {
                         list = list.with_auth_choice(choice);
                     }
+                    *self
+                        .listed
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner()) = Some(list.clone());
                     return Ok(list);
                 }
                 Err(error) => errors.push(self.redact_error(error)),
@@ -497,24 +505,24 @@ pub(crate) fn url_host(base: &str) -> String {
         .unwrap_or_default()
 }
 
-pub(crate) async fn scope_refusal(
-    client: &ModelClient,
+/// Whether a remembered catalog scopes `model`'s refusal.
+///
+/// An explicit free flag always counts. An all-zero recorded price counts
+/// only when `zero_price_free` is set. Callers pass the last successful list
+/// and do not fetch one.
+#[must_use]
+pub fn catalog_scopes_refusal(
+    models: &[ModelSpec],
     model: &str,
-    error: crate::ProviderError,
-    anthropic: bool,
-) -> crate::ProviderError {
-    let quota_or_credit = error.kind == crate::ProviderErrorKind::Quota || error.is_credit();
-    if !quota_or_credit && error.status != Some(429) {
-        return error;
-    }
-    let Ok(list) = client.live_list(&ListQuery::new(), anthropic).await else {
-        return error;
-    };
+    quota_or_credit: bool,
+    zero_price_free: bool,
+) -> bool {
     let mut requested = None;
     let mut free = false;
     let mut paid = false;
-    for listed in list.models() {
-        let explicitly_free = listed.free() == Some(true);
+    for listed in models {
+        let explicitly_free =
+            listed.free() == Some(true) || (zero_price_free && listed.costs_nothing());
         free |= explicitly_free;
         paid |= !explicitly_free;
         if listed.id().eq_ignore_ascii_case(model) {
@@ -522,12 +530,37 @@ pub(crate) async fn scope_refusal(
         }
     }
     let Some(requested_free) = requested else {
-        return error;
+        return false;
     };
-    if !free || !paid || (!requested_free && !quota_or_credit) {
+    free && paid && (requested_free || quota_or_credit)
+}
+
+pub(crate) fn scope_refusal(
+    client: &ModelClient,
+    model: &str,
+    error: crate::ProviderError,
+) -> crate::ProviderError {
+    let quota_or_credit = error.kind == crate::ProviderErrorKind::Quota || error.is_credit();
+    if !quota_or_credit && error.status != Some(429) {
         return error;
     }
-    error.with_model_scope()
+    let models = client
+        .listed
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+        .map(|list| list.models().to_vec())
+        .unwrap_or_default();
+    if catalog_scopes_refusal(
+        &models,
+        model,
+        quota_or_credit,
+        client.endpoint.zero_price_free,
+    ) {
+        error.with_model_scope()
+    } else {
+        error
+    }
 }
 
 fn model_specs(

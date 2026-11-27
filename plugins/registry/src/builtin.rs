@@ -5,13 +5,13 @@
 //! adapter. Chat, Responses, Messages, and Generative calls go through the SDK
 //! transport. A later pull request can move one adapter into its own plugin crate.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use futures_util::StreamExt;
 
 use hofund_plugin_api::{
     BuildError, Completion as PluginCompletion, ConfigError, CountOutcome as PluginCount,
-    CredentialStyle, DynUpstreamFactory, HeaderName, HostContext, HttpHandle, ListKind,
+    CredentialStyle, DynUpstreamFactory, HeaderName, HostContext, HttpHandle, ListKind, ModelSpec,
     PluginError, PluginId, ProtocolId, RawTable, RawValue, Request, Schema, SecretString,
     UpstreamFactory, UpstreamProvider, UpstreamSpec, ValidConfig,
 };
@@ -139,6 +139,7 @@ pub fn openai_compat(
         counts: false,
         bridged,
         zero_price_free,
+        catalog: Mutex::new(Vec::new()),
     }))
 }
 
@@ -211,6 +212,17 @@ struct Direct {
     counts: bool,
     bridged: Bridged,
     zero_price_free: bool,
+    /// Last successful list. Refusal scoping reads this and does not fetch.
+    catalog: Mutex<Vec<ModelSpec>>,
+}
+
+impl Direct {
+    fn catalog(&self) -> Vec<ModelSpec> {
+        self.catalog
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
 }
 
 #[async_trait]
@@ -240,7 +252,12 @@ impl UpstreamProvider for Direct {
                         | ProtocolId::ANTHROPIC_MESSAGES
                 ) =>
             {
-                Err(scope_plugin_refusal(&self.bridged, &model, error, self.zero_price_free).await)
+                Err(scope_plugin_refusal(
+                    &self.catalog(),
+                    &model,
+                    error,
+                    self.zero_price_free,
+                ))
             }
             Err(error) => Err(error),
         }
@@ -269,7 +286,16 @@ impl UpstreamProvider for Direct {
         &self,
         query: &hofund_plugin_api::ListQuery,
     ) -> Result<hofund_plugin_api::ModelList, PluginError> {
-        self.bridged.list_models(query).await
+        let list = self.bridged.list_models(query).await?;
+        self.remember_listed(list.models());
+        Ok(list)
+    }
+
+    fn remember_listed(&self, models: &[ModelSpec]) {
+        *self
+            .catalog
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = models.to_vec();
     }
 
     async fn forward(
@@ -296,8 +322,8 @@ impl UpstreamProvider for Direct {
     }
 }
 
-async fn scope_plugin_refusal(
-    bridged: &Bridged,
+fn scope_plugin_refusal(
+    models: &[ModelSpec],
     model: &str,
     error: PluginError,
     zero_price_free: bool,
@@ -307,31 +333,11 @@ async fn scope_plugin_refusal(
     if !quota_or_credit && error.status() != Some(429) {
         return error;
     }
-    let Ok(list) = bridged
-        .list_models(&hofund_plugin_api::ListQuery::new())
-        .await
-    else {
-        return error;
-    };
-    let mut requested = None;
-    let mut free = false;
-    let mut paid = false;
-    for listed in list.models() {
-        let explicitly_free =
-            listed.free() == Some(true) || zero_price_free && listed.costs_nothing();
-        free |= explicitly_free;
-        paid |= !explicitly_free;
-        if listed.id().eq_ignore_ascii_case(model) {
-            requested = Some(explicitly_free);
-        }
+    if hofund_provider::catalog_scopes_refusal(models, model, quota_or_credit, zero_price_free) {
+        error.with_model_scope()
+    } else {
+        error
     }
-    let Some(requested_free) = requested else {
-        return error;
-    };
-    if !free || !paid || (!requested_free && !quota_or_credit) {
-        return error;
-    }
-    error.with_model_scope()
 }
 
 impl UpstreamFactory for AnthropicFactory {
@@ -399,6 +405,7 @@ pub fn anthropic(
         counts: true,
         bridged,
         zero_price_free,
+        catalog: Mutex::new(Vec::new()),
     }))
 }
 
@@ -491,6 +498,7 @@ pub fn generative(
         counts: true,
         bridged: Bridged { inner: adapter },
         zero_price_free: false,
+        catalog: Mutex::new(Vec::new()),
     }))
 }
 
@@ -1017,7 +1025,7 @@ mod tests {
                     }}}
                 ]})),
             )
-            .expect(3)
+            .expect(2)
             .mount(&server)
             .await;
         Mock::given(method("POST"))
@@ -1047,10 +1055,17 @@ mod tests {
             let mut endpoint =
                 hofund_provider::Endpoint::new("test", format!("{}/v1", server.uri()));
             endpoint.preset = Some(preset.to_owned());
+            endpoint.zero_price_free = scoped;
             endpoint.api_key = "test-key".to_owned();
             let provider =
                 super::openai_compat(hofund_provider::OpenAiProtocol::Chat, endpoint, &host)
                     .expect("provider");
+            if scoped {
+                provider
+                    .list_models(&hofund_plugin_api::ListQuery::new())
+                    .await
+                    .expect("list");
+            }
             let result = provider
                 .execute(
                     hofund_plugin_api::Request::new(model),
