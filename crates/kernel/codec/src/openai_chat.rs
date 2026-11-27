@@ -21,6 +21,7 @@ use crate::jsonutil::{
     parse_object, require_string, take_bool, take_f64, take_i64, take_object, take_string,
     take_string_list, take_u64, to_bytes,
 };
+use crate::prompt_count::PromptCount;
 use crate::sse::{self, SseFrame, SseParser};
 use crate::{Codec, StreamDecoder};
 
@@ -120,6 +121,8 @@ struct Decoder {
     text_open: bool,
     thinking_open: bool,
     tools_open: BTreeSet<u32>,
+    /// Last positive prompt and cache counts this reply named.
+    prompt: PromptCount,
     /// A stop delta with no usage, held until the next chunk so a following
     /// usage-only chunk can join it.
     held: Option<MessageDelta>,
@@ -250,7 +253,11 @@ impl Decoder {
             });
         }
         let usage = match take_object(&mut object, "usage")? {
-            Some(usage) => Some(decode_usage(usage)?),
+            Some(usage) => {
+                let mut usage = decode_usage(usage)?;
+                self.prompt.fit(&mut usage);
+                Some(usage)
+            }
             None => None,
         };
         let mut events = Vec::new();

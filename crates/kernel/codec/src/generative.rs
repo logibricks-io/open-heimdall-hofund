@@ -33,6 +33,7 @@ use crate::jsonutil::{
     require_string, take_bool, take_f64, take_i64, take_object, take_string, take_string_list,
     take_u64, to_bytes,
 };
+use crate::prompt_count::PromptCount;
 use crate::sse::{self, SseFrame, SseParser};
 use crate::{Codec, StreamDecoder, StreamEncoder};
 
@@ -1152,6 +1153,8 @@ struct Decoder {
     text_open: bool,
     thinking_open: bool,
     next_tool: u32,
+    /// Last positive prompt and cache counts this reply named.
+    prompt: PromptCount,
 }
 
 impl StreamDecoder for Decoder {
@@ -1219,7 +1222,11 @@ impl Decoder {
             None => take_string(&mut object, "model")?,
         };
         let usage = match take_object(&mut object, "usageMetadata")? {
-            Some(usage) => Some(decode_usage(usage)?),
+            Some(usage) => {
+                let mut usage = decode_usage(usage)?;
+                self.prompt.fit(&mut usage);
+                Some(usage)
+            }
             None => None,
         };
         let candidates = take_candidates(&mut object)?;
