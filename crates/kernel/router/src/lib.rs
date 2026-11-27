@@ -399,6 +399,8 @@ struct Ordered {
     hops: Vec<Hop>,
     /// Other APIs of a member, asked only after that member's API is refused.
     protocol_alternates: Vec<Hop>,
+    /// Members Strict left out, asked only after a safety refusal.
+    strict_left: Vec<Hop>,
     hand_on: Vec<Hop>,
     reserves: BTreeMap<String, usize>,
     affinity: Option<ReplyRoute>,
@@ -1102,6 +1104,7 @@ impl Router {
             } else {
                 Vec::new()
             },
+            strict_left: ordered.strict_left,
             protocol_alternates,
             resolved,
             policy: self.policy.clone(),
@@ -1597,7 +1600,18 @@ impl Router {
                     .order(conversation, resolved.stays, &resolved.routing, &candidates);
             (decision, candidates)
         });
-        let (ordered, strict) = if let Some((decision, _)) = &decision {
+        let (ordered, strict, strict_left) = if let Some((decision, planned)) = &decision {
+            let kept = decision.order.iter().copied().collect::<BTreeSet<_>>();
+            let strict_left = if decision.strict {
+                ordered
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| !kept.contains(index) && !planned[*index].resting)
+                    .map(|(_, hop)| hop.clone())
+                    .collect()
+            } else {
+                Vec::new()
+            };
             (
                 decision
                     .order
@@ -1605,9 +1619,10 @@ impl Router {
                     .map(|index| ordered[*index].clone())
                     .collect::<Vec<_>>(),
                 decision.strict,
+                strict_left,
             )
         } else {
-            (ordered, false)
+            (ordered, false, Vec::new())
         };
         if decision.as_ref().is_some_and(|(decision, _)| decision.kept)
             && let Some(kept) = ordered.first()
@@ -1633,6 +1648,7 @@ impl Router {
         Ordered {
             hops,
             protocol_alternates,
+            strict_left,
             hand_on,
             reserves,
             affinity: conversation
@@ -2108,6 +2124,7 @@ struct DispatchState {
     hook: Option<Arc<dyn AttemptHook>>,
     rest_left: bool,
     hand_on: Vec<Hop>,
+    strict_left: Vec<Hop>,
     protocol_alternates: Vec<Hop>,
     resolved: Resolved,
     policy: FailoverPolicy,
@@ -2403,9 +2420,15 @@ impl DispatchState {
     /// own failure that is not momentary. The probe's failure is not known
     /// yet, and this check does not record the 30-second guard. A momentary
     /// rest, or a rate rest still inside that guard, must not make the probe
-    /// skip its queue wait.
+    /// skip its queue wait. Strict's separate reserve counts only for a
+    /// refusal, but the attempt cannot know which failure will arrive.
     fn another_candidate_follows(&self, index: usize) -> bool {
-        if self.hand_on_follows(HandOnFailure::Own) {
+        if self
+            .strict_left
+            .iter()
+            .any(|hop| self.strict_refusal_candidate(hop))
+            || self.hand_on_follows(HandOnFailure::Own)
+        {
             return true;
         }
         for hop in self.resolved.hops.iter().skip(index + 1) {
@@ -2515,6 +2538,19 @@ impl DispatchState {
         (start..self.resolved.hops.len()).collect()
     }
 
+    fn take_strict_refusal(&mut self) -> Option<Vec<usize>> {
+        if self.strict_left.is_empty() || !decision::safety_refused(&self.last.as_ref()?.1) {
+            return None;
+        }
+        let mut asking = Vec::new();
+        for hop in std::mem::take(&mut self.strict_left) {
+            if self.strict_refusal_candidate(&hop) {
+                asking.extend(self.push_primary_with_alternates(hop));
+            }
+        }
+        (!asking.is_empty()).then_some(asking)
+    }
+
     fn take_hand_on(&mut self) -> Option<Vec<usize>> {
         let error = &self.last.as_ref()?.1;
         let allows = self.policy.allows(error) || decision::asks_next(error);
@@ -2544,12 +2580,13 @@ impl DispatchState {
             match self.round(&asking, &mut busy, &mut ending).await {
                 Ok(Some(answered)) => {
                     let next = answered.index + 1;
-                    let has_continuation = self
-                        .resolved
-                        .hops
-                        .iter()
-                        .skip(next)
-                        .any(|hop| !self.protocol_alternate_idle(hop));
+                    let has_continuation = !self.strict_left.is_empty()
+                        || self
+                            .resolved
+                            .hops
+                            .iter()
+                            .skip(next)
+                            .any(|hop| !self.protocol_alternate_idle(hop));
                     let affinity_reason = self
                         .affinity
                         .as_ref()
@@ -2571,7 +2608,11 @@ impl DispatchState {
                         if let Some(trace) = self.trace.as_mut() {
                             trace.sync_open();
                         }
-                        let continuation = RouteContinuation { state: self, next };
+                        let continuation = RouteContinuation {
+                            state: Some(self),
+                            next,
+                            dispatched: false,
+                        };
                         return Ok(Routed {
                             upstream_id: answered.upstream_id,
                             provider_key_id: answered.provider_key_id,
@@ -2615,6 +2656,13 @@ impl DispatchState {
                     }
                     return Err(error);
                 }
+            }
+            if ending != Ending::Answered
+                && let Some(next) = self.take_strict_refusal()
+            {
+                asking = next;
+                busy.clear();
+                continue;
             }
             if ending != Ending::Answered
                 && let Some(next) = self.take_hand_on()
@@ -2663,29 +2711,27 @@ impl DispatchState {
             }
             break;
         }
-        let error_message = self
-            .last
-            .as_ref()
-            .map(|(_, error)| error.message().to_owned());
+        let last = self.last.map(|(upstream_id, error)| {
+            let model = self.last_model.as_deref().unwrap_or(&self.request.model);
+            let error = if decision::region_refused(&error) {
+                decision::with_region_agent_note(error, model)
+            } else {
+                decision::refusal_told(error, model, &upstream_id)
+            };
+            (upstream_id, error)
+        });
+        let error_message = last.as_ref().map(|(_, error)| error.message().to_owned());
         if let Some(trace) = self.trace.take() {
             trace.finish(
                 None,
                 None,
-                self.last.as_ref().and_then(|(_, error)| error.status()),
+                last.as_ref().and_then(|(_, error)| error.status()),
                 error_message.as_deref(),
                 None,
             );
         }
-        match self.last {
-            Some((upstream_id, error)) => {
-                let model = self.last_model.as_deref().unwrap_or(&self.request.model);
-                let error = if decision::region_refused(&error) {
-                    decision::with_region_agent_note(error, model)
-                } else {
-                    error
-                };
-                Err(RouterError::Upstream { upstream_id, error })
-            }
+        match last {
+            Some((upstream_id, error)) => Err(RouterError::Upstream { upstream_id, error }),
             None => {
                 let detail = if self.missing_detail.is_empty() {
                     String::new()
@@ -3396,6 +3442,15 @@ impl DispatchState {
         !self.member_skipped_for(hop, self.has_protocol_alternate(hop))
     }
 
+    fn strict_refusal_candidate(&self, hop: &Hop) -> bool {
+        self.askable_left_out(hop)
+            && self.cooldowns.as_ref().is_none_or(|cooldowns| {
+                cooldowns
+                    .cooling_for_model(hop.member.id(), &self.sent_for(hop))
+                    .is_none()
+            })
+    }
+
     fn has_protocol_alternate(&self, hop: &Hop) -> bool {
         let id = hop.member.id().to_string();
         self.protocol_alternates
@@ -3457,8 +3512,9 @@ enum Ending {
 
 /// The untried remainder of a route after a streamed member refuses.
 pub struct RouteContinuation {
-    state: DispatchState,
+    state: Option<DispatchState>,
     next: usize,
+    dispatched: bool,
 }
 
 impl RouteContinuation {
@@ -3468,7 +3524,66 @@ impl RouteContinuation {
     ///
     /// Returns the same errors as [`Router::dispatch`].
     pub async fn dispatch(self) -> Result<Routed, RouterError> {
-        self.state.run(self.next).await
+        self.dispatch_with(false).await
+    }
+
+    /// Asks the remaining members after the caller recognized a safety refusal.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Router::dispatch`].
+    pub async fn dispatch_safety_refusal(self) -> Result<Routed, RouterError> {
+        self.dispatch_with(true).await
+    }
+
+    async fn dispatch_with(mut self, safety_refusal: bool) -> Result<Routed, RouterError> {
+        self.dispatched = true;
+        let next = self.next;
+        let state = self.state.as_mut().expect("continuation state");
+        let safety_refusal = safety_refusal
+            || state
+                .last
+                .as_ref()
+                .is_some_and(|(_, error)| decision::safety_refused(error));
+        if safety_refusal {
+            for hop in std::mem::take(&mut state.strict_left) {
+                if state.strict_refusal_candidate(&hop) {
+                    state.push_primary_with_alternates(hop);
+                }
+            }
+        }
+        self.state
+            .take()
+            .expect("continuation state")
+            .run(next)
+            .await
+    }
+}
+
+impl Drop for RouteContinuation {
+    fn drop(&mut self) {
+        if self.dispatched {
+            return;
+        }
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        if state.strict_left.is_empty() {
+            return;
+        }
+        let Some(trace) = state.trace.take() else {
+            return;
+        };
+        let hop = &state.resolved.hops[self.next - 1];
+        let member = routing_member_label(hop);
+        let affinity = state.affinity.as_ref().map(|route| route.reason);
+        trace.finish(
+            Some(&member),
+            Some(hop.member.route_id()),
+            Some(200),
+            None,
+            affinity,
+        );
     }
 }
 

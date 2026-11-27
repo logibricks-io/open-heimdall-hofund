@@ -35,20 +35,22 @@ pub(crate) fn refusal_reason(value: &Value) -> Option<StopReason> {
     if code == "refusal" {
         return Some(StopReason::Refusal);
     }
-    if matches!(
-        code,
-        "content_filter"
-            | "content_policy_violation"
-            | "content_policy_rejected"
-            | "sensitive"
-            | "data_inspection_failed"
-            | "DataInspectionFailed"
-            | "SAFETY"
-            | "PROHIBITED_CONTENT"
-            | "BLOCKLIST"
-            | "SPII"
-            | "IMAGE_SAFETY"
-    ) || code.ends_with("SensitiveContentDetected")
+    if error.get("code").and_then(Value::as_u64) == Some(451)
+        || matches!(
+            code,
+            "content_filter"
+                | "content_policy_violation"
+                | "content_policy_rejected"
+                | "sensitive"
+                | "data_inspection_failed"
+                | "DataInspectionFailed"
+                | "SAFETY"
+                | "PROHIBITED_CONTENT"
+                | "BLOCKLIST"
+                | "SPII"
+                | "IMAGE_SAFETY"
+        )
+        || code.ends_with("SensitiveContentDetected")
         || policy_code(code)
         || code == "invalid_prompt" && flagged(message)
         || code == "1301" && message.contains("\u{654f}\u{611f}")
@@ -105,6 +107,21 @@ mod tests {
         );
         assert_eq!(
             refusal_reason(&json!({"error":{"code":"1113","message":"no funds"}})),
+            None
+        );
+    }
+
+    #[test]
+    fn d274_r1_numeric_legal_error_code_is_a_safety_refusal() {
+        let payload = json!({"error":{"code":451,"message":"The request was blocked."}});
+        assert_eq!(refusal_reason(&payload), Some(StopReason::ContentFilter));
+        let event = StreamEvent::Unknown(UnknownEvent {
+            name: "error".to_owned(),
+            payload,
+        });
+        assert!(refusal_error(&event));
+        assert_eq!(
+            refusal_reason(&json!({"error":{"code":452,"message":"other"}})),
             None
         );
     }
