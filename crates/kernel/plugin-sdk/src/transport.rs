@@ -1013,10 +1013,20 @@ fn quota_codes(text: &str) -> bool {
 }
 
 fn resets_at(text: &str) -> bool {
-    ((text.contains("reset at") || text.contains("resets at"))
-        && text.contains(|character: char| character.is_ascii_digit())
-        && (text.contains("utc") || text.contains("gmt")))
-        || window_reset_at(text)
+    dated_reset_with_offset(text) || window_reset_at(text)
+}
+
+fn dated_reset_with_offset(text: &str) -> bool {
+    static PATTERN: OnceLock<Option<regex::Regex>> = OnceLock::new();
+    PATTERN
+        .get_or_init(|| {
+            regex::Regex::new(
+                r"(?i)(?:\bresets? at|\x{5c06}\x{5728}|\x{5c06}\x{4e8e})\s*[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}[ T][0-9]{1,2}:[0-9]{2}:[0-9]{2}\s*[(\x{ff08}]?\s*(?:(?:UTC|GMT)[+-][0-9]{1,2}(?::?[0-9]{2})?|[+-][0-9]{4}(?:\s+[a-z]{2,5})?)\s*[)\x{ff09}]?\s*(?:\x{91cd}\x{7f6e}|[,.;\x{ff0c}\x{3002}\x{ff1b}])",
+            )
+            .ok()
+        })
+        .as_ref()
+        .is_some_and(|pattern| pattern.is_match(text))
 }
 
 fn window_reset_at(text: &str) -> bool {
@@ -1024,7 +1034,7 @@ fn window_reset_at(text: &str) -> bool {
     PATTERN
         .get_or_init(|| {
             regex::Regex::new(
-                r"(?:\byour limit will reset at|\x{60a8}\x{7684}\x{9650}\x{989d}\x{5c06}\x{5728})\s*\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?(\s*\S{0,3})",
+                r"(?:\byour limit will reset at|\x{60a8}\x{7684}\x{9650}\x{989d}\x{5c06}\x{5728})\s*[0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2}(?::[0-9]{2})?(\s*\S{0,3})",
             )
             .ok()
         })
@@ -2450,6 +2460,10 @@ mod tests {
                     .to_string(),
             ),
             (
+                "plain per-minute rate limit",
+                messages("Rate limit reached: 60 requests per minute"),
+            ),
+            (
                 "per-minute usage ceiling",
                 messages(
                     "\u{6bcf}\u{5206}\u{949f}\u{4f7f}\u{7528}\u{4e0a}\u{9650}\u{5df2}\u{8fbe}\u{5230}\u{ff0c}\u{8bf7}\u{7a0d}\u{540e}\u{518d}\u{8bd5}",
@@ -2459,6 +2473,98 @@ mod tests {
             assert!(!is_quota_error(429, body.as_bytes()), "{name}");
             let error = classify(429, None, body.into_bytes()).expect_err(name);
             assert_eq!(error.kind(), PluginErrorKind::Status, "{name}");
+        }
+    }
+
+    #[test]
+    fn d269_dated_reset_offsets_are_quota_despite_rate_type() {
+        let messages = |message: &str| {
+            serde_json::json!({
+                "type": "error",
+                "error": {"type": "rate_limit_error", "message": message}
+            })
+            .to_string()
+        };
+        for (name, body) in [
+            (
+                "Chinese UTC offset",
+                messages(
+                    "\u{60a8}\u{7684}\u{9650}\u{989d}\u{5c06}\u{5728} 2026-11-10 16:01:04 UTC+8 \u{91cd}\u{7f6e}\u{3002}",
+                ),
+            ),
+            (
+                "bracketed UTC offset",
+                messages(
+                    "\u{60a8}\u{7684}\u{9650}\u{989d}\u{5c06}\u{5728} 2026-11-06 17:13:04 (UTC+8) \u{91cd}\u{7f6e}\u{3002}",
+                ),
+            ),
+            (
+                "will-on with GMT offset",
+                messages(
+                    "\u{60a8}\u{7684}\u{9650}\u{989d}\u{5c06}\u{4e8e} 2026-11-10 16:01:04 GMT+08:30\u{91cd}\u{7f6e}\u{3002}",
+                ),
+            ),
+            (
+                "numeric offset and zone",
+                messages("Your usage will reset at 2026-10-25 23:59:59 +0800 CST."),
+            ),
+            (
+                "numeric offset without a zone",
+                messages("Your usage will reset at 2026-10-25 23:59:59 +0800."),
+            ),
+        ] {
+            assert!(is_quota_error(429, body.as_bytes()), "{name}");
+            let error = classify(429, None, body.into_bytes()).expect_err(name);
+            assert_eq!(error.kind(), PluginErrorKind::Quota, "{name}");
+        }
+    }
+
+    #[test]
+    fn d269_window_reset_suffixes_are_checked() {
+        let messages = |message: &str| {
+            serde_json::json!({
+                "type": "error",
+                "error": {"type": "rate_limit_error", "message": message}
+            })
+            .to_string()
+        };
+        for (name, body) in [
+            (
+                "English without a zone",
+                messages("Your limit will reset at 2026-11-10 16:01:04"),
+            ),
+            (
+                "English minute and punctuation",
+                messages("Your limit will reset at 2026-11-10 16:01."),
+            ),
+            (
+                "English with an offset",
+                messages("Your limit will reset at 2026-11-10 16:01:04 UTC+8."),
+            ),
+        ] {
+            assert!(is_quota_error(429, body.as_bytes()), "{name}");
+        }
+        for (name, body) in [
+            (
+                "cut seconds",
+                messages("Your limit will reset at 2026-11-10 16:01:1"),
+            ),
+            (
+                "cut offset",
+                messages("Your limit will reset at 2026-11-10 16:01:04 UTC+"),
+            ),
+            (
+                "offset without a terminator",
+                messages("Your limit will reset at 2026-11-10 16:01:04 UTC+8"),
+            ),
+            (
+                "non-ASCII digits",
+                messages(
+                    "Your limit will reset at \u{ff12}\u{ff10}\u{ff12}\u{ff16}-11-10 16:01:04",
+                ),
+            ),
+        ] {
+            assert!(!is_quota_error(429, body.as_bytes()), "{name}");
         }
     }
 
