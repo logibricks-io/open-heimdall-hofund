@@ -3158,14 +3158,10 @@ mod tests {
     fn d275_pace_drain_aliases_load_on_a_route_and_a_subscription() {
         for name in ["pace-drain", "pace-then-drain", "expiry-one-by-one"] {
             let config = load(&format!(
-                "[[providers]]\nid = \"one\"\npreset = \"openai\"\n[[routes]]\nmodel = \"demo\"\nrouting = \"{name}\"\nupstreams = [\"one\"]\n"
+                "[[subscriptions]]\nid = \"one\"\naccounts = \"*\"\nrouting = \"{name}\"\n[[routes]]\nmodel = \"demo\"\nrouting = \"{name}\"\nupstreams = [{{ subscription = \"one\" }}]\n"
             ))
-            .unwrap_or_else(|error| panic!("{name} on one upstream: {error}"));
+            .unwrap_or_else(|error| panic!("{name} on a route and subscription: {error}"));
             assert_eq!(config.routes[0].routing, "pace-drain", "{name}");
-            let config = load(&format!(
-                "[[subscriptions]]\nid = \"demo\"\naccounts = \"*\"\nrouting = \"{name}\"\n"
-            ))
-            .unwrap_or_else(|error| panic!("{name} on a subscription: {error}"));
             assert_eq!(config.subscriptions[0].routing, "pace-drain", "{name}");
         }
     }

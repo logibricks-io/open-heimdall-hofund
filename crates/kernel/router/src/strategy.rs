@@ -1133,6 +1133,7 @@ fn pace_drain_keep(seat: &Seat, pass: u8) -> bool {
 /// Before expiry, one by one. Picks the seat whose allowance a reset would
 /// waste soonest (weekly pace), then stays on it until it is used up, resting,
 /// or marked past by a quota or credit refusal, and picks again the same way.
+/// The refused seat is not eligible for that one re-pick when another is.
 /// A learner is asked once and is not the seat the pool keeps. The kept seat
 /// is stored while ordering, so asking again with nothing changed is the same
 /// order. Drain still stores its seat only after an answer, and ignores `past`.
@@ -1152,13 +1153,16 @@ fn pace_drain(pool: &str, seats: &[Seat], state: &StrategyState) -> Vec<usize> {
     } else {
         seats.iter().position(|seat| seat.key == stored_key)
     };
+    let refused = if past { at } else { None };
     let leave =
         at.is_none_or(|index| past || pace_drain_spent(&seats[index]) || seats[index].resting);
     if leave {
         let mut pick = None;
         for pass in 0..3 {
             if let Some(index) = paced.iter().copied().find(|index| {
-                !pace_drain_spent(&seats[*index]) && pace_drain_keep(&seats[*index], pass)
+                Some(*index) != refused
+                    && !pace_drain_spent(&seats[*index])
+                    && pace_drain_keep(&seats[*index], pass)
             }) {
                 pick = Some(index);
                 break;
