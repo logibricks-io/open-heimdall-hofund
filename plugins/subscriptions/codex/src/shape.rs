@@ -250,9 +250,27 @@ fn compaction_item(item: &Map<String, Value>) -> Option<Map<String, Value>> {
     native(item_type(part)).then(|| part.clone())
 }
 
-/// Input items fit for a request that keeps nothing: no references to
-/// stored items, no ids (nor a message's status, which goes with its id),
-/// a tool output without its call told as a note, and no system role.
+/// An agent message, including one the codec carried as a message's only
+/// otherwise-unknown content part. Its id and other fields are part of the
+/// client's item and stay on the top-level form sent to the backend.
+fn agent_message_item(item: &Map<String, Value>) -> Option<Map<String, Value>> {
+    if item_type(item) == "agent_message" {
+        return Some(item.clone());
+    }
+    if item_type(item) != "message" {
+        return None;
+    }
+    let parts = item.get("content")?.as_array()?;
+    let [Value::Object(part)] = parts.as_slice() else {
+        return None;
+    };
+    (item_type(part) == "agent_message").then(|| part.clone())
+}
+
+/// Input items fit for a request that keeps nothing: no references to stored
+/// items, no stored-item ids (agent-message ids are semantic and stay), no
+/// message status, a tool output without its call told as a note, and no system
+/// role.
 pub(crate) fn items(mut input: Vec<Value>) -> Vec<Value> {
     // call id -> the type of its output
     let mut calls: Vec<(String, &'static str)> = Vec::new();
@@ -293,6 +311,10 @@ pub(crate) fn items(mut input: Vec<Value>) -> Vec<Value> {
         };
         let kind = item_type(item);
         if kind == "item_reference" || (kind == "reasoning" && !replayable_reasoning(item)) {
+            continue;
+        }
+        if let Some(agent_message) = agent_message_item(item) {
+            out.push(Value::Object(agent_message));
             continue;
         }
         if let Some(mut compaction) = compaction_item(item) {

@@ -741,23 +741,20 @@ fn reasoning_request(id: &str, seal: &str) -> Request {
     request
 }
 
-fn d272_raw_item_request(item: Value) -> Request {
-    let mut fields = json::Map::new();
-    fields.insert("sealed_item".to_owned(), item);
-    let part = ContentPart::Thinking(ThinkingPart {
-        text: String::new(),
-        signature: None,
-        redacted: false,
-        data: None,
-        extensions: Extensions::from_map(fields),
+fn d272_decoded_item_request(item: Value) -> Request {
+    let body = json!({
+        "model": "gpt-5",
+        "stream": true,
+        "input": [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+            item
+        ]
     });
-    let mut request = streaming_request();
-    request.messages.push(Message {
-        role: Role::User,
-        content: vec![ContentPart::text("continue"), part],
-        extensions: Extensions::new(),
-    });
-    request
+    hofund_plugin_sdk::wire::decode_inbound(
+        ProtocolId::OPENAI_RESPONSES,
+        &json::to_vec(&body).expect("request body"),
+    )
+    .expect("decode through the Responses codec")
 }
 
 const UNREADABLE_JSON: &[(&str, &str)] = &[("content-type", "application/json")];
@@ -782,17 +779,19 @@ fn d272_agent_message_refusal_retries_execute_path_as_a_user_turn() {
         "recipient": "/root/research",
         "content": [{"type": "input_text", "text": "Message Type: NEW_TASK\nPayload:\nresearch the failure"}]
     });
-    block_on(
-        upstream_for(&host, &id).execute(d272_raw_item_request(item), ProtocolId::OPENAI_RESPONSES),
-    )
+    block_on(upstream_for(&host, &id).execute(
+        d272_decoded_item_request(item),
+        ProtocolId::OPENAI_RESPONSES,
+    ))
     .expect("retried");
     assert_eq!(host.http().calls().len(), 2);
     let first: Value = json::from_slice(host.http().calls()[0].body()).expect("first body");
     let second: Value = json::from_slice(host.http().calls()[1].body()).expect("second body");
     assert!(first["input"].as_array().is_some_and(|items| {
-        items
-            .iter()
-            .any(|item| item.get("type") == Some(&json!("agent_message")))
+        items.iter().any(|item| {
+            item.get("type") == Some(&json!("agent_message"))
+                && item.get("id") == Some(&json!("amsg_task"))
+        })
     }));
     let rewritten = second["input"]
         .as_array()
@@ -817,6 +816,91 @@ fn d272_agent_message_refusal_retries_execute_path_as_a_user_turn() {
                 == Some("Message Type: NEW_TASK\nPayload:\nresearch the failure")
         })
     }));
+}
+
+#[test]
+fn d272_foreign_seal_refusal_retries_execute_path_without_named_item() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    host.http().enqueue_response(
+        400,
+        UNREADABLE_JSON,
+        br#"{"error":{"message":"The encrypted content for item amsg_foreign could not be verified. Reason: Encrypted content could not be decrypted or parsed.","code":"invalid_encrypted_content"}}"#.to_vec(),
+    );
+    host.http()
+        .enqueue(b"event: response.completed\ndata: {}\n\n".to_vec());
+    let item = json!({
+        "type": "agent_message",
+        "id": "amsg_foreign",
+        "author": "/root/sub",
+        "recipient": "/root",
+        "content": [
+            {"type": "input_text", "text": "Message Type: MESSAGE\nTask name: /root\nSender: /root/sub\nPayload:\n"},
+            {"type": "encrypted_content", "encrypted_content": "foreign-seal"}
+        ]
+    });
+    block_on(upstream_for(&host, &id).execute(
+        d272_decoded_item_request(item),
+        ProtocolId::OPENAI_RESPONSES,
+    ))
+    .expect("retried");
+    assert_eq!(host.http().calls().len(), 2);
+    let first: Value = json::from_slice(host.http().calls()[0].body()).expect("first body");
+    let second: Value = json::from_slice(host.http().calls()[1].body()).expect("second body");
+    assert!(first["input"].as_array().is_some_and(|items| {
+        items.iter().any(|item| {
+            item.get("type") == Some(&json!("agent_message"))
+                && item.get("id") == Some(&json!("amsg_foreign"))
+        })
+    }));
+    assert!(second["input"].as_array().is_some_and(|items| {
+        items
+            .iter()
+            .all(|item| item.get("type") != Some(&json!("agent_message")))
+    }));
+}
+
+#[test]
+fn d272_foreign_seal_refusal_retries_execute_path_with_note() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    host.http().enqueue_response(
+        400,
+        UNREADABLE_JSON,
+        br#"{"error":{"message":"The encrypted content for item amsg_foreign could not be verified. Reason: Encrypted content could not be decrypted or parsed.","code":"invalid_encrypted_content"}}"#.to_vec(),
+    );
+    host.http()
+        .enqueue(b"event: response.completed\ndata: {}\n\n".to_vec());
+    let item = json!({
+        "type": "agent_message",
+        "author": "/root/sub",
+        "recipient": "/root",
+        "content": [
+            {"type": "input_text", "text": "Message Type: MESSAGE\nTask name: /root\nSender: /root/sub\nPayload:\n"},
+            {"type": "encrypted_content", "encrypted_content": "foreign-seal"}
+        ]
+    });
+    block_on(upstream_for(&host, &id).execute(
+        d272_decoded_item_request(item),
+        ProtocolId::OPENAI_RESPONSES,
+    ))
+    .expect("retried");
+    assert_eq!(host.http().calls().len(), 2);
+    let second: Value = json::from_slice(host.http().calls()[1].body()).expect("second body");
+    let message = second["input"]
+        .as_array()
+        .expect("input")
+        .iter()
+        .find(|item| item.get("type") == Some(&json!("agent_message")))
+        .expect("agent message kept");
+    assert_eq!(message["content"][1]["type"], "input_text");
+    assert!(
+        message["content"][1]["text"]
+            .as_str()
+            .is_some_and(|note| note.contains("left out") && note.contains("/root/sub"))
+    );
 }
 
 #[test]
