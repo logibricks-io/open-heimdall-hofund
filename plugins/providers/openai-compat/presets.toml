@@ -413,6 +413,7 @@ note = "open coding models, $10/month"
 chat = "https://opencode.ai/zen/go/v1"
 responses = "https://opencode.ai/zen/go/v1"
 anthropic = "https://opencode.ai/zen/go"
+decide = "https://opencode.ai/inference/go/systemone/v1"
 website = "https://opencode.ai/docs/go"
 keys_url = "https://opencode.ai/auth"
 

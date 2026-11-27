@@ -1286,6 +1286,13 @@ const BATCH_DETAILS: &[(&str, Details)] = &[
         },
     ),
     (
+        "opencode-go",
+        Details {
+            decide: "https://opencode.ai/inference/go/systemone/v1",
+            ..NO_DETAILS
+        },
+    ),
+    (
         "opencode-zen",
         Details {
             key_hint: "optional: free models need no key",
@@ -1928,6 +1935,15 @@ fn moved_decide_only_row_reports_explicit_wire_error() {
 fn moved_decide_only_row_preserves_decide_url() {
     let (preset, _) = find_preset("typesafe").expect("moved decide-only preset");
     assert_eq!(preset.decide, "https://api.typesafe.ai/v1");
+}
+
+#[test]
+fn d276_go_preset_declares_decide_base() {
+    let (preset, _) = find_preset("opencode-go").expect("Go preset");
+    assert_eq!(
+        preset.decide,
+        "https://opencode.ai/inference/go/systemone/v1"
+    );
 }
 
 #[test]
