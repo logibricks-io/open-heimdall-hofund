@@ -13,6 +13,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use thiserror::Error;
 
+mod agent_accounts;
 mod allow;
 mod groups_write;
 mod migrate;
@@ -23,6 +24,7 @@ mod ruleparse;
 mod settings;
 mod visible;
 
+pub use agent_accounts::{AccountName, edit_agent_account, move_agent_account};
 pub use allow::{
     ALLOW_IPS_ENV, IpNetwork, NetworkSettings, TRUST_PROXY_ENV, allow_ips_env, effective_network,
     trust_proxy_env,
@@ -423,6 +425,12 @@ pub struct Provider {
     pub key_weight: u64,
     /// Additional API keys, in candidate order after the first key.
     pub keys: Vec<ProviderKey>,
+    /// Agent id to the account id or key fingerprint that agent uses alone.
+    ///
+    /// An agent with no entry uses every account of this provider. A stored
+    /// fingerprint that is no longer one of this provider's keys is ignored
+    /// when a request is routed.
+    pub agent_accounts: BTreeMap<String, String>,
     /// How many keys take requests; the rest wait in reserve. Absent uses the
     /// plugin's declared default, and zero means no limit.
     pub at_once: Option<u64>,
@@ -845,6 +853,11 @@ pub struct Subscription {
     pub at_once: Option<u64>,
     /// Conversation affinity for routes that do not override it.
     pub stays: Stays,
+    /// Agent id to the account id that agent uses alone.
+    ///
+    /// An agent with no entry uses every account. An id that is not a current
+    /// member is ignored when a request is routed.
+    pub agent_accounts: BTreeMap<String, String>,
     /// Vendor host, client id, and any other plugin setting.
     ///
     /// The empty-string rule is the same as [`Provider::options`].
@@ -1079,6 +1092,7 @@ impl fmt::Debug for Provider {
             .field("key_plan", &self.key_plan)
             .field("key_weight", &self.key_weight)
             .field("keys", &self.keys)
+            .field("agent_accounts", &self.agent_accounts)
             .field("at_once", &self.at_once)
             .field("quirks", &self.quirks)
             .field("headers", &RedactedPairs(&self.headers))
@@ -1099,6 +1113,7 @@ impl fmt::Debug for Subscription {
             .field("id", &self.id)
             .field("accounts", &self.accounts)
             .field("account_weights", &self.account_weights)
+            .field("agent_accounts", &self.agent_accounts)
             .field("options", &self.options)
             .finish()
     }
@@ -1333,6 +1348,8 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
         let options = options_of(&provider, &mut warnings)?;
         let key_protocol = validated_key_protocol(&provider.id, provider.key_protocol)?;
         let keys = validated_keys(&provider.id, provider.keys)?;
+        let agent_accounts =
+            agent_accounts::normalize_agent_accounts(&provider.id, provider.agent_accounts)?;
         if !matches!(
             provider.balance.method.trim().to_uppercase().as_str(),
             "" | "GET" | "POST"
@@ -1369,6 +1386,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             key_plan: provider.key_plan,
             key_weight,
             keys,
+            agent_accounts,
             at_once,
             quirks: provider.quirks,
             headers: provider.headers,
@@ -1434,6 +1452,10 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             )));
         }
         let at_once = validated_at_once("subscription", &subscription.id, subscription.at_once)?;
+        let agent_accounts = agent_accounts::normalize_agent_accounts(
+            &subscription.id,
+            subscription.agent_accounts,
+        )?;
         subscriptions.push(Subscription {
             id: subscription.id,
             accounts,
@@ -1441,6 +1463,7 @@ fn validate(raw: RawFile) -> Result<Config, ConfigError> {
             routing,
             at_once,
             stays: subscription.stays,
+            agent_accounts,
             options: prune_table(options),
         });
     }
@@ -2554,6 +2577,8 @@ struct RawProvider {
     #[serde(default)]
     keys: Vec<ProviderKey>,
     #[serde(default)]
+    agent_accounts: BTreeMap<String, String>,
+    #[serde(default)]
     at_once: Option<u64>,
     #[serde(default)]
     quirks: Option<String>,
@@ -2602,6 +2627,8 @@ struct RawSubscription {
     accounts: String,
     #[serde(default)]
     account_weights: BTreeMap<String, u64>,
+    #[serde(default)]
+    agent_accounts: BTreeMap<String, String>,
     #[serde(default = "default_smart")]
     routing: String,
     #[serde(default)]
@@ -2645,6 +2672,7 @@ impl fmt::Debug for RawProvider {
             .field("key_plan", &self.key_plan)
             .field("key_weight", &self.key_weight)
             .field("keys", &self.keys)
+            .field("agent_accounts", &self.agent_accounts)
             .field("quirks", &self.quirks)
             .field("headers", &RedactedPairs(&self.headers))
             .field("max_output_tokens", &self.max_output_tokens)
@@ -2671,6 +2699,7 @@ impl fmt::Debug for RawSubscription {
             .field("id", &self.id)
             .field("accounts", &self.accounts)
             .field("account_weights", &self.account_weights)
+            .field("agent_accounts", &self.agent_accounts)
             .field("options", &self.options)
             .finish()
     }
@@ -4362,5 +4391,63 @@ weight = 2
         assert!(!super::ensure_config_file(&path).expect("keep"));
         let text = std::fs::read_to_string(&path).expect("read");
         assert!(text.contains("127.0.0.1:9"));
+    }
+
+    #[test]
+    fn d278_provider_keeps_an_agent_account_pin() {
+        let loaded = load(
+            "[[providers]]\nid = \"relay\"\nprotocol = \"generative-language\"\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key = \"key-first\"\n\
+             [[providers.keys]]\nkey = \"key-second\"\nname = \"Second\"\n\
+             [providers.agent_accounts]\nWriter = \"second\"\nblank = \"\"\n",
+        )
+        .expect("agent account pins are configuration");
+        let pins = &loaded.providers[0].agent_accounts;
+        assert_eq!(pins.get("writer").map(String::as_str), Some("second"));
+        assert!(!pins.contains_key("Writer"));
+        assert!(!pins.contains_key("blank"));
+        let repeated = load(
+            "[[providers]]\nid = \"relay\"\nprotocol = \"generative-language\"\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key = \"key-first\"\n\
+             [providers.agent_accounts]\nwriter = \"one\"\nWriter = \"two\"\n",
+        );
+        assert!(repeated.is_err(), "the same agent cannot be pinned twice");
+        let empty_agent = load(
+            "[[providers]]\nid = \"relay\"\nprotocol = \"generative-language\"\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key = \"key-first\"\n\
+             [providers.agent_accounts]\n\" \" = \"one\"\n",
+        );
+        assert!(empty_agent.is_err(), "an agent id is required");
+    }
+
+    #[test]
+    fn d278_edit_agent_account_refuses_an_unknown_account_and_replace_moves_it() {
+        use super::{AccountName, edit_agent_account, move_agent_account};
+        let text = "[[providers]]\nid = \"relay\"\nprotocol = \"generative-language\"\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key = \"key-first\"\n";
+        let known = [
+            AccountName {
+                id: "aaaaaaaaaa".to_owned(),
+                name: "First".to_owned(),
+            },
+            AccountName {
+                id: "bbbbbbbbbb".to_owned(),
+                name: "Second".to_owned(),
+            },
+        ];
+        let missing = edit_agent_account(text, "relay", "writer", "third", &known);
+        assert!(missing.is_err(), "an unknown account is refused");
+        assert!(
+            edit_agent_account(text, "relay", " ", "aaaaaaaaaa", &known).is_err(),
+            "an empty agent id is refused"
+        );
+        let edited = edit_agent_account(text, "relay", "Writer", "second", &known).expect("name");
+        let pins = &load(&edited).expect("load").providers[0].agent_accounts;
+        assert_eq!(pins.get("writer").map(String::as_str), Some("bbbbbbbbbb"));
+        let moved = move_agent_account(&edited, "relay", "bbbbbbbbbb", "cccccccccc").expect("move");
+        let pins = &load(&moved).expect("moved").providers[0].agent_accounts;
+        assert_eq!(pins.get("writer").map(String::as_str), Some("cccccccccc"));
+        let cleared = edit_agent_account(&moved, "relay", "writer", "", &known).expect("clear");
+        assert!(
+            load(&cleared).expect("cleared").providers[0]
+                .agent_accounts
+                .is_empty()
+        );
     }
 }

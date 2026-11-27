@@ -1396,6 +1396,11 @@ pub struct CallerScope {
     pub key_name: String,
     /// Allowed accounts or provider-key fingerprints. Empty allows every account.
     pub accounts: Vec<String>,
+    /// Accounts by agent. Empty when this caller has no agent pin.
+    ///
+    /// A gateway-key account list holds every provider. These pins hold only
+    /// the providers they name.
+    pub agent_accounts: Vec<String>,
 }
 
 impl CallerScope {
@@ -1405,13 +1410,39 @@ impl CallerScope {
         Self {
             key_name: key_name.into(),
             accounts,
+            agent_accounts: Vec::new(),
         }
+    }
+
+    /// Attaches the accounts one agent uses alone.
+    #[must_use]
+    pub fn with_agent_accounts(mut self, pins: Vec<String>) -> Self {
+        self.agent_accounts = pins;
+        self
     }
 
     /// Whether the key limits which accounts a relay may spend.
     #[must_use]
     pub fn holds_accounts(&self) -> bool {
         !self.accounts.is_empty()
+    }
+
+    /// Whether native sign-in for `provider` must follow this caller's accounts.
+    ///
+    /// A gateway-key account list holds every provider. An agent pin holds only
+    /// a provider it names.
+    #[must_use]
+    pub fn account_holds_provider(&self, provider: &str) -> bool {
+        if self.holds_accounts() {
+            return true;
+        }
+        let provider = provider.trim().to_lowercase();
+        self.agent_accounts.iter().any(|held| {
+            held.trim()
+                .to_lowercase()
+                .split_once('/')
+                .is_some_and(|(id, _)| id == provider)
+        })
     }
 }
 

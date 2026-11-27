@@ -406,8 +406,12 @@ pub(crate) fn mutate(
         }
     }
     let entries = entries.into_iter().map(|key| key.entry).collect::<Vec<_>>();
-    let text = hofund_config::edit_provider_keys(text, provider_id, &entries)
+    let mut text = hofund_config::edit_provider_keys(text, provider_id, &entries)
         .map_err(|error| error.to_string())?;
+    if !before.is_empty() && !after.is_empty() && before != after {
+        text = hofund_config::move_agent_account(&text, provider_id, &before, &after)
+            .map_err(|error| error.to_string())?;
+    }
     Ok(Mutation {
         text,
         changed,
@@ -582,6 +586,26 @@ mod tests {
         assert_eq!(replaced.moves.len(), 1);
         let provider = &load(&replaced.text).expect("replaced").providers[0];
         assert_eq!(provider.api_key, "new-third");
+    }
+
+    #[test]
+    fn d278_replace_moves_an_agent_account_pin_to_the_new_fingerprint() {
+        let pinned = format!(
+            "[[providers]]\nid = \"p\"\nprotocol = \"generative-language\"\nbase_url = \"http://127.0.0.1:9\"\napi_key = \"first\"\n[providers.agent_accounts]\nwriter = \"{}\"\n",
+            key_id("first")
+        );
+        let replaced = change(
+            &pinned,
+            hofund_control_proto::ProviderKeyAction::Replace,
+            &key_id("first"),
+            &["next-first"],
+        );
+        let pins = &load(&replaced.text).expect("replaced").providers[0].agent_accounts;
+        assert_eq!(
+            pins.get("writer").map(String::as_str),
+            Some(key_id("next-first").as_str())
+        );
+        assert!(!replaced.text.contains(&key_id("first")));
     }
 
     #[test]

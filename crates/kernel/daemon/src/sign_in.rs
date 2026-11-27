@@ -2046,6 +2046,7 @@ mod tests {
                 routing: "smart".to_owned(),
                 at_once: None,
                 stays: Stays::Auto,
+                agent_accounts: BTreeMap::new(),
                 options: BTreeMap::new(),
             }],
             warnings: Vec::new(),

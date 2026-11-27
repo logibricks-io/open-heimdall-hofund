@@ -346,6 +346,7 @@ async fn k8_accounts_only_key_holds_models_on_every_route_and_the_list() {
     let scope = hofund_router::RouteScope {
         models: identity.models,
         accounts: identity.accounts,
+        ..hofund_router::RouteScope::default()
     };
     let router = fixture.snapshot.load();
     assert!(router.models_scoped(Some(&scope)) == ["demo"]);

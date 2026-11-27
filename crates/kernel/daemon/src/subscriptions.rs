@@ -221,6 +221,18 @@ impl SubscriptionState {
         self.ask.install(backend);
     }
 
+    /// `plugin/account` when `reference` is a current member. A signed-out
+    /// account is not a pin.
+    pub(crate) fn agent_account_pin(&self, reference: &str) -> Option<String> {
+        let accounts = self
+            .members()
+            .iter()
+            .map(|member| member.account.as_str().to_owned())
+            .collect::<Vec<_>>();
+        let refs = accounts.iter().map(String::as_str).collect::<Vec<_>>();
+        crate::agent_accounts::subscription_pin(self.plugin.as_str(), &refs, reference)
+    }
+
     /// The current members, in route order.
     pub(crate) fn members(&self) -> Vec<SubscriptionMember> {
         self.members.lock().expect("subscription members").clone()

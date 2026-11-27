@@ -151,7 +151,10 @@ pub(super) async fn get(State(app): State<Arc<Inner>>, request: Request<Body>) -
         return text_response(StatusCode::BAD_REQUEST, "a realtime session needs a model");
     }
     let router = app.snapshot.load();
-    let candidates = match router.candidates(&model, Some(&super::route_scope(&identity))) {
+    let candidates = match router.candidates(
+        &model,
+        Some(&super::agent_scope(&app, request.headers(), &identity)),
+    ) {
         Ok(candidates) => candidates,
         Err(error) => {
             let (status, message) = super::stream_error(&error);
