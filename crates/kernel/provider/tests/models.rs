@@ -138,7 +138,7 @@ async fn d271_explicit_null_monthly_usage_marks_only_free_models() {
         .mount(&server)
         .await;
     let mut endpoint = endpoint(&server, "/v1");
-    endpoint.preset = Some("opencode-go".to_owned());
+    endpoint.zero_price_free = true;
     let listed = openai(endpoint)
         .list_models(&ListQuery::new())
         .await
@@ -184,7 +184,7 @@ async fn d271_all_zero_text_price_is_recorded_only_for_the_go_preset() {
         .expect("zero-priced row");
     assert!(
         !unscoped.costs_nothing(),
-        "an all-zero price outside the go preset must not be free"
+        "an all-zero price without the flag must not be free"
     );
 
     let gated = MockServer::start().await;
@@ -195,7 +195,7 @@ async fn d271_all_zero_text_price_is_recorded_only_for_the_go_preset() {
         .mount(&gated)
         .await;
     let mut endpoint = endpoint(&gated, "/v1");
-    endpoint.preset = Some("opencode-go".to_owned());
+    endpoint.zero_price_free = true;
     let listed = openai(endpoint)
         .list_models(&ListQuery::new())
         .await

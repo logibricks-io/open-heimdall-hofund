@@ -83,6 +83,8 @@ pub struct Endpoint {
     pub realtime_url: String,
     /// Catalog preset id, when this endpoint came from one.
     pub preset: Option<String>,
+    /// The preset records an all-zero text price as a free model.
+    pub zero_price_free: bool,
     /// Credential sent with each call. Empty when the upstream does not use one.
     pub api_key: String,
     /// Which header carries [`Self::api_key`].
@@ -143,6 +145,7 @@ impl std::fmt::Debug for Endpoint {
                     }),
             )
             .field("preset", &self.preset)
+            .field("zero_price_free", &self.zero_price_free)
             .field("api_key", &"[redacted]")
             .field("credential", &self.credential)
             .field(
@@ -169,6 +172,7 @@ impl Endpoint {
             base_url: base_url.into(),
             realtime_url: String::new(),
             preset: None,
+            zero_price_free: false,
             api_key: String::new(),
             credential: Credential::Default,
             headers: Vec::new(),
@@ -1524,6 +1528,7 @@ mod tests {
             base_url: "https://api.openai.com/v1".to_owned(),
             realtime_url: String::new(),
             preset: None,
+            zero_price_free: false,
             api_key: String::new(),
             credential: Credential::Default,
             headers: Vec::new(),

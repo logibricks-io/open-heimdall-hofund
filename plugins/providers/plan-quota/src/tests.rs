@@ -305,16 +305,10 @@ fn d271_open_code_windows_exclude_only_explicit_free_models() {
                 .await
                 .expect("plan");
         for window in cards[0].windows() {
-            let debug = format!("{window:?}");
-            assert!(
-                debug.contains("excluded_models: [\"free-model\", \"legacy-zero\"]"),
-                "{debug}"
+            assert_eq!(
+                window.excluded_models(),
+                ["free-model".to_owned(), "legacy-zero".to_owned()],
             );
-            assert!(!debug.contains("paid-model"), "{debug}");
-            assert!(!debug.contains("missing"), "{debug}");
-            assert!(!debug.contains("number"), "{debug}");
-            assert!(!debug.contains("object"), "{debug}");
-            assert!(!debug.contains("string"), "{debug}");
         }
     });
 }

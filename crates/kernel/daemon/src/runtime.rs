@@ -18,8 +18,8 @@ use crate::membership::{self, Table};
 use crate::rests::RestStore;
 use crate::subscriptions::{self, ModelPolls, QuotaPolls, Subscriptions};
 use crate::{
-    Built, DaemonError, DaemonRegistry, Instance, ModelsHost, RouterParts, providers, route_plan,
-    router,
+    Built, DaemonError, DaemonRegistry, Instance, ModelsHost, RouterParts, providers,
+    route_plan_gated, router,
 };
 
 /// Cooldown observer tick. One second keeps cooled/recovered events prompt
@@ -488,9 +488,10 @@ impl Runtime {
         let rests = Arc::clone(&self.rests);
         let cooldowns = Arc::clone(&self.cooldowns);
         let quotas = Arc::clone(&self.quotas);
+        let registry = Arc::clone(&self.registry);
         host.on_listed(Arc::new(move |provider, models| {
             let mut members = crate::rests::members_with_exclusions(&quotas);
-            if crate::rests::preset_records_zero_price(provider.preset.as_deref())
+            if crate::rests::preset_zero_price_free(registry.as_ref(), provider.preset.as_deref())
                 && crate::rests::mixed_free_and_paid(models)
             {
                 members.extend(credit_members(provider));
@@ -586,11 +587,12 @@ impl Runtime {
             }
         }
         crate::validate_route_targets(config)?;
-        let (routes, policy) = route_plan(
+        let (routes, policy) = route_plan_gated(
             config,
             self.models.get().map(AsRef::as_ref),
             Some(&built),
             &limits,
+            &|id| crate::rests::preset_zero_price_free(self.registry.as_ref(), Some(id)),
         );
         // Publication cannot fail after the file is written: every routed
         // provider must already be built.
@@ -960,7 +962,10 @@ impl Runtime {
         if let (Some(host), Some(config)) = (self.models.get(), self.config.get()) {
             let config = config.borrow();
             for provider in &config.providers {
-                if !crate::rests::preset_records_zero_price(provider.preset.as_deref()) {
+                if !crate::rests::preset_zero_price_free(
+                    self.registry.as_ref(),
+                    provider.preset.as_deref(),
+                ) {
                     continue;
                 }
                 let cached = host.cached(&provider.id);

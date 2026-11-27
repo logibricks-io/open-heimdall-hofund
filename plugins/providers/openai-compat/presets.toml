@@ -409,6 +409,7 @@ id = "opencode-go"
 name = "OpenCode Go"
 kind = "relay"
 catalog = "opencode-go"
+zero_price_free = true
 note = "open coding models, $10/month"
 chat = "https://opencode.ai/zen/go/v1"
 responses = "https://opencode.ai/zen/go/v1"

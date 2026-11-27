@@ -2058,7 +2058,10 @@ impl ModelsHost {
         }
         let (models, dropped) = hofund_provider::parse_model_rows(
             &rows,
-            crate::rests::preset_records_zero_price(provider.preset.as_deref()),
+            crate::rests::preset_zero_price_free(
+                self.registry.as_ref(),
+                provider.preset.as_deref(),
+            ),
         )
         .map_err(show)?;
         let mut merged = Merged::default();

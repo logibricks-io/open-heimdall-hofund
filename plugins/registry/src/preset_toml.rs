@@ -37,6 +37,9 @@ pub struct PresetToml {
     pub no_key: bool,
     #[serde(default)]
     pub no_list: bool,
+    /// An all-zero text price is a free model for this preset.
+    #[serde(default)]
+    pub zero_price_free: bool,
     #[serde(default)]
     pub options_base: bool,
     #[serde(default)]
@@ -464,7 +467,7 @@ pub fn render_preset(preset: &PresetToml, plugin: &str) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "CompiledPreset {{ id: {:?}, plugin: {:?}, name: {:?}, kind: {:?}, short: {:?}, note: {:?}, catalog: {:?}, website: {:?}, keys_url: {:?}, site_host: {:?}, key_hint: {:?}, no_key: {}, no_list: {}, options_base: {}, hosts: {}, only: {:?}, models: {}, header_hints: {}, endpoint: {:?}, endpoint_hint: {:?}, endpoint_needed: {:?}, region_label: {:?}, decide: {:?}, chat: {:?}, responses: {:?}, anthropic: {:?}, generative: {:?}, realtime: {:?}, config: &[{}], regions: &[{}] }}",
+        "CompiledPreset {{ id: {:?}, plugin: {:?}, name: {:?}, kind: {:?}, short: {:?}, note: {:?}, catalog: {:?}, website: {:?}, keys_url: {:?}, site_host: {:?}, key_hint: {:?}, no_key: {}, no_list: {}, options_base: {}, hosts: {}, only: {:?}, models: {}, header_hints: {}, endpoint: {:?}, endpoint_hint: {:?}, endpoint_needed: {:?}, region_label: {:?}, decide: {:?}, chat: {:?}, responses: {:?}, anthropic: {:?}, generative: {:?}, realtime: {:?}, config: &[{}], regions: &[{}], zero_price_free: {} }}",
         preset.id,
         plugin,
         preset.name.as_deref().unwrap_or(""),
@@ -495,6 +498,7 @@ pub fn render_preset(preset: &PresetToml, plugin: &str) -> String {
         preset.realtime,
         config,
         regions,
+        preset.zero_price_free,
     )
 }
 

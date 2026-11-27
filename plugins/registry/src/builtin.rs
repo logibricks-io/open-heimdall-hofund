@@ -115,7 +115,8 @@ pub fn openai_compat(
     let secret =
         (!endpoint.api_key.is_empty()).then(|| SecretString::from(endpoint.api_key.clone()));
     let allocation_quota_rate = matches!(endpoint.preset.as_deref(), Some("qwen" | "qwen-cn"));
-    let zero_price_free = endpoint.preset.as_deref() == Some("opencode-go");
+    let zero_price_free = listed_zero_price_free(&endpoint);
+    endpoint.zero_price_free = zero_price_free;
     let adapter = Arc::new(OpenAiCompat::new(protocol, endpoint).map_err(build_error)?);
     let bridged = Bridged {
         inner: adapter.clone(),
@@ -374,7 +375,8 @@ pub fn anthropic(
     let headers = endpoint.headers.clone();
     let quirks = endpoint.quirks;
     let preset = endpoint.preset.clone();
-    let zero_price_free = endpoint.preset.as_deref() == Some("opencode-go");
+    let zero_price_free = listed_zero_price_free(&endpoint);
+    endpoint.zero_price_free = zero_price_free;
     let secret =
         (!endpoint.api_key.is_empty()).then(|| SecretString::from(endpoint.api_key.clone()));
     let adapter = Arc::new(Anthropic::new(endpoint).map_err(build_error)?);
@@ -591,6 +593,14 @@ fn is_kernel(key: &str, protocol: bool) -> bool {
     ) || (protocol && key == "protocol")
 }
 
+fn listed_zero_price_free(endpoint: &Endpoint) -> bool {
+    endpoint.zero_price_free
+        || endpoint
+            .preset
+            .as_deref()
+            .is_some_and(|id| crate::find_preset(id).is_some_and(|(row, _)| row.zero_price_free))
+}
+
 fn plan_option(raw: &RawTable, key: &str) -> bool {
     let Some(RawValue::String(preset)) = raw.get("preset") else {
         return false;
@@ -671,6 +681,8 @@ fn read_endpoint(
     let base_url = required_string(raw, "base_url", id)?;
     let mut endpoint = Endpoint::new(id, base_url);
     if let Some(value) = optional_string(raw, "preset", id)? {
+        endpoint.zero_price_free =
+            crate::find_preset(&value).is_some_and(|(row, _)| row.zero_price_free);
         endpoint.preset = Some(value);
     }
     if let Some(value) = optional_string(raw, "api_key", id)? {
@@ -976,6 +988,14 @@ mod tests {
                 "{id}"
             );
         }
+    }
+
+    #[test]
+    fn d271_compiled_preset_turns_zero_price_free_on_for_go_only() {
+        let (gated, _) = crate::find_preset("opencode-go").expect("go preset");
+        assert!(gated.zero_price_free);
+        let (other, _) = crate::find_preset("openai").expect("other preset");
+        assert!(!other.zero_price_free);
     }
 
     #[tokio::test]

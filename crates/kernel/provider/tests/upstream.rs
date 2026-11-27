@@ -457,11 +457,7 @@ async fn d271_mixed_explicit_free_catalog_scopes_only_the_relevant_refusals() {
             Ok(_) => panic!("refusal answered successfully"),
             Err(error) => error,
         };
-        assert_eq!(
-            format!("{error:?}").contains("model_scoped: true"),
-            scoped,
-            "{model}: {body}: {error:?}"
-        );
+        assert_eq!(error.scopes_model(), scoped, "{model}: {body}: {error:?}");
     }
 
     let server = MockServer::start().await;
@@ -486,7 +482,7 @@ async fn d271_mixed_explicit_free_catalog_scopes_only_the_relevant_refusals() {
         Ok(_) => panic!("refusal answered successfully"),
         Err(error) => error,
     };
-    assert!(!format!("{error:?}").contains("model_scoped: true"));
+    assert!(!error.scopes_model());
 }
 
 #[tokio::test]

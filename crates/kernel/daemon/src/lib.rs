@@ -1053,7 +1053,13 @@ fn router(
     let fingerprints = membership::provider_fingerprints(&built)
         .into_iter()
         .collect();
-    let (routes, policy) = route_plan(config, models_host.as_deref(), Some(&built), &limits);
+    let (routes, policy) = route_plan_gated(
+        config,
+        models_host.as_deref(),
+        Some(&built),
+        &limits,
+        &|id| crate::rests::preset_zero_price_free(registry.as_ref(), Some(id)),
+    );
     let (members, expanded) = subscriptions::expand(&built, &routes, subscriptions)?;
     let (snapshot, table) = membership::open_with_table_and_affinity(
         &members,
@@ -1084,6 +1090,21 @@ fn route_plan(
     BTreeMap<String, Vec<membership::PlannedHop>>,
     FailoverPolicy,
 ) {
+    route_plan_gated(config, models_host, built, limits, &|id| {
+        crate::rests::preset_zero_price_free(&crate::RegistryAdapter, Some(id))
+    })
+}
+
+pub(crate) fn route_plan_gated(
+    config: &Config,
+    models_host: Option<&ModelsHost>,
+    built: Option<&BTreeMap<String, membership::BuiltProvider>>,
+    limits: &BTreeMap<String, u64>,
+    zero_price_free: &dyn Fn(&str) -> bool,
+) -> (
+    BTreeMap<String, Vec<membership::PlannedHop>>,
+    FailoverPolicy,
+) {
     let context = RoutePlanContext {
         providers: config
             .providers
@@ -1103,6 +1124,7 @@ fn route_plan(
         models_host,
         built,
         limits,
+        zero_price_free,
     };
     let mut routes = BTreeMap::new();
     for route in &config.routes {
@@ -1208,6 +1230,7 @@ struct RoutePlanContext<'a> {
     models_host: Option<&'a ModelsHost>,
     built: Option<&'a BTreeMap<String, membership::BuiltProvider>>,
     limits: &'a BTreeMap<String, u64>,
+    zero_price_free: &'a dyn Fn(&str) -> bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1495,7 +1518,10 @@ fn push_provider(
                 provider_free,
                 listed.as_ref(),
                 context.providers.get(id).is_some_and(|provider| {
-                    crate::rests::preset_records_zero_price(provider.preset.as_deref())
+                    provider
+                        .preset
+                        .as_deref()
+                        .is_some_and(context.zero_price_free)
                 }),
             ),
             stays: effective_stays(root, &context.providers, &context.subscriptions),
@@ -2665,7 +2691,7 @@ mod tests {
         let paid = hofund_plugin_api::ModelSpec::new("paid-model", None)
             .expect("model")
             .with_prices(1, 2, 0);
-        for (preset, free) in [("openai", false), ("opencode-go", true)] {
+        for (preset, free) in [("plain", false), ("gated", true)] {
             let config = hofund_config::load(&format!(
                 "[[providers]]\nid = \"relay\"\npreset = \"{preset}\"\n[[routes]]\nmodel = \"legacy-zero\"\nupstreams = [\"relay\"]\n"
             ))
@@ -2675,7 +2701,10 @@ mod tests {
                 std::time::Duration::from_secs(1),
             );
             host.seed_models("relay", &[zero.clone(), paid.clone()]);
-            let (routes, _) = super::route_plan(&config, Some(&host), None, &BTreeMap::new());
+            let (routes, _) =
+                super::route_plan_gated(&config, Some(&host), None, &BTreeMap::new(), &|id| {
+                    id == "gated"
+                });
             assert_eq!(
                 routes["legacy-zero"][0].free, free,
                 "{preset} zero-price hop"

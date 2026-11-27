@@ -7,9 +7,16 @@ use hofund_plugin_api::{MemberId, ModelSpec};
 use hofund_router::quota::QuotaStore;
 use hofund_router::{Cooldowns, PersistedRest};
 
-/// Whether this preset records an all-zero text price as a free hop.
-pub(crate) fn preset_records_zero_price(preset: Option<&str>) -> bool {
-    preset == Some("opencode-go")
+/// Whether compiled preset data records an all-zero text price as free.
+pub(crate) fn preset_zero_price_free(
+    registry: &dyn crate::DaemonRegistry,
+    preset: Option<&str>,
+) -> bool {
+    preset.is_some_and(|id| {
+        registry
+            .find_preset(id)
+            .is_some_and(|(row, _)| row.zero_price_free)
+    })
 }
 
 /// Members whose saved windows already name models that do not count.

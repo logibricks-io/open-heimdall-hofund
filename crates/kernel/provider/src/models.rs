@@ -116,8 +116,8 @@ impl ModelClient {
             let learned = *learned.lock().unwrap_or_else(|error| error.into_inner());
             match result {
                 Ok(rows) => {
-                    let zero_price_free = self.endpoint.preset.as_deref() == Some("opencode-go");
-                    let (models, dropped) = model_specs(&rows, false, zero_price_free)?;
+                    let (models, dropped) =
+                        model_specs(&rows, false, self.endpoint.zero_price_free)?;
                     if models.is_empty() {
                         errors.push(PluginError::decode(format!(
                             "{}: no models listed",
