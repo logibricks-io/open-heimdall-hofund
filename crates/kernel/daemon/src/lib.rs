@@ -1660,6 +1660,11 @@ fn providers(
                         cooldowns.clone(),
                         registry,
                     )?;
+                    let adapter = if let Some(host) = models_host {
+                        adapter.with_v1_learning(host.v1_learning(&provider.id, planned.wire))
+                    } else {
+                        adapter
+                    };
                     let upstream = adapter.upstream();
                     Instance {
                         provider: selected.clone(),
@@ -1694,6 +1699,11 @@ fn providers(
                     cooldowns.clone(),
                     registry,
                 )?;
+                let chat_adapter = if let Some(host) = models_host {
+                    chat_adapter.with_v1_learning(host.v1_learning(&provider.id, chat_planned.wire))
+                } else {
+                    chat_adapter
+                };
                 alternates.push(membership::BuiltProvider {
                     adapter: Arc::new(chat_adapter),
                     protocol: "openai-chat",
