@@ -24,6 +24,7 @@ mod openai_chat;
 mod openai_responses;
 mod opening;
 mod passthrough;
+mod prompt_count;
 mod reasoning_tidy;
 mod refusal;
 pub mod responses_empty;
