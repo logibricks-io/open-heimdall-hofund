@@ -686,6 +686,7 @@ ProviderKeysResponse.version
 ProviderListResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
 ProviderListResponse.providers
 ProviderListResponse.version
+ProviderListResponse.way_out_place
 ProviderListResponse.way_out_warnings
 ProviderPatchRequest #[non_exhaustive] derives(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize) # [serde (deny_unknown_fields)]
 ProviderPatchRequest.base_url
@@ -1472,6 +1473,7 @@ WayOutCheckRequest #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serial
 WayOutCheckRequest.version
 WayOutCheckRequest::fn new () -> Self
 WayOutCheckResponse #[non_exhaustive] derives(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)
+WayOutCheckResponse.place
 WayOutCheckResponse.version
 WayOutCheckResponse.warnings
 const API_VERSION

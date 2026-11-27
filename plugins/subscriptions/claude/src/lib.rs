@@ -102,6 +102,10 @@ pub struct ClaudeConfig {
     runs_most: Option<usize>,
     /// When true, an unsupported way out holds a Claude request. Off by default.
     region_hold: bool,
+    /// Regions, addresses, and CIDR ranges that alone judge the way out.
+    ///
+    /// Empty means the supported-region list judges.
+    allowed_ways_out: Vec<String>,
 }
 
 impl ValidConfig for ClaudeConfig {}
@@ -119,6 +123,10 @@ impl SubscriptionFactory for ClaudeFactory {
                 ("command".to_owned(), Schema::string()),
                 ("claude-runs-most".to_owned(), Schema::integer()),
                 ("region-hold".to_owned(), Schema::boolean()),
+                (
+                    "allowed-ways-out".to_owned(),
+                    Schema::array(Schema::string()),
+                ),
             ],
             &[],
         )
@@ -131,6 +139,7 @@ impl SubscriptionFactory for ClaudeFactory {
             if key != "command"
                 && key != "claude-runs-most"
                 && key != "region-hold"
+                && key != "allowed-ways-out"
                 && key != hofund_plugin_sdk::daily_warmup::TIMES_KEY
             {
                 return Err(ConfigError::new("unknown key").with_path(key));
@@ -175,10 +184,32 @@ impl SubscriptionFactory for ClaudeFactory {
                 );
             }
         };
+        let allowed_ways_out = match raw.get("allowed-ways-out") {
+            None => Vec::new(),
+            Some(RawValue::Array(items)) => {
+                let mut values = Vec::with_capacity(items.len());
+                for (index, item) in items.iter().enumerate() {
+                    let RawValue::String(value) = item else {
+                        return Err(ConfigError::new("must be a string")
+                            .with_path(format!("allowed-ways-out[{index}]")));
+                    };
+                    values.push(value.clone());
+                }
+                egress::parse_ways(&values)
+                    .map_err(|message| ConfigError::new(message).with_path("allowed-ways-out"))?
+            }
+            Some(_) => {
+                return Err(
+                    ConfigError::new("allowed-ways-out must be an array of strings")
+                        .with_path("allowed-ways-out"),
+                );
+            }
+        };
         Ok(ClaudeConfig {
             command,
             runs_most,
             region_hold,
+            allowed_ways_out,
         })
     }
 
@@ -194,7 +225,11 @@ impl SubscriptionFactory for ClaudeFactory {
             pending: Mutex::new(HashMap::new()),
             bridge: bridge::Bridge::with_room(bridge::room::Room::from_config(cfg.runs_most)),
             limits: limits::Store::new(),
-            egress: Arc::new(egress::Egress::new(cfg.region_hold)),
+            egress: {
+                let egress = Arc::new(egress::Egress::new(cfg.region_hold));
+                egress.set_ways(cfg.allowed_ways_out.clone());
+                egress
+            },
         }))
     }
 }
@@ -824,6 +859,10 @@ impl Subscription for Claude {
 
     fn way_out_warning(&self) -> Option<String> {
         self.egress.warning()
+    }
+
+    fn way_out_place(&self) -> Option<String> {
+        self.egress.place()
     }
 
     async fn maintain_way_out(&self, host: &HostContext) -> Result<(), PluginError> {

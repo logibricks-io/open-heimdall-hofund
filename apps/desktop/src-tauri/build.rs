@@ -13,6 +13,7 @@ fn main() {
             "set_agent",
             "usage_summary",
             "open_config",
+            "check_way_out",
         ]));
     if let Err(error) = tauri_build::try_build(attributes) {
         println!("cargo:warning=tauri build failed: {error}");
