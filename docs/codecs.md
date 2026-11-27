@@ -592,6 +592,14 @@ positive `completion_tokens_details.reasoning_tokens` is the count, and the
 two numbers are not added. Encode still writes the count under
 `completion_tokens_details.reasoning_tokens`.
 
+A Chat or Generative Language stream keeps the last positive prompt, cache
+read, and cache write that reply named (`PromptCount::fit`). A later chunk
+that says zero, or omits the field, does not drop a positive count already
+seen. When that chunk named a smaller prompt and also named a total, the
+total grows by the restored prompt. A chunk that omits the prompt leaves its
+total alone. Unary decode is unchanged, as are Messages and Responses
+upstreams. The stored prompt stays the whole protocol count.
+
 Responses keeps protocol totals beside the cache counters. It does not subtract
 cached tokens from `input_tokens`. A null `error` is dropped. A non-null
 `error` stays in the response bag. The `object` field is discarded.

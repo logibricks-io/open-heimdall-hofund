@@ -141,6 +141,7 @@ enum Method {
 pub struct Target {
     protocol: ProtocolId,
     base_url: String,
+    missing_v1: Option<Arc<Mutex<Option<String>>>>,
     preset: Option<String>,
     credential: CredentialStyle,
     headers: Vec<(String, String)>,
@@ -167,6 +168,7 @@ impl Target {
         Self {
             protocol,
             base_url: base_url.into(),
+            missing_v1: None,
             preset: None,
             credential: CredentialStyle::Bearer,
             headers: Vec::new(),
@@ -186,10 +188,32 @@ impl Target {
         }
     }
 
-    /// The base URL this target posts to.
+    /// The configured base URL, before any learned `/v1` correction.
     #[must_use]
     pub fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    /// The base URL the next call uses, including a learned `/v1` correction.
+    #[must_use]
+    pub fn current_base(&self) -> String {
+        self.missing_v1
+            .as_ref()
+            .and_then(|learned| {
+                learned
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+            })
+            .unwrap_or_else(|| self.base_url.clone())
+    }
+
+    /// Enables one `/v1` retry after a web page answers an unversioned base.
+    /// The adapter and target share the learned base in `state`.
+    #[must_use]
+    pub fn missing_v1_retry(mut self, state: Arc<Mutex<Option<String>>>) -> Self {
+        self.missing_v1 = Some(state);
+        self
     }
 
     /// The codec this target speaks.
@@ -326,6 +350,7 @@ impl fmt::Debug for Target {
             .debug_struct("Target")
             .field("protocol", &self.protocol.as_str())
             .field("base_url", &self.base_url)
+            .field("missing_v1", &self.missing_v1.is_some())
             .field("preset", &self.preset)
             .field("credential", &self.credential)
             .field("header_names", &names)
@@ -674,7 +699,8 @@ pub async fn send(
     } else {
         Method::Generate
     };
-    let call = if path == Path::Converse {
+    let base = target.current_base();
+    let (call, url) = if path == Path::Converse {
         if secret.is_some_and(|secret| !secret.expose_secret().is_empty()) {
             return Err(PluginError::config(
                 "Converse uses AWS credentials, not an API key",
@@ -685,21 +711,18 @@ pub async fn send(
         }
         let model = request.model.clone();
         let body = prepare_body(target, codec, request, prepare, inbound)?;
-        converse_call(target, &model, streaming, body)?.1
+        (
+            converse_call(target, &model, streaming, body)?.1,
+            String::new(),
+        )
     } else {
         let url = if let Some(root) = target.generate_in_body.filter(|_| path == Path::Model) {
             let _ = model_segment(&request.model)?;
-            format!("{}/{root}", target.base_url.trim_end_matches('/'))
+            format!("{}/{root}", base.trim_end_matches('/'))
         } else {
             match target.method_root {
-                Some(root) if path == Path::Model => method_url(&target.base_url, root, method),
-                _ => url_for(
-                    &target.base_url,
-                    target.model_root,
-                    path,
-                    &request.model,
-                    method,
-                )?,
+                Some(root) if path == Path::Model => method_url(&base, root, method),
+                _ => url_for(&base, target.model_root, path, &request.model, method)?,
             }
         };
         let body = prepare_body(target, codec, request, prepare, inbound)?;
@@ -722,17 +745,9 @@ pub async fn send(
             call = call.replace_header("content-encoding", "gzip", false);
         }
         let call = call.header("content-type", "application/json").bytes(body);
-        maybe_sign(call, target, secret)?
+        (maybe_sign(call, target, secret)?, url)
     };
-    let response = call.open_raw(http, ATTEMPTS).await?;
-    if !response.status().is_success() {
-        return Err(status_error(
-            response,
-            target.allocation_quota_rate,
-            target.classify.as_ref(),
-        )
-        .await);
-    }
+    let response = open_with_missing_v1(http, target, call, &base, &url).await?;
     let observe = if response.status() == http::StatusCode::OK {
         target.observe.clone()
     } else {
@@ -747,9 +762,115 @@ pub async fn send(
         watch: None,
         observe,
         allocation_quota_rate: target.allocation_quota_rate,
-        messages_base: (target.protocol == ProtocolId::ANTHROPIC_MESSAGES)
-            .then(|| target.base_url.clone()),
+        messages_base: (target.protocol == ProtocolId::ANTHROPIC_MESSAGES).then_some(base),
     })
+}
+
+async fn open_with_missing_v1(
+    http: &HttpHandle,
+    target: &Target,
+    call: Call,
+    base: &str,
+    url: &str,
+) -> Result<HttpResponse, PluginError> {
+    let original =
+        match successful_response(call.clone().open_raw(http, ATTEMPTS).await?, target).await {
+            Ok(response) => return Ok(response),
+            Err(error) => error,
+        };
+    let Some(v1) = retry_v1(target, base, &original) else {
+        return Err(original);
+    };
+    let rest = url
+        .strip_prefix(base.trim_end_matches('/'))
+        .unwrap_or_default();
+    let retried = successful_response(
+        call.with_uri(format!("{v1}{rest}"))
+            .open_raw(http, ATTEMPTS)
+            .await?,
+        target,
+    )
+    .await;
+    match retried {
+        Ok(response) => {
+            if let Some(learned) = &target.missing_v1 {
+                *learned
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(v1);
+            }
+            Ok(response)
+        }
+        Err(error)
+            if error.status() == Some(404) || crate::transport::served_page(error.message()) =>
+        {
+            Err(original)
+        }
+        Err(error) => Err(missing_v1_error(base, &v1, error)),
+    }
+}
+
+async fn successful_response(
+    response: HttpResponse,
+    target: &Target,
+) -> Result<HttpResponse, PluginError> {
+    if !response.status().is_success() {
+        return Err(status_error(
+            response,
+            target.allocation_quota_rate,
+            target.classify.as_ref(),
+        )
+        .await);
+    }
+    checked_api_response(response).await
+}
+
+async fn checked_api_response(response: HttpResponse) -> Result<HttpResponse, PluginError> {
+    let status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    let content_encoding = response
+        .headers()
+        .get(http::header::CONTENT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    let (parts, mut body) = response.into_parts();
+    let first = body.next_chunk().await.transpose()?;
+    let head = first.as_deref().unwrap_or_default();
+    if let Some(why) =
+        crate::transport::not_an_api_reply(status, &content_type, &content_encoding, head)
+    {
+        return Err(PluginError::status_error(502, why));
+    }
+    let body = match first {
+        Some(chunk) => BodyStream::resume(chunk, body),
+        None => body,
+    };
+    Ok(HttpResponse::from_parts(parts, body))
+}
+
+fn retry_v1(target: &Target, base: &str, original: &PluginError) -> Option<String> {
+    if target.missing_v1.is_none()
+        || original.status() != Some(502)
+        || !crate::transport::served_page(original.message())
+    {
+        return None;
+    }
+    crate::transport::missing_v1_base(base)
+}
+
+fn missing_v1_error(base: &str, v1: &str, error: PluginError) -> PluginError {
+    let message = format!(
+        "{} — the Base URL {} answers with the relay's website, not its API, which is under /v1: set the Base URL to {}",
+        error.message(),
+        hofund_plugin_api::safe_url(base),
+        hofund_plugin_api::safe_url(v1)
+    );
+    error.with_message(message)
 }
 
 /// The most of a buffered forwarded answer [`forward`] reads: 256 MiB.
@@ -795,6 +916,7 @@ pub async fn forward(
         )
         .await);
     }
+    let response = checked_api_response(response).await?;
     let status = response.status().as_u16();
     let content_type = response
         .headers()
@@ -898,6 +1020,9 @@ pub async fn count_input(
     let mut response = maybe_sign(call, target, secret)?
         .open_raw(http, ATTEMPTS)
         .await?;
+    if response.status().is_success() {
+        response = checked_api_response(response).await?;
+    }
     let status = response.status().as_u16();
     let headers = response.headers().clone();
     let retry_after = parse_retry_after_headers(&headers, std::time::SystemTime::now());

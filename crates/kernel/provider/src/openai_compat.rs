@@ -3,9 +3,12 @@
 //! The base URL is the caller's. A Bedrock Mantle base, whose prefix depends
 //! on the model id, is served by the `bedrock-mantle` plugin instead.
 
+use std::sync::{Arc, Mutex};
+
 use async_trait::async_trait;
 use hofund_codec::{Codec, OpenAiChat, OpenAiResponses};
 use hofund_ir::Request;
+use hofund_plugin_api::safe_url;
 use reqwest::header::HeaderMap;
 use sha2::{Digest, Sha256};
 
@@ -29,6 +32,7 @@ pub struct OpenAiCompat {
     upstream: Upstream,
     /// The configured base URL.
     direct: String,
+    learned_base: Arc<Mutex<Option<String>>>,
     attempt: AttemptRoute,
     models: crate::models::ModelClient,
 }
@@ -72,6 +76,7 @@ impl OpenAiCompat {
             protocol,
             upstream: Upstream::open(endpoint, path, headers)?,
             direct,
+            learned_base: Arc::new(Mutex::new(None)),
             attempt,
             models,
         })
@@ -81,6 +86,37 @@ impl OpenAiCompat {
     #[must_use]
     pub fn direct_base(&self) -> &str {
         &self.direct
+    }
+
+    /// Shared `/v1` learning for the SDK transport using this adapter.
+    #[must_use]
+    pub fn base_learning(&self) -> Arc<Mutex<Option<String>>> {
+        Arc::clone(&self.learned_base)
+    }
+
+    fn current_base(&self) -> String {
+        self.learned_base
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+            .unwrap_or_else(|| self.direct.clone())
+    }
+
+    fn learn_base(&self, base: String) {
+        *self
+            .learned_base
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(base);
+    }
+
+    async fn probe_at(
+        &self,
+        base: String,
+        query: &hofund_plugin_api::ProbeQuery,
+    ) -> Result<hofund_plugin_api::ProbeReport, hofund_plugin_api::PluginError> {
+        let mut models = self.models.clone();
+        models.endpoint.base_url = base;
+        models.openai_probe(self.protocol, query).await
     }
 }
 
@@ -177,7 +213,40 @@ impl Provider for OpenAiCompat {
         &self,
         query: &hofund_plugin_api::ProbeQuery,
     ) -> Result<hofund_plugin_api::ProbeReport, hofund_plugin_api::PluginError> {
-        self.models.openai_probe(self.protocol, query).await
+        let base = self.current_base();
+        let original = match self.probe_at(base.clone(), query).await {
+            Ok(report) => return Ok(report),
+            Err(error) => error,
+        };
+        if original.status() != Some(502)
+            || !hofund_plugin_sdk::transport::served_page(original.message())
+        {
+            return Err(original);
+        }
+        let Some(v1) = hofund_plugin_sdk::transport::missing_v1_base(&base) else {
+            return Err(original);
+        };
+        match self.probe_at(v1.clone(), query).await {
+            Ok(report) => {
+                self.learn_base(v1);
+                Ok(report)
+            }
+            Err(error)
+                if error.status() == Some(404)
+                    || hofund_plugin_sdk::transport::served_page(error.message()) =>
+            {
+                Err(original)
+            }
+            Err(error) => {
+                let message = format!(
+                    "{} — the Base URL {} answers with the relay's website, not its API, which is under /v1: set the Base URL to {}",
+                    error.message(),
+                    safe_url(&base),
+                    safe_url(&v1)
+                );
+                Err(error.with_message(message))
+            }
+        }
     }
 }
 

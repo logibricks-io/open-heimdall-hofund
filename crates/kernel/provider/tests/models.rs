@@ -1015,3 +1015,214 @@ async fn user_headers_override_list_defaults_case_insensitively() {
         "custom-version"
     );
 }
+
+#[tokio::test]
+async fn d277_probes_reject_pages_empty_replies_and_non_json() {
+    let cases = [
+        (
+            "labelled page",
+            "<!doctype html><title>Relay</title>",
+            "text/html; charset=utf-8",
+            "web page (text/html), not an API reply: \"Relay\"",
+        ),
+        (
+            "unlabelled page",
+            "  <html><head><title>Relay</title></head></html>",
+            "text/plain",
+            "web page",
+        ),
+        ("empty", "", "application/json", "nothing in it"),
+        (
+            "not json",
+            "this is not JSON",
+            "application/json",
+            "isn't JSON",
+        ),
+    ];
+    for (name, body, content_type, expected) in cases {
+        for generative in [false, true] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_raw(body.as_bytes(), content_type),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let base = if generative { "/v1beta" } else { "/v1" };
+            let result = if generative {
+                Generative::new(endpoint(&server, base))
+                    .expect("generative")
+                    .probe(&probe(ProtocolId::GENERATIVE_LANGUAGE, "gemini"))
+                    .await
+            } else {
+                openai(endpoint(&server, base))
+                    .probe(&probe(ProtocolId::OPENAI_CHAT, "gpt"))
+                    .await
+            };
+            let error = result.expect_err(name);
+            assert_eq!(error.status(), Some(502), "{name}: {error}");
+            assert!(error.message().contains(expected), "{name}: {error}");
+            assert_eq!(server.received_requests().await.expect("requests").len(), 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn d277_openai_probes_retry_a_page_under_v1_and_reuse_it() {
+    for (protocol, endpoint_path, protocol_id) in [
+        (
+            OpenAiProtocol::Chat,
+            "chat/completions",
+            ProtocolId::OPENAI_CHAT,
+        ),
+        (
+            OpenAiProtocol::Responses,
+            "responses",
+            ProtocolId::OPENAI_RESPONSES,
+        ),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/{endpoint_path}")))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                b"<!doctype html><title>Relay</title>".as_slice(),
+                "text/html",
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/v1/{endpoint_path}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let provider = OpenAiCompat::new(protocol, endpoint(&server, "")).expect("provider");
+        let query = probe(protocol_id, "gpt");
+        provider.probe(&query).await.expect("first probe");
+        provider.probe(&query).await.expect("second probe");
+        let paths = server
+            .received_requests()
+            .await
+            .expect("requests")
+            .into_iter()
+            .map(|request| request.url.path().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            [
+                format!("/{endpoint_path}"),
+                format!("/v1/{endpoint_path}"),
+                format!("/v1/{endpoint_path}"),
+            ]
+        );
+        server.verify().await;
+    }
+}
+
+#[tokio::test]
+async fn d277_probe_refusal_under_v1_says_where_the_api_is() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            b"<!doctype html><title>Relay</title>".as_slice(),
+            "text/html",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "error": {"message": "bad key"}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let error = openai(endpoint(&server, ""))
+        .probe(&probe(ProtocolId::OPENAI_CHAT, "gpt"))
+        .await
+        .expect_err("refused");
+    assert_eq!(error.status(), Some(401));
+    assert!(error.message().contains("bad key"), "{error}");
+    assert!(
+        error
+            .message()
+            .contains(&format!("set the Base URL to {}/v1", server.uri())),
+        "{error}"
+    );
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn d277_html_model_list_already_uses_v1_fallback() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            b"<!doctype html><title>Relay</title>".as_slice(),
+            "text/html",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"id": "chat"}]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let listed = openai(endpoint(&server, ""))
+        .list_models(&ListQuery::new())
+        .await
+        .expect("list");
+    assert!(listed.v1_fallback());
+    assert_eq!(ids(&listed), ["chat"]);
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn d277_probe_keeps_the_original_error_when_v1_is_not_an_api() {
+    for (name, status, body, content_type) in [
+        (
+            "page",
+            200,
+            b"<!doctype html><title>Relay</title>".as_slice(),
+            "text/html",
+        ),
+        ("missing", 404, b"missing".as_slice(), "text/plain"),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                b"<!doctype html><title>Relay</title>".as_slice(),
+                "text/html",
+            ))
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(status).set_body_raw(body, content_type))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let provider = openai(endpoint(&server, ""));
+        let query = probe(ProtocolId::OPENAI_CHAT, "gpt");
+        for _ in 0..2 {
+            let error = provider.probe(&query).await.expect_err(name);
+            assert_eq!(error.status(), Some(502), "{name}: {error}");
+            assert!(
+                error.message().contains("not an API reply: \"Relay\""),
+                "{name}: {error}"
+            );
+            assert!(!error.message().contains("set the Base URL"), "{error}");
+        }
+        server.verify().await;
+    }
+}
