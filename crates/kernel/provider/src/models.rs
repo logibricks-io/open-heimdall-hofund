@@ -483,6 +483,39 @@ pub(crate) fn url_host(base: &str) -> String {
         .unwrap_or_default()
 }
 
+pub(crate) async fn scope_refusal(
+    client: &ModelClient,
+    model: &str,
+    error: crate::ProviderError,
+    anthropic: bool,
+) -> crate::ProviderError {
+    let quota_or_credit = error.kind == crate::ProviderErrorKind::Quota || error.is_credit();
+    if !quota_or_credit && error.status != Some(429) {
+        return error;
+    }
+    let Ok(list) = client.live_list(&ListQuery::new(), anthropic).await else {
+        return error;
+    };
+    let mut requested = None;
+    let mut free = false;
+    let mut paid = false;
+    for listed in list.models() {
+        let explicitly_free = listed.free() == Some(true);
+        free |= explicitly_free;
+        paid |= !explicitly_free;
+        if listed.id().eq_ignore_ascii_case(model) {
+            requested = Some(explicitly_free);
+        }
+    }
+    let Some(requested_free) = requested else {
+        return error;
+    };
+    if !free || !paid || (!requested_free && !quota_or_credit) {
+        return error;
+    }
+    error.with_model_scope()
+}
+
 fn model_specs(rows: &[Value], gemini: bool) -> Result<(Vec<ModelSpec>, Vec<String>), PluginError> {
     let mut models = Vec::new();
     let mut dropped = Vec::new();
@@ -555,6 +588,14 @@ pub(crate) fn model_spec(row: &Value, gemini: bool) -> Result<Option<ModelSpec>,
             .with_context(positive(row.get("inputTokenLimit")))
             .with_max_output(positive(row.get("outputTokenLimit")));
         return Ok(Some(model));
+    }
+    if row
+        .get("go")
+        .and_then(Value::as_object)
+        .and_then(|go| go.get("monthly_usage"))
+        .is_some_and(Value::is_null)
+    {
+        model = model.with_free(true);
     }
     model = model
         .with_context(positive(row.get("context_length")))

@@ -64,6 +64,8 @@ mod d241_listed;
 mod d246_relay_effort_ids;
 #[cfg(test)]
 mod d250_messages_refused;
+#[cfg(test)]
+mod d271_free_models;
 mod effort_variants;
 mod events;
 mod log_tail;

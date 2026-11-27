@@ -159,6 +159,7 @@ pub struct PlanWindow {
     unit: String,
     blocking: bool,
     display: String,
+    excluded_models: Vec<String>,
 }
 
 impl PlanWindow {
@@ -175,6 +176,7 @@ impl PlanWindow {
             unit: String::new(),
             blocking: true,
             display: String::new(),
+            excluded_models: Vec::new(),
         }
     }
 
@@ -219,6 +221,13 @@ impl PlanWindow {
     #[must_use]
     pub fn with_display(mut self, display: impl Into<String>) -> Self {
         self.display = display.into();
+        self
+    }
+
+    /// Excludes models from an otherwise key-wide window.
+    #[must_use]
+    pub fn with_excluded_models(mut self, models: Vec<String>) -> Self {
+        self.excluded_models = models;
         self
     }
 
@@ -274,6 +283,12 @@ impl PlanWindow {
     #[must_use]
     pub fn display(&self) -> &str {
         &self.display
+    }
+
+    /// Models exempt from this key-wide window.
+    #[must_use]
+    pub fn excluded_models(&self) -> &[String] {
+        &self.excluded_models
     }
 }
 

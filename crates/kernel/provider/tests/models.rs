@@ -116,6 +116,39 @@ async fn versioned_base_lists_only_models_and_classifies_rows_with_metadata() {
 }
 
 #[tokio::test]
+async fn d271_explicit_null_monthly_usage_marks_only_free_models() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [
+            {"id": "paid-model", "go": {"monthly_usage": {"go": 200}}},
+            {"id": "free-model", "go": {"monthly_usage": null}},
+            {"id": "missing", "go": {}},
+            {"id": "number", "go": {"monthly_usage": 0}},
+            {"id": "object", "go": {"monthly_usage": {}}},
+            {"id": "string", "go": "free"},
+            {"id": "array", "go": [null]},
+            {"id": "absent"}
+        ]})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let listed = openai(endpoint(&server, "/v1"))
+        .list_models(&ListQuery::new())
+        .await
+        .expect("list");
+    assert_eq!(listed.models().len(), 8);
+    for model in listed.models() {
+        assert_eq!(
+            model.free(),
+            (model.id() == "free-model").then_some(true),
+            "{}",
+            model.id()
+        );
+    }
+}
+
+#[tokio::test]
 async fn unversioned_base_uses_direct_v1_fallback_and_sets_the_flag() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

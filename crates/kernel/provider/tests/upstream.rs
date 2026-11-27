@@ -406,6 +406,90 @@ async fn leading_failed_responses_stream_is_a_status_error() {
 }
 
 #[tokio::test]
+async fn d271_mixed_explicit_free_catalog_scopes_only_the_relevant_refusals() {
+    for (model, body, scoped) in [
+        (
+            "paid-model",
+            r#"{"error":{"message":"usage limit reached (weekly)","type":"rate_limit_error"}}"#,
+            true,
+        ),
+        (
+            "free-model",
+            r#"{"error":{"message":"rate limit exceeded","type":"rate_limit_error"}}"#,
+            true,
+        ),
+        (
+            "paid-model",
+            r#"{"error":{"message":"rate limit exceeded","type":"rate_limit_error"}}"#,
+            false,
+        ),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [
+                {"id": "paid-model", "go": {"monthly_usage": {"go": 200}}},
+                {"id": "free-model", "go": {"monthly_usage": null}}
+            ]})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "600")
+                    .set_body_string(body),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut request = user_request(false);
+        request.model = model.to_owned();
+        let result = OpenAiCompat::new(
+            OpenAiProtocol::Chat,
+            Endpoint::new("test", format!("{}/v1", server.uri())),
+        )
+        .expect("provider")
+        .execute(request, "openai-chat")
+        .await;
+        let error = match result {
+            Ok(_) => panic!("refusal answered successfully"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            format!("{error:?}").contains("model_scoped: true"),
+            scoped,
+            "{model}: {body}: {error:?}"
+        );
+    }
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(429).set_body_string(
+            r#"{"error":{"message":"usage limit reached (weekly)","type":"rate_limit_error"}}"#,
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut request = user_request(false);
+    request.model = "free-model".to_owned();
+    let result = OpenAiCompat::new(
+        OpenAiProtocol::Chat,
+        Endpoint::new("test", format!("{}/v1", server.uri())),
+    )
+    .expect("provider")
+    .execute(request, "openai-chat")
+    .await;
+    let error = match result {
+        Ok(_) => panic!("refusal answered successfully"),
+        Err(error) => error,
+    };
+    assert!(!format!("{error:?}").contains("model_scoped: true"));
+}
+
+#[tokio::test]
 async fn messages_unary_sends_version_and_key() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

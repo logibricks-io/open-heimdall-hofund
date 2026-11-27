@@ -318,7 +318,7 @@ fn window_info(window: &hofund_plugin_api::PlanWindow) -> WindowInfo {
         trial_credits: false,
         scope_model: None,
         models: Vec::new(),
-        excluded_models: Vec::new(),
+        excluded_models: window.excluded_models().to_vec(),
         window_span: window.span(),
         reset_after: None,
         stale_replica_quota: false,

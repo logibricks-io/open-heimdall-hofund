@@ -294,6 +294,36 @@ fn p16_several_plans_are_display_only_and_keep_their_terms() {
 }
 
 #[test]
+fn d271_plan_window_exclusions_reach_routing_and_caps() {
+    let dir = tempfile::tempdir().expect("dir");
+    let quotas = QuotaStore::new(dir.path());
+    let now = UNIX_EPOCH + Duration::from_secs(1_900_000_000);
+    record(
+        &quotas,
+        plan_job(PlanSupport::Certain),
+        Ok(vec![PlanCard::new("plan").with_windows(vec![
+            PlanWindow::new("5 hours", 100.0)
+                .with_span(Duration::from_secs(5 * 3600))
+                .with_excluded_models(vec!["free-model".to_owned()]),
+        ])]),
+    );
+    let allowances = quotas.allowances(now);
+    let allowance = &allowances[0];
+    assert!(!allowance.available("paid-model", now));
+    assert!(allowance.available("free-model", now));
+    assert!(allowance.available("FREE-model", now));
+    assert_eq!(allowance.used_for_routing("paid-model", now), 100.0);
+    assert_eq!(allowance.used_for_routing("free-model", now), 0.0);
+    assert_eq!(allowance.cap_used("paid-model", now), 100.0);
+    assert_eq!(allowance.cap_used("free-model", now), 0.0);
+    assert!(allowance.renewals("free-model", now).is_empty());
+    assert_eq!(
+        quotas.report(&["plans".to_owned()])[0].windows[0].used,
+        100.0
+    );
+}
+
+#[test]
 fn p17_a_possible_plan_shows_a_failed_read_only_after_a_proven_one() {
     let dir = tempfile::tempdir().expect("dir");
     let quotas = QuotaStore::new(dir.path());

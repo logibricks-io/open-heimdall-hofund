@@ -1422,6 +1422,7 @@ pub(crate) fn into_plugin(error: ProviderError) -> PluginError {
     let account_restricted = error.is_account_restricted();
     let ordinary_failure = error.is_ordinary_failure();
     let subscription_suspended = error.is_subscription_suspended();
+    let model_scoped = error.scopes_model();
     let status = error.status;
     let billed = error.billed().cloned();
     let credit_message = credit.then(|| error.message.clone());
@@ -1471,6 +1472,9 @@ pub(crate) fn into_plugin(error: ProviderError) -> PluginError {
     }
     if subscription_suspended {
         converted = converted.subscription_suspended();
+    }
+    if model_scoped {
+        converted = converted.with_model_scope();
     }
     converted
 }

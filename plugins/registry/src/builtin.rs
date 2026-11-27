@@ -191,14 +191,29 @@ impl UpstreamProvider for Direct {
         request: Request,
         inbound: ProtocolId,
     ) -> Result<PluginCompletion, PluginError> {
-        wire::execute(
+        let model = request.model.clone();
+        let result = wire::execute(
             &self.http,
             &self.target,
             self.secret.as_ref(),
             request,
             inbound,
         )
-        .await
+        .await;
+        match result {
+            Ok(completion) => Ok(completion),
+            Err(error)
+                if matches!(
+                    self.target.protocol(),
+                    ProtocolId::OPENAI_CHAT
+                        | ProtocolId::OPENAI_RESPONSES
+                        | ProtocolId::ANTHROPIC_MESSAGES
+                ) =>
+            {
+                Err(scope_plugin_refusal(&self.bridged, &model, error).await)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     async fn count_input(
@@ -248,6 +263,38 @@ impl UpstreamProvider for Direct {
     fn attempt_protocol(&self) -> String {
         self.target.protocol().as_str().to_owned()
     }
+}
+
+async fn scope_plugin_refusal(bridged: &Bridged, model: &str, error: PluginError) -> PluginError {
+    let quota_or_credit =
+        error.kind() == hofund_plugin_api::PluginErrorKind::Quota || error.is_credit();
+    if !quota_or_credit && error.status() != Some(429) {
+        return error;
+    }
+    let Ok(list) = bridged
+        .list_models(&hofund_plugin_api::ListQuery::new())
+        .await
+    else {
+        return error;
+    };
+    let mut requested = None;
+    let mut free = false;
+    let mut paid = false;
+    for listed in list.models() {
+        let explicitly_free = listed.free() == Some(true);
+        free |= explicitly_free;
+        paid |= !explicitly_free;
+        if listed.id().eq_ignore_ascii_case(model) {
+            requested = Some(explicitly_free);
+        }
+    }
+    let Some(requested_free) = requested else {
+        return error;
+    };
+    if !free || !paid || (!requested_free && !quota_or_credit) {
+        return error;
+    }
+    error.with_model_scope()
 }
 
 impl UpstreamFactory for AnthropicFactory {
@@ -676,6 +723,7 @@ fn plugin_error(error: ProviderError) -> PluginError {
     let account_restricted = error.is_account_restricted();
     let ordinary_failure = error.is_ordinary_failure();
     let subscription_suspended = error.is_subscription_suspended();
+    let model_scoped = error.scopes_model();
     let status = error.status;
     let credit_message = credit.then(|| error.message.clone());
     let mut converted = match error.kind {
@@ -715,6 +763,9 @@ fn plugin_error(error: ProviderError) -> PluginError {
     }
     if subscription_suspended {
         converted = converted.subscription_suspended();
+    }
+    if model_scoped {
+        converted = converted.with_model_scope();
     }
     converted
 }

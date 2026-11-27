@@ -351,7 +351,7 @@ pub(crate) async fn read_open_code(
         .credential(CredentialStyle::Bearer, &secret)?
         .header("accept", "application/json")
         .header("accept-language", "en-US,en")
-        .header("x-opencode-session", session);
+        .header("x-opencode-session", session.clone());
     let (status, body) = fetch(host, call).await?;
     match status {
         403 => {
@@ -369,6 +369,39 @@ pub(crate) async fn read_open_code(
         _ => {}
     }
     let value = json_body(&body)?;
+    let mut excluded_models = Vec::new();
+    if let Some(models_url) = url
+        .strip_suffix("/usage")
+        .map(|root| format!("{root}/models"))
+    {
+        let call = Call::get(models_url)
+            .credential(CredentialStyle::Bearer, &secret)?
+            .header("accept", "application/json")
+            .header("accept-language", "en-US,en")
+            .header("x-opencode-session", session);
+        if let Ok((status, body)) = fetch(host, call).await
+            && status < 300
+            && let Ok(list) = json_body(&body)
+        {
+            for row in list
+                .get("data")
+                .and_then(Value::as_array)
+                .map_or(&[][..], Vec::as_slice)
+            {
+                let explicitly_free = row
+                    .get("go")
+                    .and_then(Value::as_object)
+                    .and_then(|go| go.get("monthly_usage"))
+                    .is_some_and(Value::is_null);
+                if explicitly_free
+                    && let Some(id) = row.get("id").and_then(Value::as_str)
+                    && !id.is_empty()
+                {
+                    excluded_models.push(id.to_owned());
+                }
+            }
+        }
+    }
     let usage = value.get("usage").and_then(Value::as_object);
     let mut windows = Vec::new();
     for (key, name, seconds) in [
@@ -382,7 +415,8 @@ pub(crate) async fn read_open_code(
         let Some(percent) = number(row.get("percent")).and_then(finite) else {
             continue;
         };
-        let mut window = PlanWindow::new(name, percent);
+        let mut window =
+            PlanWindow::new(name, percent).with_excluded_models(excluded_models.clone());
         if seconds > 0 {
             window = window.with_span(Duration::from_secs(seconds));
         }

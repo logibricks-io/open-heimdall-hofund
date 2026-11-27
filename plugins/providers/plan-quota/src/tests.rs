@@ -270,6 +270,52 @@ fn p3_open_code_reads_all_windows_and_says_why_a_read_failed() {
 }
 
 #[test]
+fn d271_open_code_windows_exclude_only_explicit_free_models() {
+    hofund_kit_upstream::block_on(async {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/usage"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"usage": {
+                "rolling": {"status": "rate-limited", "percent": 100, "resetsAt": "2026-09-25T20:00:00Z"},
+                "weekly": {"status": "rate-limited", "percent": 100, "resetsAt": "2026-09-28T00:00:00Z"}
+            }})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [
+                {"id": "paid-model", "go": {"monthly_usage": {"go": 200}}},
+                {"id": "free-model", "go": {"monthly_usage": null}},
+                {"id": "missing", "go": {}},
+                {"id": "number", "go": {"monthly_usage": 0}},
+                {"id": "object", "go": {"monthly_usage": {}}},
+                {"id": "string", "go": "free"}
+            ]})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_root, host) = host();
+        let cards =
+            crate::key_plans::read_open_code(&query(), &host, &format!("{}/usage", server.uri()))
+                .await
+                .expect("plan");
+        for window in cards[0].windows() {
+            let debug = format!("{window:?}");
+            assert!(
+                debug.contains("excluded_models: [\"free-model\"]"),
+                "{debug}"
+            );
+            assert!(!debug.contains("paid-model"), "{debug}");
+            assert!(!debug.contains("missing"), "{debug}");
+            assert!(!debug.contains("number"), "{debug}");
+            assert!(!debug.contains("object"), "{debug}");
+            assert!(!debug.contains("string"), "{debug}");
+        }
+    });
+}
+
+#[test]
 fn p4_command_code_adds_month_credits_and_keeps_the_cached_plan() {
     hofund_kit_upstream::block_on(async {
         let server = MockServer::start().await;
