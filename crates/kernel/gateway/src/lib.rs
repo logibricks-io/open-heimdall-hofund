@@ -2031,7 +2031,6 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
         return count_tokens(
             app,
             headers,
-            uri,
             request,
             inherited,
             inherited_scope,
@@ -2044,7 +2043,6 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
         return count_tokens(
             app,
             headers,
-            uri,
             request,
             inherited,
             inherited_scope,
@@ -2614,13 +2612,13 @@ fn stream_error(error: &RouterError) -> (StatusCode, String) {
 async fn count_tokens(
     app: Arc<Inner>,
     headers: HeaderMap,
-    uri: Uri,
     request: Request,
     inherited: Option<Identity>,
     inherited_scope: Option<RouteScope>,
     codec_key: &str,
     path_model: Option<String>,
 ) -> Response {
+    let uri = request.uri().clone();
     let Some(codec) = app.codecs.get(codec_key).cloned() else {
         return text_response(StatusCode::NOT_FOUND, "not found");
     };

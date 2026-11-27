@@ -256,9 +256,11 @@ fn fixture() -> Fixture {
             .map(str::to_owned)
     });
     let pins: AgentAccountHook = Arc::new(|agent| {
-        (agent == "writer")
-            .then(|| vec!["relay/bbbbbbbbbb".to_owned()])
-            .unwrap_or_default()
+        if agent == "writer" {
+            vec!["relay/bbbbbbbbbb".to_owned()]
+        } else {
+            Vec::new()
+        }
     });
     let app = Gateway::new(
         Snapshot::new(Router::from_hops(routes, FailoverPolicy::default())),
