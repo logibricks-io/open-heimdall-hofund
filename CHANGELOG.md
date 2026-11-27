@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- D-270: Generative Language encoding now sends an `xhigh` effort as `thinkingLevel: xhigh` for model generation 4 and later instead of `high`; generation 3 and `max` remain `high`, and same-protocol `thinkingConfig` objects stay unchanged. Verified with deterministic codec tests only.
 - D-263: Chat usage counts a top-level `reasoning_tokens` as reasoning when `completion_tokens_details` has no positive count, on a whole reply and on a stream. A positive count in `completion_tokens_details` is kept, and the two numbers are not added.
 - #920 item 3: A Claude `/usage` failure that quotes a standard-error line, or an `is_error` result string, scrubs known secrets (an OAuth or setup token, a refresh token, or an API key value) with the same redaction as a process that ends early, before that text is clipped, so a token that crosses the clip is not returned.
 - D-244: Under strict stays, a token count for a conversation that already has an answerer asks only that account. The local estimate is used when that account is not a candidate or cannot count, and no other account is asked. A new named session whose request already contains a reply stays on the account that history belongs to. The history map is kept in memory only. An unanswered subagent stays with its lead even when the routing does not spread new sessions.
