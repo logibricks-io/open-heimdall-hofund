@@ -175,6 +175,30 @@ fn credential_style(credential: Credential) -> CredentialStyle {
     }
 }
 
+const GENERATIVE_LEVELS: &[(&str, &[&str])] = &[
+    ("gemini-4-neon", &["low", "medium", "high", "xhigh"]),
+    ("gemini-4-argon", &["low", "medium", "high"]),
+];
+
+fn generative_levels(model: &str) -> &'static [&'static str] {
+    let bare = model.rsplit('/').next().unwrap_or(model);
+    GENERATIVE_LEVELS
+        .iter()
+        .find(|(id, _)| id.eq_ignore_ascii_case(bare))
+        .map_or(&[], |(_, levels)| levels)
+}
+
+fn fit_generative_effort(request: &mut Request, target: &Target) {
+    if target.protocol() != ProtocolId::GENERATIVE_LANGUAGE
+        || request.params.effort != Some(hofund_plugin_api::Effort::Xhigh)
+    {
+        return;
+    }
+    if !generative_levels(&request.model).contains(&"xhigh") {
+        request.params.effort = Some(hofund_plugin_api::Effort::High);
+    }
+}
+
 /// A provider whose `execute` goes through the SDK transport on the host
 /// client. Counting goes there too when `counts` is set. Listing and probing
 /// stay on the adapter.
@@ -191,9 +215,10 @@ struct Direct {
 impl UpstreamProvider for Direct {
     async fn execute(
         &self,
-        request: Request,
+        mut request: Request,
         inbound: ProtocolId,
     ) -> Result<PluginCompletion, PluginError> {
+        fit_generative_effort(&mut request, &self.target);
         let model = request.model.clone();
         let result = wire::execute(
             &self.http,
@@ -221,12 +246,13 @@ impl UpstreamProvider for Direct {
 
     async fn count_input(
         &self,
-        request: Request,
+        mut request: Request,
         inbound: ProtocolId,
     ) -> Result<PluginCount, PluginError> {
         if !self.counts {
             return self.bridged.count_input(request, inbound).await;
         }
+        fit_generative_effort(&mut request, &self.target);
         wire::count_input(
             &self.http,
             &self.target,

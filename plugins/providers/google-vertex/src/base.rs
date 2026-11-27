@@ -39,6 +39,20 @@ pub(crate) const GLOBAL_MODELS: &[&str] = &[
     "gemini-2.5-flash-lite",
 ];
 
+const EFFORT_LEVELS: &[(&str, &[&str])] = &[
+    ("gemini-4-neon", &["low", "medium", "high", "xhigh"]),
+    ("gemini-4-argon", &["low", "medium", "high"]),
+];
+
+/// Advertised reasoning levels for a model, or an empty list when unknown.
+pub(crate) fn efforts_for(model: &str) -> &'static [&'static str] {
+    let bare = model.rsplit('/').next().unwrap_or(model);
+    EFFORT_LEVELS
+        .iter()
+        .find(|(id, _)| id.eq_ignore_ascii_case(bare))
+        .map_or(&[], |(_, levels)| levels)
+}
+
 /// Static model ids a location serves.
 ///
 /// `global` is the catalog list. `us` and `eu` serve the Gemini 3 Flash ids.
