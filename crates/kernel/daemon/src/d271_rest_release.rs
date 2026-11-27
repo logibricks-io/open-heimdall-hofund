@@ -100,82 +100,90 @@ fn assert_released_whole_rest(runtime: &Runtime, dir: &Path) {
 }
 
 /// Resolves the synthetic `gated` preset as zero-price-free and delegates the rest.
-struct FlagRegistry;
+///
+/// The attribute keeps this fixture inside the daemon registry scan's test
+/// allowance. The file is already test-only.
+#[cfg(test)]
+mod gated {
+    use std::sync::Arc;
 
-fn gated_preset() -> &'static hofund_plugin_registry::CompiledPreset {
-    static PRESET: std::sync::OnceLock<hofund_plugin_registry::CompiledPreset> =
-        std::sync::OnceLock::new();
-    PRESET.get_or_init(|| hofund_plugin_registry::CompiledPreset {
-        id: "gated",
-        plugin: "openai-compat",
-        name: "Gated",
-        kind: "relay",
-        short: "",
-        note: "",
-        catalog: "",
-        website: "",
-        keys_url: "",
-        site_host: "",
-        key_hint: "",
-        no_key: false,
-        no_list: false,
-        options_base: false,
-        hosts: false,
-        only: "",
-        models: &[],
-        header_hints: &[],
-        endpoint: "",
-        endpoint_hint: "",
-        endpoint_needed: "",
-        region_label: "",
-        decide: "",
-        chat: "http://127.0.0.1:9/v1",
-        responses: "",
-        anthropic: "",
-        generative: "",
-        realtime: "",
-        config: &[],
-        regions: &[],
-        zero_price_free: true,
-    })
-}
+    pub(super) struct FlagRegistry;
 
-impl crate::DaemonRegistry for FlagRegistry {
-    fn factory(&self, id: &str) -> Option<Arc<dyn hofund_plugin_api::DynUpstreamFactory>> {
-        crate::RegistryAdapter.factory(id)
+    fn gated_preset() -> &'static hofund_plugin_registry::CompiledPreset {
+        static PRESET: std::sync::OnceLock<hofund_plugin_registry::CompiledPreset> =
+            std::sync::OnceLock::new();
+        PRESET.get_or_init(|| hofund_plugin_registry::CompiledPreset {
+            id: "gated",
+            plugin: "openai-compat",
+            name: "Gated",
+            kind: "relay",
+            short: "",
+            note: "",
+            catalog: "",
+            website: "",
+            keys_url: "",
+            site_host: "",
+            key_hint: "",
+            no_key: false,
+            no_list: false,
+            options_base: false,
+            hosts: false,
+            only: "",
+            models: &[],
+            header_hints: &[],
+            endpoint: "",
+            endpoint_hint: "",
+            endpoint_needed: "",
+            region_label: "",
+            decide: "",
+            chat: "http://127.0.0.1:9/v1",
+            responses: "",
+            anthropic: "",
+            generative: "",
+            realtime: "",
+            config: &[],
+            regions: &[],
+            zero_price_free: true,
+        })
     }
 
-    fn is_kernel_factory(&self, id: &str) -> bool {
-        crate::RegistryAdapter.is_kernel_factory(id)
-    }
-
-    fn builtin_factory_ids(&self) -> &'static [&'static str] {
-        crate::RegistryAdapter.builtin_factory_ids()
-    }
-
-    fn builtin_protocols(&self) -> Vec<hofund_plugin_api::ProtocolId> {
-        crate::RegistryAdapter.builtin_protocols()
-    }
-
-    fn find_preset(
-        &self,
-        id: &str,
-    ) -> Option<(
-        &'static hofund_plugin_registry::CompiledPreset,
-        Option<&'static str>,
-    )> {
-        if id == "gated" {
-            return Some((gated_preset(), None));
+    impl crate::DaemonRegistry for FlagRegistry {
+        fn factory(&self, id: &str) -> Option<Arc<dyn hofund_plugin_api::DynUpstreamFactory>> {
+            crate::RegistryAdapter.factory(id)
         }
-        crate::RegistryAdapter.find_preset(id)
-    }
 
-    fn agents(&self) -> &'static [&'static hofund_plugin_api::AgentDescription] {
-        crate::RegistryAdapter.agents()
-    }
+        fn is_kernel_factory(&self, id: &str) -> bool {
+            crate::RegistryAdapter.is_kernel_factory(id)
+        }
 
-    fn surfaces(&self) -> Vec<Arc<dyn hofund_plugin_api::InboundSurface>> {
-        crate::RegistryAdapter.surfaces()
+        fn builtin_factory_ids(&self) -> &'static [&'static str] {
+            crate::RegistryAdapter.builtin_factory_ids()
+        }
+
+        fn builtin_protocols(&self) -> Vec<hofund_plugin_api::ProtocolId> {
+            crate::RegistryAdapter.builtin_protocols()
+        }
+
+        fn find_preset(
+            &self,
+            id: &str,
+        ) -> Option<(
+            &'static hofund_plugin_registry::CompiledPreset,
+            Option<&'static str>,
+        )> {
+            if id == "gated" {
+                return Some((gated_preset(), None));
+            }
+            crate::RegistryAdapter.find_preset(id)
+        }
+
+        fn agents(&self) -> &'static [&'static hofund_plugin_api::AgentDescription] {
+            crate::RegistryAdapter.agents()
+        }
+
+        fn surfaces(&self) -> Vec<Arc<dyn hofund_plugin_api::InboundSurface>> {
+            crate::RegistryAdapter.surfaces()
+        }
     }
 }
 
@@ -190,12 +198,12 @@ async fn d271_preupgrade_quota_releases_the_whole_member_rest_on_the_first_plan_
     )
     .expect("config");
     let path = dir.path().join("hofund.toml");
-    let runtime = Runtime::new(Arc::new(FlagRegistry), &path, Some(0));
+    let runtime = Runtime::new(Arc::new(gated::FlagRegistry), &path, Some(0));
     let mut host = crate::ModelsHost::new(
         std::time::Duration::from_secs(2),
         std::time::Duration::from_secs(2),
     )
-    .with_registry(Arc::new(FlagRegistry));
+    .with_registry(Arc::new(gated::FlagRegistry));
     runtime
         .initial_snapshot(&config, Some(&mut host))
         .expect("snapshot");
@@ -239,12 +247,12 @@ async fn d271_model_read_releases_the_whole_member_rest_without_saved_exclusions
     ))
     .expect("config");
     let path = dir.path().join("hofund.toml");
-    let runtime = Runtime::new(Arc::new(FlagRegistry), &path, Some(0));
+    let runtime = Runtime::new(Arc::new(gated::FlagRegistry), &path, Some(0));
     let mut host = crate::ModelsHost::new(
         std::time::Duration::from_secs(2),
         std::time::Duration::from_secs(2),
     )
-    .with_registry(Arc::new(FlagRegistry));
+    .with_registry(Arc::new(gated::FlagRegistry));
     runtime
         .initial_snapshot(&config, Some(&mut host))
         .expect("snapshot");
