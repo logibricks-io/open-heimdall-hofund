@@ -1013,7 +1013,20 @@ fn quota_codes(text: &str) -> bool {
 }
 
 fn resets_at(text: &str) -> bool {
-    dated_reset_with_offset(text) || window_reset_at(text)
+    time_only_reset_at(text) || dated_reset_with_offset(text) || window_reset_at(text)
+}
+
+fn time_only_reset_at(text: &str) -> bool {
+    static PATTERN: OnceLock<Option<regex::Regex>> = OnceLock::new();
+    PATTERN
+        .get_or_init(|| {
+            regex::Regex::new(
+                r"(?i)\bresets? at\s*[0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?\s*(?:UTC|GMT)\b(?:\s*$|\s*[^+0-9:-])",
+            )
+            .ok()
+        })
+        .as_ref()
+        .is_some_and(|pattern| pattern.is_match(text))
 }
 
 fn dated_reset_with_offset(text: &str) -> bool {
@@ -2566,6 +2579,14 @@ mod tests {
         ] {
             assert!(!is_quota_error(429, body.as_bytes()), "{name}");
         }
+    }
+
+    #[test]
+    fn d269_time_only_utc_reset_is_quota() {
+        let body = br#"{"type":"error","error":{"type":"rate_limit_error","message":"Please wait, the window resets at 17:00 UTC"}}"#;
+        assert!(is_quota_error(429, body));
+        let error = classify(429, None, body.to_vec()).expect_err("quota");
+        assert_eq!(error.kind(), PluginErrorKind::Quota);
     }
 
     #[test]
