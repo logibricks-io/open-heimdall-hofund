@@ -833,4 +833,30 @@ mod tests {
         assert_eq!(hofund_daemon::subscription_account_hooks(), running_hooks);
         control.stop().await.expect("stop");
     }
+
+    #[test]
+    fn d279_window_commands_are_granted() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let build = fs::read_to_string(root.join("build.rs")).expect("build.rs");
+        let caps = fs::read_to_string(root.join("capabilities/default.json")).expect("capability");
+        let start = build.find("commands(&[").expect("command list");
+        let rest = &build[start + "commands(&[".len()..];
+        let end = rest.find("])").expect("command list end");
+        let commands: Vec<&str> = rest[..end]
+            .split(',')
+            .map(|part| part.trim().trim_matches('"'))
+            .filter(|name| !name.is_empty())
+            .collect();
+        assert!(
+            commands.iter().any(|name| *name == "check_way_out"),
+            "manifest commands: {commands:?}"
+        );
+        for name in commands {
+            let permission = format!("allow-{}", name.replace('_', "-"));
+            assert!(
+                caps.contains(&format!("\"{permission}\"")),
+                "capability missing {permission}"
+            );
+        }
+    }
 }

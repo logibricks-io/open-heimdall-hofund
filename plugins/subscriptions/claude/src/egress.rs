@@ -177,11 +177,23 @@ impl Flight {
         }
     }
 
+    fn current(&self) -> Option<Reading> {
+        self.result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     fn finish(&self, reading: Reading) {
-        *self
+        let mut slot = self
             .result
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(reading);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slot.is_some() {
+            return;
+        }
+        *slot = Some(reading);
+        drop(slot);
         let wakers = std::mem::take(
             &mut *self
                 .wakers
@@ -193,42 +205,69 @@ impl Flight {
         }
     }
 
+    /// Keeps one waker per waiter. A later poll replaces that slot.
+    fn remember(&self, slot: &mut Option<usize>, waker: &Waker) {
+        let mut wakers = self
+            .wakers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(index) = *slot
+            && let Some(existing) = wakers.get_mut(index)
+        {
+            *existing = waker.clone();
+            return;
+        }
+        *slot = Some(wakers.len());
+        wakers.push(waker.clone());
+    }
+
     fn wait(self: &Arc<Self>) -> FlightWait {
         FlightWait {
             flight: Arc::clone(self),
+            slot: None,
         }
     }
 }
 
 struct FlightWait {
     flight: Arc<Flight>,
+    slot: Option<usize>,
 }
 
 impl Future for FlightWait {
     type Output = Reading;
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Reading> {
-        let ready = self
-            .flight
-            .result
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        if let Some(reading) = ready {
+        let this = self.get_mut();
+        if let Some(reading) = this.flight.current() {
             return Poll::Ready(reading);
         }
-        self.flight
-            .wakers
+        this.flight.remember(&mut this.slot, context.waker());
+        this.flight.current().map_or(Poll::Pending, Poll::Ready)
+    }
+}
+
+/// Removes the shared lookup and wakes its waiters if the leader is dropped.
+struct LeaderGuard<'a> {
+    egress: &'a Egress,
+    choice: String,
+    flight: Arc<Flight>,
+    armed: bool,
+}
+
+impl Drop for LeaderGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
+        self.egress
+            .flights
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(context.waker().clone());
-        let ready = self
-            .flight
-            .result
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        ready.map_or(Poll::Pending, Poll::Ready)
+            .remove(&self.choice);
+        let reading = self.egress.stored(&self.choice);
+        self.flight.finish(reading);
     }
 }
 
@@ -498,16 +537,31 @@ impl Egress {
         };
         if !leader {
             flight.followers.fetch_add(1, Ordering::SeqCst);
-            flight.wait().await;
+            let _ = hofund_plugin_sdk::timeout(HOLD_TIMEOUT, flight.wait()).await;
             return self.stored(&choice);
         }
-        let answer = fetch_trace(host, &choice, &self.trace_target(), HOLD_TIMEOUT).await;
+        let mut guard = LeaderGuard {
+            egress: self,
+            choice: choice.clone(),
+            flight: Arc::clone(&flight),
+            armed: true,
+        };
+        let answer = match hofund_plugin_sdk::timeout(
+            HOLD_TIMEOUT,
+            fetch_trace(host, &choice, &self.trace_target(), TIMEOUT),
+        )
+        .await
+        {
+            Some(answer) => answer,
+            None => TraceAnswer::failed("the lookup timed out"),
+        };
         let reading = self.note(&choice, &answer, now);
         self.flights
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&choice);
         flight.finish(reading.clone());
+        guard.armed = false;
         reading
     }
 }
@@ -593,6 +647,11 @@ fn store_answer(answer: &TraceAnswer, now: SystemTime) -> Stored {
 
 fn project(stored: &Stored, ways: &[String]) -> Reading {
     if stored.loc.is_empty() && stored.ip.is_empty() {
+        let error = if stored.error.is_empty() {
+            "no region in the answer".to_owned()
+        } else {
+            stored.error.clone()
+        };
         return Reading {
             state: State::Unknown,
             loc: String::new(),
@@ -600,7 +659,7 @@ fn project(stored: &Stored, ways: &[String]) -> Reading {
             mine: false,
             via: stored.via.clone(),
             at: stored.at,
-            error: stored.error.clone(),
+            error,
         };
     }
     let mut reading = judge(&stored.loc, &stored.ip, stored.at, ways);
@@ -1870,9 +1929,175 @@ mod tests {
     }
 
     #[test]
-    fn d279_hold_timeout_is_five_seconds() {
-        assert_eq!(HOLD_TIMEOUT, Duration::from_secs(5));
-        assert_eq!(FRESH, Duration::from_secs(30));
+    fn d279_an_answer_with_no_region_keeps_that_error() {
+        let egress = Egress::new(false);
+        egress.note("", &trace_body("fl=1\n"), epoch());
+        assert_eq!(egress.stored("").error, "no region in the answer");
+        egress.note("", &failed_trace(), epoch());
+        assert_eq!(egress.stored("").error, "connection refused");
+    }
+
+    #[test]
+    fn d279_dropping_the_leader_starts_a_fresh_lookup() {
+        hofund_kit_subscription::block_on_paused(async {
+            let (gate, gate_rx) = hofund_kit_subscription::header_park();
+            let server = hofund_kit_subscription::Http1Server::start(vec![
+                hofund_kit_subscription::Http1Response::new(200)
+                    .body(b"ip=198.51.100.1\nloc=CN\n".to_vec())
+                    .park_headers(gate_rx),
+                hofund_kit_subscription::Http1Response::new(200)
+                    .body(b"ip=203.0.113.9\nloc=JP\n".to_vec()),
+            ])
+            .await;
+            let dir = tempfile::tempdir().expect("dir");
+            let host =
+                hofund_kit_subscription::TestHost::open_for_with_pooled_http_and_tokio_monotonic(
+                    PluginKind::Subscription,
+                    PluginId::from_static("claude"),
+                    dir.path(),
+                );
+            let egress = Egress::new(true);
+            egress.set_trace_url(&format!("{}/cdn-cgi/trace", server.base_url()));
+            let now = host.context().clock().now();
+            egress.note("", &TraceAnswer::loc("US"), now);
+            hofund_kit_subscription::advance_time(Duration::from_secs(31)).await;
+            let context = host.context().clone();
+            let mut leader = Box::pin(egress.hold(&context, ""));
+            let mut started = false;
+            for _ in 0..80 {
+                match futures_util::future::select(
+                    leader,
+                    Box::pin(hofund_kit_subscription::yield_times(1)),
+                )
+                .await
+                {
+                    futures_util::future::Either::Left((result, _)) => {
+                        panic!("the leader finished while the trace was parked: {result:?}");
+                    }
+                    futures_util::future::Either::Right((_, pending)) => {
+                        leader = pending;
+                        if server.requests().len() == 1 {
+                            started = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            assert!(started, "the leader reached the parked trace");
+            drop(leader);
+            let mut next = Box::pin(egress.hold(&context, ""));
+            let mut done = None;
+            for _ in 0..80 {
+                match futures_util::future::select(
+                    next,
+                    Box::pin(hofund_kit_subscription::yield_times(1)),
+                )
+                .await
+                {
+                    futures_util::future::Either::Left((result, _)) => {
+                        done = Some(result);
+                        break;
+                    }
+                    futures_util::future::Either::Right((_, pending)) => {
+                        next = pending;
+                    }
+                }
+            }
+            let result = done.expect("the next hold finished");
+            result.expect("a fresh allowed reading is not held");
+            assert_eq!(
+                server.requests().len(),
+                2,
+                "the next hold starts a new lookup"
+            );
+            assert_eq!(egress.stored("").loc, "JP");
+            drop(gate);
+        });
+    }
+
+    #[test]
+    fn d279_hold_returns_when_five_seconds_elapse() {
+        hofund_kit_subscription::block_on_paused(async {
+            let (gate, gate_rx) = hofund_kit_subscription::header_park();
+            let server = hofund_kit_subscription::Http1Server::start(vec![
+                hofund_kit_subscription::Http1Response::new(200)
+                    .body(b"ip=203.0.113.9\nloc=US\n".to_vec())
+                    .park_headers(gate_rx),
+            ])
+            .await;
+            let dir = tempfile::tempdir().expect("dir");
+            let host =
+                hofund_kit_subscription::TestHost::open_for_with_pooled_http_and_tokio_monotonic(
+                    PluginKind::Subscription,
+                    PluginId::from_static("claude"),
+                    dir.path(),
+                );
+            let egress = Egress::new(true);
+            egress.set_trace_url(&format!("{}/cdn-cgi/trace", server.base_url()));
+            let now = host.context().clock().now();
+            egress.note("", &TraceAnswer::loc("US"), now);
+            hofund_kit_subscription::advance_time(Duration::from_secs(31)).await;
+            let context = host.context().clone();
+            let mut hold = Box::pin(egress.hold(&context, ""));
+            let mut started = false;
+            for _ in 0..80 {
+                match futures_util::future::select(
+                    hold,
+                    Box::pin(hofund_kit_subscription::yield_times(1)),
+                )
+                .await
+                {
+                    futures_util::future::Either::Left((result, _)) => {
+                        panic!("hold returned before the deadline: {result:?}");
+                    }
+                    futures_util::future::Either::Right((_, pending)) => {
+                        hold = pending;
+                        if server.requests().len() == 1 {
+                            started = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            assert!(started, "the lookup reached the parked trace");
+            let before = host.context().clock().now();
+            let mut outcome = None;
+            for _ in 0..2 {
+                let step = async {
+                    hofund_plugin_sdk::sleep(Duration::from_millis(5)).await;
+                    hofund_kit_subscription::advance_time(Duration::from_secs(5)).await;
+                };
+                match futures_util::future::select(hold, Box::pin(step)).await {
+                    futures_util::future::Either::Left((result, _)) => {
+                        outcome = Some(result);
+                        break;
+                    }
+                    futures_util::future::Either::Right((_, pending)) => hold = pending,
+                }
+            }
+            let result = outcome.expect("hold did not return when five seconds elapsed");
+            let elapsed = host
+                .context()
+                .clock()
+                .now()
+                .duration_since(before)
+                .expect("clock moved forward");
+            assert!(
+                elapsed >= Duration::from_secs(5),
+                "returned before five seconds ({elapsed:?})"
+            );
+            assert!(
+                elapsed <= Duration::from_secs(5) + Duration::from_millis(50),
+                "returned after {elapsed:?}"
+            );
+            result.expect("unknown holds nothing");
+            let reading = egress.stored("");
+            assert_eq!(reading.state, State::Unknown);
+            assert_eq!(reading.error, "the lookup timed out");
+            assert!(!reading.error.contains("http"));
+            assert_eq!(server.requests().len(), 1);
+            drop(gate);
+        });
     }
 
     #[test]
@@ -1977,7 +2202,13 @@ mod tests {
             }
             let holds = hofund_kit_subscription::join_all(tasks);
             let release = async {
+                let mut spins = 0u32;
                 loop {
+                    spins += 1;
+                    assert!(
+                        spins <= 400,
+                        "the shared lookup did not start within 400 yields"
+                    );
                     let seen = server.requests().len();
                     assert!(
                         seen <= 1,
