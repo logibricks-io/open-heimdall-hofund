@@ -182,7 +182,8 @@ fn encode_request(request: &Request) -> Result<Vec<u8>, CodecError> {
     if let Some(choice) = &request.tool_choice {
         object.insert("toolConfig".to_owned(), encode_tool_config(choice));
     }
-    if let Some(config) = encode_generation(&request.params)? {
+    if let Some(config) = encode_generation(&request.params, generative_generation(&request.model))?
+    {
         object.insert("generationConfig".to_owned(), config);
     }
     if request.stream {
@@ -874,7 +875,10 @@ fn generative_effort(object: &Object) -> Option<Effort> {
     })
 }
 
-fn encode_generation(params: &GenerationParams) -> Result<Option<Value>, CodecError> {
+fn encode_generation(
+    params: &GenerationParams,
+    generation: u64,
+) -> Result<Option<Value>, CodecError> {
     let mut object = Object::new();
     insert_f64(&mut object, "temperature", params.temperature)?;
     insert_f64(&mut object, "topP", params.top_p)?;
@@ -887,7 +891,7 @@ fn encode_generation(params: &GenerationParams) -> Result<Option<Value>, CodecEr
         );
     }
     insert_i64(&mut object, "seed", params.seed);
-    write_generative_effort(&mut object, params);
+    write_generative_effort(&mut object, params, generation);
     params.extensions.merge_into(&mut object);
     if object.is_empty() {
         Ok(None)
@@ -896,7 +900,7 @@ fn encode_generation(params: &GenerationParams) -> Result<Option<Value>, CodecEr
     }
 }
 
-fn write_generative_effort(object: &mut Object, params: &GenerationParams) {
+fn write_generative_effort(object: &mut Object, params: &GenerationParams, generation: u64) {
     let Some(effort) = params.effort else {
         return;
     };
@@ -905,11 +909,29 @@ fn write_generative_effort(object: &mut Object, params: &GenerationParams) {
     {
         return;
     }
-    let value = match effort.generative_level() {
+    let value = match effort.generative_level(generation) {
         Some(level) => serde_json::json!({"thinkingLevel": level}),
         None => serde_json::json!({"thinkingBudget": 0}),
     };
     object.insert("thinkingConfig".to_owned(), value);
+}
+
+fn generative_generation(model: &str) -> u64 {
+    let model = model.to_ascii_lowercase();
+    model
+        .split('/')
+        .find_map(|segment| {
+            let rest = segment.strip_prefix("gemini-")?;
+            let end = rest
+                .bytes()
+                .position(|byte| !byte.is_ascii_digit())
+                .unwrap_or(rest.len());
+            if end == 0 {
+                return None;
+            }
+            Some(rest[..end].parse().unwrap_or(u64::MAX))
+        })
+        .unwrap_or(0)
 }
 
 fn decode_usage(mut object: Object) -> Result<Usage, CodecError> {
