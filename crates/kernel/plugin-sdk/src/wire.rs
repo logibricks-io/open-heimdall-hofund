@@ -2422,6 +2422,17 @@ mod tests {
         assert_eq!(error.message(), "boom");
     }
 
+    #[test]
+    fn d274_r1_numeric_legal_stream_error_is_non_cooling() {
+        let event = StreamEvent::Unknown(hofund_ir::UnknownEvent {
+            name: "error".to_owned(),
+            payload: serde_json::json!({"error":{"code":451,"message":"The request was blocked."}}),
+        });
+        let error = failure_of(&event).expect("legal refusal");
+        assert_eq!(error.status(), Some(451));
+        assert!(!error.cools());
+    }
+
     #[tokio::test]
     async fn b9_committed_refusal_error_keeps_its_event() {
         let bytes = concat!(
