@@ -591,7 +591,7 @@ Antigravity used through the user's own `agy` binary. D-222. Tests `d222_*` use 
 | k | quota / usage | `usageOf`, `kindsOf`, `listedExtra`, `packagesOf`, and `enterpriseUsageOf` read the summary, paid/free package, and enterprise meters for the profile usage page | `quota.rs` splits plan and extra windows from groups or reference codes, retains truthful prepaid remainders without totals, adds unlisted extras, applies UTC+8 plan/enterprise resets, and tolerates detail-meter refusals; key accounts return no windows without calling billing (`r55b_*`, recorded HTTP only) | Done | Fields that `QuotaWindow` cannot represent are documented below |
 | l | model list | `/v3/config` in plugin | `models.rs` reads live config with signed client headers and keeps declared per-site catalogs as fallback, with context/output, image, drawing, and effort metadata | Done | — |
 | m | multi-account | `workbuddy` vs `workbuddy-ai` provider ids | one plugin keeps `site::Site` in every credential and derives account ids from `workbuddy` or `workbuddy-ai` plus uid; the labels select distinct endpoints, auth files, headers, and agent sign-ins | Partial | Not split: the frozen reference requires the two routing labels, which the site-qualified accounts retain, but shows no behavior that requires two hofund subscription ids |
-| n | error classification | `WBRestricted` code 11140 (`workbuddy.go:267-299`) | `errors.rs` accepts top-level, `data`, or `error` numeric/string codes and appends the exact hint; the router applies a generic 403 account rest (`r55_restriction_*`, upstream test) | Done | — |
+| n | error classification | `WBRestricted` code 11140 (`workbuddy.go:267-299`); D-273 restricted 4xx failover | `errors.rs` accepts top-level, `data`, or `error` numeric/string codes, appends the exact hint, and marks the account restricted with same-plugin siblings skipped; the router rests it for two hours and asks the next group member (`r55_restriction_*`, `d273_*`, upstream test and deterministic group fake) | Done | — |
 | o | daily check-in | `workbuddy_checkin.go` + plugin; CN only | `checkin.rs`, `with_daily_checkin`; international and key accounts are inactive | Done | — |
 | p | agent sign-in | desktop auth paths | `AgentSignIn` workbuddy + workbuddy-ai (`lib.rs:31-35`) | Done | — |
 | q | extras | User-Agent must be WorkBuddy/version (`index.mjs:8-9`) | `creds.rs` sends the reference's 5.9.3 app/2.165.0 CLI identity, attribution and chat SDK headers per site (`r55_signed_headers_match_each_site`, `r55_chat_headers_match_the_desktop_cli`) | Done | — |
@@ -604,7 +604,7 @@ Antigravity used through the user's own `agy` binary. D-222. Tests `d222_*` use 
 - Chat completions use `/v2` with gzip request bodies; billing and other non-completion calls stay uncompressed.
 - Profile usage reads plan/extra/prepaid summary windows, paid/free package details, plan cycle resets, and the enterprise fallback.
 - Chat, models, quota, check-in, and refresh use the reference's client identity and applicable signing headers; key material is sensitive and never included in errors.
-- Code 11140 produces the reference hint; the router applies a generic 403 account rest.
+- Code 11140 produces the reference hint; D-273 marks classified 4xx responses restricted, rests the account for two hours, skips same-plugin siblings, and asks the next group member.
 - Encrypted desktop tokens remain unreadable by design and direct the user to browser sign-in without rendering the encrypted envelope.
 
 **R-55c completed**
@@ -643,7 +643,7 @@ Antigravity used through the user's own `agy` binary. D-222. Tests `d222_*` use 
 | k | quota / usage | Monitor quota plus Start Plan balance buckets; a live sibling supersedes a spent bucket for the same model | `quota.rs` monitor endpoints and `gift.rs` live/pending windows; spent siblings are non-blocking and recorded quota and trial-routing fixtures cover live-plan selection | Done | — |
 | l | model list | Latest remote/local provider config, static fallback, and gift-tied model entries | `provider_config.rs` chooses by revision; `models.rs` adds Start and `-Trial` entries from every live grant | Done | No 10-minute config cache; mocks only |
 | m | multi-account | team seats from `setting.json`; separate `(team)` labels | `team.rs` project keys and separate labels; native sign-in supports team selection | Done | — |
-| n | error classification | ZCodeRestricted hint code 3012 and two-hour rest | `http_auth.rs` keeps HTTP 405, adds the support hint and cooldown | Done | — |
+| n | error classification | ZCodeRestricted hint code 3012 and two-hour rest; D-273 newer suspension wording fails over | `http_auth.rs` keeps HTTP 405, adds the support hint and cooldown, and marks the account restricted with same-plugin siblings skipped; the next group member answers (`r57_*`, `d273_*`, deterministic group fake) | Done | — |
 | o | daily check-in | `claimDaily` reads marketing/touch and posts `/billing/claim`; codes 0/1003/1004, captcha fail-closed, 30-minute recheck; post-freeze `ed1d83a5b` and community `fdbf261b` suppress same-day answered plans and recheck claimed/done | `checkin.rs` maps all outcomes without a captcha solver; `CheckinResult::recheck_at` and daemon-persisted deadlines rerun inactive, ineligible, failed, claimed, and done claims after 30 minutes. D-258 keeps claimed/1003/3007 answers per account and Beijing day in memory, never reposts them, keeps a no-new-plan recheck done, retries failed/ineligible plans, and resets at Beijing midnight (`d258_*`) | Done | Recorded mocks and fixed clocks only |
 | p | agent sign-in switch | Go writes gateway provider config; team keys are created when absent; the encrypted account store is read-only in the reference | `team.rs` creates `zcode-team-api-key` with `keyType: 2`; `agent_sign_in.rs` still refuses credential switching | Partial | No safe encrypted-store account-switch writer is specified, so switching stays fail-closed |
 | q | extras | `X-Device-Mid`; plugin pins `APP_VERSION` 3.17.2 and the marketing/Start version headers | `lib.rs` pins 3.17.2; `api.rs`, `checkin.rs`, and `start.rs` send the reference UA and `X-ZCode-App-Version` where used | Done | — |
@@ -651,7 +651,7 @@ Antigravity used through the user's own `agy` binary. D-222. Tests `d222_*` use 
 **R-57 completed**
 
 - Kept `lapsed` across same-secret team refresh re-imports, serialized re-import through the account lease, failed closed on relative credential paths, and added separate team labels (#613 follow-ups).
-- Mapped code 3012 to the reference's user-facing risk-control hint and two-hour cooldown.
+- Mapped code 3012 to the reference's user-facing risk-control hint and two-hour cooldown. D-273 also marks the account restricted, skips same-plugin siblings, and fails over to the next group member for the newer 405 suspension wording.
 
 **R-57b completed**
 

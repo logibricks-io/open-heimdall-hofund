@@ -26,6 +26,7 @@ pub struct ProviderError {
     credit: bool,
     credit_soon: bool,
     cooldown: bool,
+    skip_failover_same_plugin: bool,
     account_restricted: bool,
     ordinary_failure: bool,
     subscription_suspended: bool,
@@ -102,6 +103,7 @@ impl ProviderError {
             credit: false,
             credit_soon: false,
             cooldown: true,
+            skip_failover_same_plugin: false,
             account_restricted: false,
             ordinary_failure: false,
             subscription_suspended: false,
@@ -133,6 +135,7 @@ impl ProviderError {
                 credit: false,
                 credit_soon: false,
                 cooldown: true,
+                skip_failover_same_plugin: false,
                 account_restricted: false,
                 ordinary_failure: false,
                 subscription_suspended: false,
@@ -159,6 +162,7 @@ impl ProviderError {
         let credit = error.is_credit();
         let credit_soon = error.credit_soon();
         let cooldown = error.cools();
+        let skip_failover_same_plugin = error.skips_failover_same_plugin();
         let account_restricted = error.is_account_restricted();
         let ordinary_failure = error.is_ordinary_failure();
         let subscription_suspended = error.is_subscription_suspended();
@@ -187,6 +191,7 @@ impl ProviderError {
         converted.credit = credit;
         converted.credit_soon = credit_soon;
         converted.cooldown = cooldown;
+        converted.skip_failover_same_plugin = skip_failover_same_plugin;
         converted.account_restricted = account_restricted;
         converted.ordinary_failure = ordinary_failure;
         converted.subscription_suspended = subscription_suspended;
@@ -333,11 +338,27 @@ impl ProviderError {
             credit: false,
             credit_soon: false,
             cooldown: true,
+            skip_failover_same_plugin: false,
             account_restricted: false,
             ordinary_failure: false,
             subscription_suspended: false,
             billed: None,
         }
+    }
+
+    /// Marks that later route members with the same plugin id must not be asked.
+    ///
+    /// See [`hofund_plugin_api::PluginError::skip_failover_same_plugin`].
+    #[must_use]
+    pub const fn skip_failover_same_plugin(mut self) -> Self {
+        self.skip_failover_same_plugin = true;
+        self
+    }
+
+    /// Whether later members with the same plugin id must be skipped.
+    #[must_use]
+    pub const fn skips_failover_same_plugin(&self) -> bool {
+        self.skip_failover_same_plugin
     }
 
     /// Marks an account its vendor has restricted.
@@ -383,5 +404,20 @@ impl ProviderError {
     #[must_use]
     pub const fn is_subscription_suspended(&self) -> bool {
         self.subscription_suspended
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProviderError;
+
+    #[test]
+    fn d273_from_plugin_preserves_sibling_skip() {
+        let error = hofund_plugin_api::PluginError::status_error(405, "account restricted")
+            .account_restricted()
+            .skip_failover_same_plugin();
+        let converted = ProviderError::from_plugin(error);
+        assert!(converted.is_account_restricted());
+        assert!(converted.skips_failover_same_plugin());
     }
 }
