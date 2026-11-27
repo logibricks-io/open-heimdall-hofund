@@ -296,6 +296,15 @@ impl SubscriptionRisks {
         lines
     }
 
+    fn place(&self) -> String {
+        for state in self.runtime.subscription_states().values() {
+            if let Some(text) = state.instance().way_out_place() {
+                return text;
+            }
+        }
+        String::new()
+    }
+
     async fn recheck(&self) -> Result<(), DaemonError> {
         for state in self.runtime.subscription_states().values() {
             state
@@ -325,6 +334,15 @@ pub fn way_out_warnings(running: &crate::Running) -> Vec<String> {
     running
         .resource::<SubscriptionRisks>()
         .map(SubscriptionRisks::warnings)
+        .unwrap_or_default()
+}
+
+/// Address and region of a subscription way out, when one has been read.
+#[must_use]
+pub fn way_out_place(running: &crate::Running) -> String {
+    running
+        .resource::<SubscriptionRisks>()
+        .map(SubscriptionRisks::place)
         .unwrap_or_default()
 }
 

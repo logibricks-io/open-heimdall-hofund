@@ -41,6 +41,7 @@ pub fn run() -> Result<(), String> {
             set_agent,
             usage_summary,
             open_config,
+            check_way_out,
         ])
         .setup(|app| {
             let snapshot = {
@@ -305,6 +306,19 @@ async fn usage_summary(state: tauri::State<'_, AppState>) -> Result<String, Stri
 async fn open_config(state: tauri::State<'_, AppState>) -> Result<(), String> {
     let mut control = state.control.lock().await;
     control.open_config()
+}
+
+#[tauri::command]
+async fn check_way_out(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<Snapshot, String> {
+    let mut control = state.control.lock().await;
+    let _ = control.recheck_way_out().await;
+    let snapshot = control.snapshot(&hofund_daemon::agent_session());
+    drop(control);
+    publish(&app, &snapshot)?;
+    Ok(snapshot)
 }
 
 fn focus_usage_window(app: &tauri::AppHandle) {

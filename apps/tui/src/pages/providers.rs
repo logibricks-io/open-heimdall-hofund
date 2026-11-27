@@ -30,6 +30,7 @@ pub struct ProviderPage {
     mode: Mode,
     balances: Vec<String>,
     way_out: Vec<String>,
+    way_out_place: String,
     confirm: bool,
     read_token: u64,
     models_token: Option<u64>,
@@ -204,6 +205,11 @@ impl ProviderPage {
     /// Shows way-out warnings above the provider list. Empty clears them.
     pub fn set_way_out(&mut self, warnings: Vec<String>) {
         self.way_out = warnings;
+    }
+
+    /// Shows the address and region above the provider list. Empty clears it.
+    pub fn set_way_out_place(&mut self, place: String) {
+        self.way_out_place = place;
     }
 
     /// Opens or refreshes the model picker.
@@ -939,6 +945,12 @@ impl ProviderPage {
 
     fn list_lines(&self, height: u16, theme: &Theme) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
+        if !self.way_out_place.is_empty() {
+            lines.push(Line::from(Span::styled(
+                format!("  Way out: {}  Check", self.way_out_place),
+                theme.text_style(),
+            )));
+        }
         for warning in &self.way_out {
             lines.push(Line::from(Span::styled(
                 format!("  {warning}"),
@@ -1162,6 +1174,7 @@ fn ask_lines(ask: &Ask, theme: &Theme) -> Vec<Line<'static>> {
 mod tests {
     use super::ProviderPage;
     use crate::intent::ControlIntent;
+    use crate::theme::Theme;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use hofund_control_client::hofund_control_proto::{
         ModelEntry, PicksResponse, PresetEntry, PresetKind, ProviderSummary,
@@ -1210,6 +1223,33 @@ mod tests {
     fn d245_check_again_queues_a_way_out_check() {
         let mut page = loaded();
         page.set_way_out(vec!["outside".to_owned()]);
+        let effect = page.on_key(character('g'));
+        assert!(matches!(
+            effect.intents.as_slice(),
+            [ControlIntent::RecheckWayOut]
+        ));
+    }
+
+    #[test]
+    fn d279_way_out_line_shows_the_address_region_and_check() {
+        let mut page = loaded();
+        page.set_way_out_place("203.0.113.9 · US".to_owned());
+        let lines = page.list_lines(20, &Theme::monochrome());
+        let text: String = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("203.0.113.9 · US"),
+            "address and region: {text}"
+        );
+        assert!(text.contains("Check"), "check: {text}");
         let effect = page.on_key(character('g'));
         assert!(matches!(
             effect.intents.as_slice(),
