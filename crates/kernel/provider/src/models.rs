@@ -530,6 +530,16 @@ pub(crate) fn model_spec(row: &Value, gemini: bool) -> Result<Option<ModelSpec>,
         return Ok(None);
     };
     let kind = row.get("kind").and_then(Value::as_str).unwrap_or("");
+    let kind = if kind == "decision"
+        || row
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("decision"))
+    {
+        "decision"
+    } else {
+        kind
+    };
     let Some(tags) = hofund_plugin_sdk::classify::classify_model(id, kind) else {
         return Ok(None);
     };

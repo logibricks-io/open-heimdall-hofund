@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- D-276: Live model rows marked `"type": "decision"` are kept off the default chat model list, including rows with a separate chat `kind`. OpenCode Go's preset now declares its System One `Decide` base as data only; no decider runtime is added. Verified with loopback mocks only.
 - D-270: Generative Language providers now send `thinkingLevel: xhigh` only when the model's advertised levels include it; generation 3, models without that level or with unknown levels, and `max` remain `high`, and same-protocol `thinkingConfig` objects stay unchanged. Verified with deterministic provider and codec tests only.
 - D-263: Chat usage counts a top-level `reasoning_tokens` as reasoning when `completion_tokens_details` has no positive count, on a whole reply and on a stream. A positive count in `completion_tokens_details` is kept, and the two numbers are not added.
 - #920 item 3: A Claude `/usage` failure that quotes a standard-error line, or an `is_error` result string, scrubs known secrets (an OAuth or setup token, a refresh token, or an API key value) with the same redaction as a process that ends early, before that text is clipped, so a token that crosses the clip is not returned.
