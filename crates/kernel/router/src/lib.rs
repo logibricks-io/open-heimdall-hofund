@@ -746,7 +746,7 @@ impl Router {
                         route
                             .hops
                             .iter()
-                            .any(|hop| scope.allows_hop(model, model, hop))
+                            .any(|hop| scope.allows_listed_hop(model, model, hop))
                     })
             })
             .map(|(model, _)| model.clone())
@@ -2108,10 +2108,12 @@ fn scoped_hops(
         .into_iter()
         .filter(|hop| scope.allows_member(hop.member.as_ref()))
         .collect();
-    if account_hops.is_empty() && !scope.accounts.is_empty() {
+    if account_hops.is_empty() && (!scope.accounts.is_empty() || !scope.agent_accounts.is_empty()) {
         return Err(RouterError::AccountScope {
             model: asked.to_owned(),
             accounts: scope.accounts.clone(),
+            agent: scope.agent.clone(),
+            agent_accounts: scope.agent_accounts.clone(),
         });
     }
     Ok(account_hops)
@@ -3665,8 +3667,12 @@ pub enum RouterError {
     AccountScope {
         /// The requested model.
         model: String,
-        /// The caller's account patterns.
+        /// The caller's gateway-key account patterns.
         accounts: Vec<String>,
+        /// Agent id when an agent pin excluded every candidate. Empty otherwise.
+        agent: String,
+        /// Account ids or key fingerprints that agent uses alone.
+        agent_accounts: Vec<String>,
     },
     /// More than one provider serves this model name.
     #[error("model `{model}` is served by more than one provider: {candidates}")]

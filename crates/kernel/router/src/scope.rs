@@ -9,13 +9,29 @@ pub struct RouteScope {
     pub models: Vec<String>,
     /// Account ids or provider-key fingerprints. Empty allows every account.
     pub accounts: Vec<String>,
+    /// Agent these pins belong to. Empty when the caller has no agent pin.
+    pub agent: String,
+    /// Account ids or key fingerprints this agent uses alone.
+    ///
+    /// Empty means the agent uses every account. A provider named here is
+    /// limited to the listed refs; other providers stay open. The model list
+    /// ignores this field.
+    pub agent_accounts: Vec<String>,
 }
 
 impl RouteScope {
     /// Whether a hop may serve a request for `asked` on `route`.
     #[must_use]
     pub fn allows_hop(&self, asked: &str, route: &str, hop: &Hop) -> bool {
-        self.allows_model(asked, route, hop) && self.allows_member(hop.member.as_ref())
+        self.allows_listed_hop(asked, route, hop) && self.allows_agent(hop.member.as_ref())
+    }
+
+    /// Whether the hop may appear on a model list.
+    ///
+    /// Agent pins do not hide models. A gateway-key account list still does.
+    #[must_use]
+    pub fn allows_listed_hop(&self, asked: &str, route: &str, hop: &Hop) -> bool {
+        self.allows_model(asked, route, hop) && self.allows_key(hop.member.as_ref())
     }
 
     /// Whether the hop's provider and wire or route model is in scope.
@@ -49,11 +65,15 @@ impl RouteScope {
     /// Whether any stable account id or provider-key fingerprint is allowed.
     #[must_use]
     pub fn allows_member(&self, member: &dyn Member) -> bool {
-        self.accounts.is_empty()
-            || member
-                .account_refs()
-                .iter()
-                .any(|reference| allows_account(&self.accounts, member.scope_provider(), reference))
+        self.allows_key(member) && self.allows_agent(member)
+    }
+
+    fn allows_key(&self, member: &dyn Member) -> bool {
+        account_list_allows(&self.accounts, member)
+    }
+
+    fn allows_agent(&self, member: &dyn Member) -> bool {
+        account_list_allows(&self.agent_accounts, member)
     }
 }
 
@@ -87,6 +107,19 @@ fn glob_matches(pattern: &str, id: &str) -> bool {
         previous = current;
     }
     previous[id.len()]
+}
+
+fn account_list_allows(accounts: &[String], member: &dyn Member) -> bool {
+    if accounts.is_empty() {
+        return true;
+    }
+    let mut refs = member.account_refs();
+    let key = member.provider_key_id();
+    if !key.is_empty() && !refs.iter().any(|reference| reference == key) {
+        refs.push(key.to_owned());
+    }
+    refs.iter()
+        .any(|reference| allows_account(accounts, member.scope_provider(), reference))
 }
 
 fn allows_account(accounts: &[String], provider: &str, reference: &str) -> bool {

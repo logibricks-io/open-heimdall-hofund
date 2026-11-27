@@ -67,6 +67,7 @@ fn d55_1_key_with_model_does_not_inherit_user_group() {
     let scope = RouteScope {
         models: vec!["primary/demo".to_owned()],
         accounts: Vec::new(),
+        ..RouteScope::default()
     };
     let member = hop("primary", "demo");
     assert!(!scope.allows_model("group/only-38", "group/only-38", &member));
@@ -78,6 +79,7 @@ fn d55_2_key_naming_group_may_use_it() {
     let scope = RouteScope {
         models: vec!["group/only-38".to_owned()],
         accounts: Vec::new(),
+        ..RouteScope::default()
     };
     let member = hop("primary", "demo");
     assert!(scope.allows_model("group/only-38", "group/only-38", &member));
@@ -88,6 +90,7 @@ fn d55_3_found_pool_passes_when_each_member_is_allowed() {
     let scope = RouteScope {
         models: vec!["primary/a".to_owned(), "spare/a".to_owned()],
         accounts: Vec::new(),
+        ..RouteScope::default()
     };
     let member = hop("primary", "a");
     assert!(scope.allows_model("a", "a", &member));
@@ -114,6 +117,7 @@ fn d55_6_models_list_hides_groups_without_group_scope() {
     let scope = RouteScope {
         models: vec!["primary/demo".to_owned()],
         accounts: Vec::new(),
+        ..RouteScope::default()
     };
     let listed = router.models_scoped(Some(&scope));
     assert!(listed.iter().any(|id| id == "demo"));
@@ -210,6 +214,7 @@ async fn d55_7_bare_name_resolves_model_route_before_group() {
     let scope = RouteScope {
         models: vec!["primary/shared".to_owned()],
         accounts: Vec::new(),
+        ..RouteScope::default()
     };
     let mut request = Request::new("shared");
     let mut message = Message::new(Role::User);
@@ -227,6 +232,7 @@ fn d55_8_group_wildcard_scope_allows_any_group() {
     let scope = RouteScope {
         models: vec!["group/*".to_owned()],
         accounts: Vec::new(),
+        ..RouteScope::default()
     };
     let member = hop("primary", "demo");
     assert!(scope.allows_model("group/only-38", "group/only-38", &member));

@@ -34,6 +34,7 @@ use hofund_usage::Ledger;
 
 mod account_discovery;
 mod adapt;
+mod agent_accounts;
 mod agent_login;
 mod agent_visible;
 mod balances;
@@ -70,6 +71,8 @@ mod d271_free_models;
 mod d271_rest_release;
 #[cfg(test)]
 mod d273_restricted_failover;
+#[cfg(test)]
+mod d278_agent_accounts;
 mod effort_variants;
 mod events;
 mod log_tail;
@@ -597,6 +600,12 @@ async fn start_inner(
     let agent_descriptions = registry.agents();
     let session_header_names =
         hofund_gateway::session_headers::gateway_session_header_names(agent_descriptions);
+    let pin_configs = runtime.config_updates();
+    let pin_runtime = Arc::clone(&runtime);
+    let agent_accounts: hofund_gateway::AgentAccountHook = Arc::new(move |agent| {
+        let config = pin_configs.borrow();
+        crate::agent_accounts::pins(&config, agent, &pin_runtime.subscription_states())
+    });
     let request_agent: hofund_gateway::RequestAgentHook = Arc::new({
         let descriptions = agent_descriptions;
         move |headers, identity| {
@@ -629,6 +638,7 @@ async fn start_inner(
     .with_surface_http(surface_http(&config, max_idle_per_host))
     .with_visible_catalog(Arc::clone(&visible_catalog))
     .with_request_agent(request_agent)
+    .with_agent_accounts(agent_accounts)
     .with_session_header_names(session_header_names);
     let quotas = Arc::new(quotas::DaemonQuotas::new(
         Arc::clone(&runtime),
