@@ -36,10 +36,11 @@ impl SealedState {
         rewrite(body, |seal| seals.contains(&seal))
     }
 
-    fn refused(&self, key: &str, who: &str, body: &[u8]) {
+    fn refused(&self, key: &str, who: &str, body: &[u8], replacement: &[u8]) {
+        let remaining = sealed_items(replacement);
         let seals = sealed_items(body)
-            .into_iter()
-            .map(|(_, seal)| seal)
+            .difference(&remaining)
+            .copied()
             .collect::<BTreeSet<_>>();
         if seals.is_empty() {
             return;
@@ -128,7 +129,8 @@ impl AttemptHook for SealedHook {
             }
         }
         let replacement = without_sealed(&self.body)?;
-        self.state.refused(&self.key, &who, &self.body);
+        self.state
+            .refused(&self.key, &who, &self.body, &replacement);
         Some(replacement)
     }
 
@@ -186,9 +188,9 @@ fn rewrite(body: &[u8], refused: impl Fn(u64) -> bool) -> Option<Vec<u8>> {
     serde_json::to_vec(&value).ok()
 }
 
-fn sealed_items(body: &[u8]) -> Vec<(String, u64)> {
+fn sealed_items(body: &[u8]) -> BTreeSet<u64> {
     let Ok(value) = serde_json::from_slice::<Value>(body) else {
-        return Vec::new();
+        return BTreeSet::new();
     };
     value
         .get("input")
@@ -197,11 +199,11 @@ fn sealed_items(body: &[u8]) -> Vec<(String, u64)> {
         .flatten()
         .flat_map(|item| {
             let mut seals = Vec::new();
-            if let Some((encrypted, seal)) = sealed_item(item) {
-                seals.push((encrypted.to_owned(), seal));
+            if let Some((_, seal)) = sealed_item(item) {
+                seals.push(seal);
             }
-            if item.get("type").and_then(Value::as_str) == Some("agent_message") {
-                for part in item
+            if let Some(agent) = agent_message(item) {
+                for part in agent
                     .get("content")
                     .and_then(Value::as_array)
                     .into_iter()
@@ -212,7 +214,7 @@ fn sealed_items(body: &[u8]) -> Vec<(String, u64)> {
                             part.get("encrypted_content").and_then(Value::as_str)
                         && !encrypted.is_empty()
                     {
-                        seals.push((encrypted.to_owned(), seal_hash(encrypted)));
+                        seals.push(seal_hash(encrypted));
                     }
                 }
             }
@@ -233,11 +235,23 @@ fn sealed_item(item: &Value) -> Option<(&str, u64)> {
     Some((encrypted, seal_hash(encrypted)))
 }
 
-fn without_sealed_agent_message(item: &Value, refused: &impl Fn(u64) -> bool) -> Option<Value> {
-    if item.get("type").and_then(Value::as_str)? != "agent_message" {
-        return None;
+fn agent_message(item: &Value) -> Option<&Value> {
+    match item.get("type").and_then(Value::as_str) {
+        Some("agent_message") => Some(item),
+        Some("message") => {
+            let parts = item.get("content")?.as_array()?;
+            let [part] = parts.as_slice() else {
+                return None;
+            };
+            (part.get("type").and_then(Value::as_str) == Some("agent_message")).then_some(part)
+        }
+        _ => None,
     }
-    let parts = item.get("content")?.as_array()?;
+}
+
+fn without_sealed_agent_message(item: &Value, refused: &impl Fn(u64) -> bool) -> Option<Value> {
+    let agent = agent_message(item)?;
+    let parts = agent.get("content")?.as_array()?;
     let message = parts.iter().any(|part| {
         part.get("type").and_then(Value::as_str) == Some("input_text")
             && part
@@ -258,7 +272,7 @@ fn without_sealed_agent_message(item: &Value, refused: &impl Fn(u64) -> bool) ->
     if !parts.iter().any(&matching) {
         return None;
     }
-    let author = item
+    let author = agent
         .get("author")
         .and_then(Value::as_str)
         .filter(|author| !author.is_empty())
@@ -266,7 +280,7 @@ fn without_sealed_agent_message(item: &Value, refused: &impl Fn(u64) -> bool) ->
     let note = format!(
         "[This message from {author} was sealed by the server that answered that agent, and only that server can open it, so it was left out here. An agent's final result still reaches the agent that spawned it as text.]"
     );
-    let mut replacement = item.clone();
+    let mut replacement = agent.clone();
     replacement["content"] = Value::Array(
         parts
             .iter()
@@ -279,7 +293,12 @@ fn without_sealed_agent_message(item: &Value, refused: &impl Fn(u64) -> bool) ->
             })
             .collect(),
     );
-    Some(replacement)
+    if item.get("type").and_then(Value::as_str) == Some("agent_message") {
+        return Some(replacement);
+    }
+    let mut wrapper = item.clone();
+    wrapper["content"] = Value::Array(vec![replacement]);
+    Some(wrapper)
 }
 
 fn seal_hash(encrypted: &str) -> u64 {
@@ -306,6 +325,9 @@ fn expired(at: SystemTime, now: SystemTime) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use hofund_codec::{Codec, OpenAiResponses};
+    use serde_json::Value;
+
     use super::{SealedHook, SealedState, foreign_reasoning, without_sealed};
     use crate::affinity::Conversation;
     use crate::{Attempt, AttemptHook, MemberAttempt};
@@ -476,5 +498,124 @@ mod tests {
             hook.retry(&attempt(), 400, b"invalid_encrypted_content")
                 .is_none()
         );
+    }
+
+    fn d272_message(id: &str, seal: &str) -> Value {
+        serde_json::json!({
+            "type": "agent_message",
+            "id": id,
+            "author": "/root/sub",
+            "recipient": "/root",
+            "content": [
+                {"type": "input_text", "text": "Message Type: MESSAGE\nTask name: /root\nSender: /root/sub\nPayload:\n"},
+                {"type": "encrypted_content", "encrypted_content": seal}
+            ]
+        })
+    }
+
+    fn d272_task() -> Value {
+        serde_json::json!({
+            "type": "agent_message",
+            "id": "amsg_task",
+            "author": "/root",
+            "recipient": "/root/sub",
+            "content": [
+                {"type": "input_text", "text": "Message Type: NEW_TASK\nTask name: /root/sub\nPayload:\n"},
+                {"type": "encrypted_content", "encrypted_content": "sealed-task"}
+            ]
+        })
+    }
+
+    fn d272_agent_item(item: &Value) -> Option<&Value> {
+        if item.get("type").and_then(Value::as_str) == Some("agent_message") {
+            return Some(item);
+        }
+        let parts = item.get("content")?.as_array()?;
+        let [part] = parts.as_slice() else {
+            return None;
+        };
+        (part.get("type").and_then(Value::as_str) == Some("agent_message")).then_some(part)
+    }
+
+    fn d272_agent_with_id<'a>(body: &'a Value, id: &str) -> &'a Value {
+        body["input"]
+            .as_array()
+            .expect("input")
+            .iter()
+            .filter_map(d272_agent_item)
+            .find(|item| item["id"] == id)
+            .expect("agent item")
+    }
+
+    #[test]
+    fn d272_prepare_handles_codec_wrapped_agent_messages() {
+        let old = d272_message("amsg_old", "old-agent-seal");
+        let task = d272_task();
+        let original = serde_json::to_vec(&serde_json::json!({
+            "model": "demo",
+            "input": [old.clone(), task.clone()]
+        }))
+        .expect("original");
+        let hook = SealedHook::new(
+            SealedState::default(),
+            &Conversation::new("demo|wrapped", 2, false).with_body(original),
+            None,
+        );
+        hook.retry(&attempt(), 400, b"invalid_encrypted_content")
+            .expect("initial retry");
+
+        let new = d272_message("amsg_new", "new-agent-seal");
+        let later = serde_json::to_vec(&serde_json::json!({
+            "model": "demo",
+            "input": [old, new, task]
+        }))
+        .expect("later");
+        let request = OpenAiResponses
+            .decode_request(&later)
+            .expect("decode request");
+        let encoded = OpenAiResponses
+            .encode_request(&request)
+            .expect("encode request");
+        let wrapped: Value = serde_json::from_slice(&encoded).expect("encoded body");
+        assert_eq!(wrapped["input"][0]["type"], "message");
+        assert_eq!(d272_agent_with_id(&wrapped, "amsg_old")["id"], "amsg_old");
+
+        let prepared = hook
+            .prepare(&attempt(), &encoded)
+            .expect("wrapped refused seal removed");
+        let prepared: Value = serde_json::from_slice(&prepared).expect("prepared body");
+        let old = d272_agent_with_id(&prepared, "amsg_old");
+        assert_eq!(old["content"][1]["type"], "input_text");
+        assert!(
+            old["content"][1]["text"]
+                .as_str()
+                .is_some_and(|note| note.contains("left out"))
+        );
+        assert_eq!(
+            d272_agent_with_id(&prepared, "amsg_new")["content"][1]["encrypted_content"],
+            "new-agent-seal"
+        );
+        assert_eq!(
+            d272_agent_with_id(&prepared, "amsg_task")["content"][1]["encrypted_content"],
+            "sealed-task"
+        );
+    }
+
+    #[test]
+    fn d272_kept_new_task_seal_is_not_recorded_as_refused() {
+        let original = serde_json::to_vec(&serde_json::json!({
+            "input": [d272_message("amsg_old", "old-agent-seal"), d272_task()]
+        }))
+        .expect("original");
+        let hook = SealedHook::new(
+            SealedState::default(),
+            &Conversation::new("demo|removed-only", 2, false).with_body(original),
+            None,
+        );
+        hook.retry(&attempt(), 400, b"invalid_encrypted_content")
+            .expect("initial retry");
+
+        let later = br#"{"input":[{"type":"reasoning","encrypted_content":"sealed-task"}]}"#;
+        assert!(hook.prepare(&attempt(), later).is_none());
     }
 }
