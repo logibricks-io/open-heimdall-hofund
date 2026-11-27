@@ -106,13 +106,37 @@ sets a key's share under weighted routing (0 resets it to the default, 1).
 `key-protocol` restricts a key to one codec, and `any` clears the restriction.
 `key-use` enables the selected key and makes it first. Removing or disabling
 the last enabled key is refused. `key-replace` preserves name, order, protocol,
-weight, and enabled state, returns the old and new fingerprints, and moves
-rests to the new member id. The control API exposes the same operations at
+weight, and enabled state, returns the old and new fingerprints, moves
+rests to the new member id, and moves an accounts-by-agent pin that stored
+the old fingerprint. The control API exposes the same operations at
 `GET` and `POST /v1/hofund/providers/{id}/keys`.
 
 `at-once` sets the limit, `off` stores zero for no limit, and `default` removes
 the user override so the plugin declaration applies. A subscription id edits
 its `[[subscriptions]]` entry through the same revision-checked control path.
+
+## Accounts by agent
+
+A provider or subscription can pin an agent to one account or key:
+
+```toml
+[providers.agent_accounts]
+writer = "bbbbbbbbbb"
+```
+
+The value is a key fingerprint, a key's display name, or a subscription account
+id. The name is kept only when it names exactly one current key. An empty
+value clears that agent. An agent with no entry uses every account. A
+fingerprint that no longer belongs to the provider is ignored on the next
+request, so that agent uses the provider as before. Turning the pinned key
+off keeps the pin: the request does not move to another key of that provider.
+While the pinned key is resting or rate-limited, the request uses the model's
+other providers and does not ask that provider's other keys. The model list
+is unchanged. A gateway key that already lists accounts intersects the pin;
+when the two lists share nothing, the request is refused and names both.
+
+There is no command for this table. Edit the configuration, or replace a key
+and the stored fingerprint moves with it.
 
 ## Follow-ups
 

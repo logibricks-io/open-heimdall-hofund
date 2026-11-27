@@ -93,6 +93,13 @@ const SURFACE_TIMEOUT: Duration = Duration::from_secs(285);
 /// Resolves the agent id on an authenticated request, when known.
 pub type RequestAgentHook = Arc<dyn Fn(&HeaderMap, &Identity) -> Option<String> + Send + Sync>;
 
+/// Accounts by agent for the agent id on a request.
+///
+/// Each entry is `provider/account`. An empty list means the agent uses every
+/// account. The daemon reads the published configuration, so a reload is live
+/// without rebuilding providers for an agent that has no pin.
+pub type AgentAccountHook = Arc<dyn Fn(&str) -> Vec<String> + Send + Sync>;
+
 /// The HTTP server and the state it shares across requests.
 pub struct Gateway {
     inner: Arc<Inner>,
@@ -124,6 +131,8 @@ struct Inner {
     visible_catalog: Option<Arc<RwLock<VisibleCatalog>>>,
     /// Optional resolver for the agent behind a model-list request.
     request_agent: Option<RequestAgentHook>,
+    /// Optional accounts-by-agent pins. Absent leaves every agent unpinned.
+    agent_accounts: Option<AgentAccountHook>,
     /// Optional subagent-model reader. Absent leaves every request as asked.
     subagent_model: Option<SubagentModelHook>,
     /// Routing decision history for the management API.
@@ -576,6 +585,7 @@ impl Gateway {
                 quota_scope: tell_everything(),
                 visible_catalog: None,
                 request_agent: None,
+                agent_accounts: None,
                 subagent_model: None,
                 route_trace: None,
                 model_catalog: None,
@@ -609,6 +619,18 @@ impl Gateway {
         Arc::get_mut(&mut self.inner)
             .expect("gateway is not shared yet")
             .visible_catalog = Some(catalog);
+        self
+    }
+
+    /// Sets the accounts one agent uses alone.
+    ///
+    /// The model list ignores these pins. Dispatch, token counts, and a
+    /// realtime session use them.
+    #[must_use]
+    pub fn with_agent_accounts(mut self, hook: AgentAccountHook) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("gateway is not shared yet")
+            .agent_accounts = Some(hook);
         self
     }
 
@@ -1267,6 +1289,7 @@ fn codec_routes(inner: &Inner) -> readonly::RouteSet {
 struct InProcess {
     app: std::sync::Weak<Inner>,
     identity: Identity,
+    scope: RouteScope,
     body_bytes: usize,
 }
 
@@ -1285,6 +1308,7 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
                 .map_err(|_| PluginError::internal("the gateway token is not a header value"))?;
         parts.headers.insert(header::AUTHORIZATION, bearer);
         parts.extensions.insert(self.identity.clone());
+        parts.extensions.insert(self.scope.clone());
         let request = Request::from_parts(parts, Body::from(body.bytes().clone()));
         let router = codec_routes(&app).router.with_state(Arc::clone(&app));
         let response = tower::ServiceExt::oneshot(router, request)
@@ -1387,10 +1411,7 @@ impl hofund_plugin_host::GatewayBackend for InProcess {
             track.end_with(None, status.as_u16(), None, None);
             return Err(PluginError::status_error(status.as_u16(), message));
         }
-        match router
-            .forward_scoped(&call, Some(&route_scope(&self.identity)))
-            .await
-        {
+        match router.forward_scoped(&call, Some(&self.scope)).await {
             Ok(forwarded) => {
                 let answer = forwarded.answer;
                 let status =
@@ -1681,11 +1702,15 @@ async fn dispatch_surface(State(app): State<Arc<Inner>>, request: Request) -> Re
     let body_bytes = bytes.len();
     let inbound =
         axum::http::Request::from_parts(parts, hofund_plugin_api::Body::from_bytes(bytes));
+    let scope = agent_scope(&app, &headers, &identity, None);
     let caller =
-        hofund_plugin_api::CallerScope::new(identity.key_name.clone(), identity.accounts.clone());
+        hofund_plugin_api::CallerScope::new(identity.key_name.clone(), identity.accounts.clone())
+            .with_agent(scope.agent.clone())
+            .with_agent_accounts(scope.agent_accounts.clone());
     let gateway = Arc::new(InProcess {
         app: Arc::downgrade(&app),
         identity,
+        scope,
         body_bytes,
     });
     let members = app.snapshot.load().member_ids();
@@ -2000,17 +2025,27 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     let uri = request.uri().clone();
     let headers = request.headers().clone();
     let inherited = request.extensions().get::<Identity>().cloned();
+    let inherited_scope = request.extensions().get::<RouteScope>().cloned();
     let stopped_waiting = request.extensions().get::<StoppedWaiting>().cloned();
     if path == "/v1/messages/count_tokens" {
-        return count_tokens(app, headers, uri, request, inherited, "/v1/messages", None).await;
+        return count_tokens(
+            app,
+            headers,
+            request,
+            inherited,
+            inherited_scope,
+            "/v1/messages",
+            None,
+        )
+        .await;
     }
     if let Some(model) = match_count(&path) {
         return count_tokens(
             app,
             headers,
-            uri,
             request,
             inherited,
+            inherited_scope,
             GENERATIVE_UNARY,
             Some(model),
         )
@@ -2278,7 +2313,7 @@ async fn complete(State(app): State<Arc<Inner>>, request: Request) -> Response {
     let mut dispatch: DispatchFuture = Box::pin({
         let request = dispatch_request.clone();
         let protocol = codec.id().to_owned();
-        let scope = route_scope(&identity);
+        let scope = agent_scope(app.as_ref(), &headers, &identity, inherited_scope);
         async move {
             if let Some(trace) = trace {
                 router
@@ -2577,12 +2612,13 @@ fn stream_error(error: &RouterError) -> (StatusCode, String) {
 async fn count_tokens(
     app: Arc<Inner>,
     headers: HeaderMap,
-    uri: Uri,
     request: Request,
     inherited: Option<Identity>,
+    inherited_scope: Option<RouteScope>,
     codec_key: &str,
     path_model: Option<String>,
 ) -> Response {
+    let uri = request.uri().clone();
     let Some(codec) = app.codecs.get(codec_key).cloned() else {
         return text_response(StatusCode::NOT_FOUND, "not found");
     };
@@ -2644,7 +2680,12 @@ async fn count_tokens(
         .count_scoped_conversation(
             counted,
             codec.id(),
-            Some(&route_scope(&identity)),
+            Some(&agent_scope(
+                app.as_ref(),
+                &headers,
+                &identity,
+                inherited_scope,
+            )),
             Some(&conversation),
         )
         .await
@@ -2868,7 +2909,62 @@ fn route_scope(identity: &Identity) -> RouteScope {
     RouteScope {
         models: identity.models.clone(),
         accounts: identity.accounts.clone(),
+        ..RouteScope::default()
     }
+}
+
+/// Route scope for dispatch, counts, and realtime. The model list keeps
+/// [`route_scope`], so an agent pin does not hide models.
+fn agent_scope(
+    app: &Inner,
+    headers: &HeaderMap,
+    identity: &Identity,
+    inherited: Option<RouteScope>,
+) -> RouteScope {
+    if let Some(scope) = inherited {
+        return scope;
+    }
+    let mut scope = route_scope(identity);
+    let agent = resolve_client_agent(app, headers, identity);
+    let pins = agent_pins(app, &agent);
+    if !pins.is_empty() {
+        scope.agent = agent;
+        scope.agent_accounts = pins;
+    }
+    scope
+}
+
+fn agent_pins(app: &Inner, agent: &str) -> Vec<String> {
+    let Some(hook) = &app.agent_accounts else {
+        return Vec::new();
+    };
+    hook(agent)
+}
+
+fn account_scope_message(
+    identity: &Identity,
+    model: &str,
+    accounts: &[String],
+    agent: &str,
+    agent_accounts: &[String],
+) -> String {
+    let pins = agent_accounts.join(", ");
+    if accounts.is_empty() {
+        return format!(
+            "{agent} is set to use {pins} alone, and none of the accounts or keys behind `{model}` is one of them. Change it in the provider's settings, Accounts by agent, or use a model it serves."
+        );
+    }
+    let key = format!(
+        "gateway key {:?} is not allowed to use the accounts behind model `{model}`; allowed accounts: {}",
+        identity.key_name,
+        accounts.join(", ")
+    );
+    if agent_accounts.is_empty() {
+        return key;
+    }
+    format!(
+        "{key}. {agent} is set to use {pins} alone (the provider's settings, Accounts by agent)."
+    )
 }
 
 fn scope_error(error: &RouterError, identity: &Identity) -> String {
@@ -2878,11 +2974,12 @@ fn scope_error(error: &RouterError, identity: &Identity) -> String {
             identity.key_name,
             patterns.join(", ")
         ),
-        RouterError::AccountScope { model, accounts } => format!(
-            "gateway key {:?} is not allowed to use the accounts behind model `{model}`; allowed accounts: {}",
-            identity.key_name,
-            accounts.join(", ")
-        ),
+        RouterError::AccountScope {
+            model,
+            accounts,
+            agent,
+            agent_accounts,
+        } => account_scope_message(identity, model, accounts, agent, agent_accounts),
         other => other.to_string(),
     }
 }

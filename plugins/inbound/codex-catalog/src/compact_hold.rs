@@ -10,7 +10,7 @@ const FILE_CAP: u64 = 1024 * 1024;
 /// Whether native compaction must be refused for `model` under `scope`.
 #[must_use]
 pub(crate) fn compact_signin_held(scope: &CallerScope, model: &str) -> Option<String> {
-    if !scope.holds_accounts() {
+    if !scope.account_holds_provider("codex") {
         return None;
     }
     if codex_api_key_signed_in() {
@@ -19,10 +19,19 @@ pub(crate) fn compact_signin_held(scope: &CallerScope, model: &str) -> Option<St
     let Some(reference) = sign_in_account_reference() else {
         return Some(held_message(scope, model));
     };
-    if allows_account(&scope.accounts, "codex", &reference) {
-        return None;
+    if scope.holds_accounts() && !allows_account(&scope.accounts, "codex", &reference) {
+        return Some(held_message(scope, model));
     }
-    Some(held_message(scope, model))
+    if !scope.agent_accounts.is_empty()
+        && !allows_account(&scope.agent_accounts, "codex", &reference)
+    {
+        return Some(if scope.holds_accounts() {
+            held_message(scope, model)
+        } else {
+            agent_held_message(scope, model)
+        });
+    }
+    None
 }
 
 /// Codex is signed in with its own OpenAI API key (`auth_mode: apikey`).
@@ -116,11 +125,22 @@ fn held_message(scope: &CallerScope, model: &str) -> String {
     )
 }
 
+fn agent_held_message(scope: &CallerScope, model: &str) -> String {
+    format!(
+        "Native compaction for {model} goes through the account Codex is signed in to, which agent {:?} may not use; it may use {}. Native compaction has no other route: change the signed-in account in the provider's Accounts by agent setting, or use one of hofund's models, whose compaction goes through a compaction_trigger on /responses and the agent's accounts.",
+        scope.agent,
+        scope.agent_accounts.join(", "),
+    )
+}
+
 fn key_account_names(scope: &CallerScope) -> String {
-    if scope.accounts.is_empty() {
-        return "none".to_owned();
+    if !scope.accounts.is_empty() {
+        return scope.accounts.join(", ");
     }
-    scope.accounts.join(", ")
+    if !scope.agent_accounts.is_empty() {
+        return scope.agent_accounts.join(", ");
+    }
+    "none".to_owned()
 }
 
 #[cfg(test)]
@@ -223,6 +243,34 @@ mod tests {
         with_home(home, || {
             assert!(codex_api_key_signed_in());
             assert!(compact_signin_held(&scope, "gpt-5").is_none());
+        });
+    }
+
+    #[test]
+    fn d278_agent_pin_holds_only_the_provider_it_names() {
+        let dir = scratch("agent");
+        let home = dir.path().to_path_buf();
+        write_chatgpt_auth(&home, "sub-agent", "acct-agent");
+        let signed_in = account_id("sub-agent", "acct-agent");
+        let other = CallerScope::new("open", Vec::new())
+            .with_agent_accounts(vec!["relay/aaaaaaaaaa".to_owned()]);
+        with_home(home.clone(), || {
+            assert!(compact_signin_held(&other, "gpt-5").is_none());
+        });
+        let named = CallerScope::new("writer", Vec::new())
+            .with_agent_accounts(vec![format!("codex/{signed_in}")]);
+        with_home(home.clone(), || {
+            assert!(compact_signin_held(&named, "gpt-5").is_none());
+        });
+        let missed = CallerScope::new("writer", Vec::new())
+            .with_agent("writer")
+            .with_agent_accounts(vec!["codex/other-account".to_owned()]);
+        with_home(home, || {
+            let held = compact_signin_held(&missed, "gpt-5").expect("held");
+            assert!(held.contains("writer"));
+            assert!(held.contains("Accounts by agent"));
+            assert!(held.contains("codex/other-account"));
+            assert!(!held.contains("gateway-key settings"));
         });
     }
 

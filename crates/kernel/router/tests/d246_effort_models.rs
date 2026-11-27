@@ -146,6 +146,7 @@ async fn d246_old_ids_pass_model_scopes_and_levels_are_listed() {
     let scope = RouteScope {
         models: vec!["relay/model-4-alpha-high".to_owned()],
         accounts: Vec::new(),
+        ..RouteScope::default()
     };
     for model in ["model-4-alpha-high", "relay/model-4-alpha-high"] {
         router
@@ -160,6 +161,7 @@ async fn d246_old_ids_pass_model_scopes_and_levels_are_listed() {
     let low_only = RouteScope {
         models: vec!["relay/model-4-alpha-low".to_owned()],
         accounts: Vec::new(),
+        ..RouteScope::default()
     };
     for model in [
         "model-4-alpha",

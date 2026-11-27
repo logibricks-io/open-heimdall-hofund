@@ -999,6 +999,7 @@ mod tests {
                 routing: "smart".to_owned(),
                 at_once: None,
                 stays: Stays::Auto,
+                agent_accounts: std::collections::BTreeMap::new(),
                 options: std::collections::BTreeMap::new(),
             }],
             warnings: Vec::new(),
