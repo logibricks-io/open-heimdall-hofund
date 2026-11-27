@@ -381,7 +381,10 @@ pub struct ModelsHost {
     registry: Arc<dyn DaemonRegistry>,
     state: Arc<Mutex<super::models_state::StateStore>>,
     events: OnceLock<Arc<EventBus>>,
+    on_listed: Mutex<Option<ListedHook>>,
 }
+
+type ListedHook = Arc<dyn Fn(&hofund_config::Provider, &[ModelSpec]) + Send + Sync>;
 
 fn list_kind_label(kind: ListKind) -> &'static str {
     match kind {
@@ -411,6 +414,26 @@ impl ModelsHost {
             registry: Arc::new(RegistryAdapter),
             state: Arc::new(Mutex::new(super::models_state::StateStore::new(None))),
             events: OnceLock::new(),
+            on_listed: Mutex::new(None),
+        }
+    }
+
+    /// Runs after a live list is stored, with the provider and the fetched rows.
+    pub(crate) fn on_listed(&self, hook: ListedHook) {
+        *self
+            .on_listed
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(hook);
+    }
+
+    fn note_listed(&self, provider: &hofund_config::Provider, models: &[ModelSpec]) {
+        let hook = self
+            .on_listed
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        if let Some(hook) = hook {
+            hook(provider, models);
         }
     }
 
@@ -1361,6 +1384,7 @@ impl ModelsHost {
                     .collect();
             });
         self.fanout(&provider.id, &fetched.models.models);
+        self.note_listed(provider, &fetched.models.models);
         Applied {
             models: fetched.models,
             dropped,
@@ -2032,7 +2056,11 @@ impl ModelsHost {
         if let Some(choice) = *learned.lock().unwrap_or_else(|error| error.into_inner()) {
             self.set_auth(&provider.id, choice);
         }
-        let (models, dropped) = hofund_provider::parse_model_rows(&rows).map_err(show)?;
+        let (models, dropped) = hofund_provider::parse_model_rows(
+            &rows,
+            crate::rests::preset_records_zero_price(provider.preset.as_deref()),
+        )
+        .map_err(show)?;
         let mut merged = Merged::default();
         merged.add(&models, &dropped);
         Ok(ProviderModels {

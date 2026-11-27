@@ -99,6 +99,24 @@ impl Candidate {
     }
 }
 
+fn credit_members(provider: &hofund_config::Provider) -> Vec<String> {
+    let entries = provider.key_entries();
+    if entries.len() <= 1 {
+        return vec![membership::member_id(&provider.id).to_string()];
+    }
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let secret = hofund_secrets::resolve(&entry.key).ok()?;
+            if secret.is_empty() {
+                return None;
+            }
+            membership::try_key_member_id(&provider.id, &crate::provider_keys::key_id(&secret))
+                .map(|id| id.to_string())
+        })
+        .collect()
+}
+
 impl Runtime {
     pub(crate) fn new(
         registry: Arc<dyn DaemonRegistry>,
@@ -467,6 +485,21 @@ impl Runtime {
     /// Shares the list and probe host so reloads plan through it and
     /// replace its instances.
     pub(crate) fn attach_models(&self, host: Arc<ModelsHost>) {
+        let rests = Arc::clone(&self.rests);
+        let cooldowns = Arc::clone(&self.cooldowns);
+        let quotas = Arc::clone(&self.quotas);
+        host.on_listed(Arc::new(move |provider, models| {
+            let mut members = crate::rests::members_with_exclusions(&quotas);
+            if crate::rests::preset_records_zero_price(provider.preset.as_deref())
+                && crate::rests::mixed_free_and_paid(models)
+            {
+                members.extend(credit_members(provider));
+            }
+            rests
+                .lock()
+                .expect("credit rest store")
+                .release_members(&cooldowns, &members);
+        }));
         let _ = self.models.set(host);
     }
 
@@ -849,6 +882,7 @@ impl Runtime {
                 user_filter,
             ),
         );
+        self.release_observed_rests();
     }
 
     /// Re-reads every local card when a peer omits `provider`.
@@ -909,6 +943,7 @@ impl Runtime {
                 )
             })
             .await;
+            self.release_observed_rests();
         }
         let order = self.quota_order();
         let now = self.quotas.now();
@@ -916,6 +951,28 @@ impl Runtime {
             self.quotas.report(&order),
             self.quotas.standings(&order, now),
         )
+    }
+
+    /// Releases a stale whole-member credit rest once a plan window excludes
+    /// models or a mixed catalog has been read for that preset.
+    fn release_observed_rests(&self) {
+        let mut members = crate::rests::members_with_exclusions(&self.quotas);
+        if let (Some(host), Some(config)) = (self.models.get(), self.config.get()) {
+            let config = config.borrow();
+            for provider in &config.providers {
+                if !crate::rests::preset_records_zero_price(provider.preset.as_deref()) {
+                    continue;
+                }
+                let cached = host.cached(&provider.id);
+                if crate::rests::mixed_free_and_paid(&cached.models) {
+                    members.extend(credit_members(provider));
+                }
+            }
+        }
+        self.rests
+            .lock()
+            .expect("credit rest store")
+            .release_members(&self.cooldowns, &members);
     }
 
     /// Providers then subscriptions, as configured.

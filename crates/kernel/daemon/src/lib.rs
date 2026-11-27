@@ -66,6 +66,8 @@ mod d246_relay_effort_ids;
 mod d250_messages_refused;
 #[cfg(test)]
 mod d271_free_models;
+#[cfg(test)]
+mod d271_rest_release;
 mod effort_variants;
 mod events;
 mod log_tail;
@@ -1487,7 +1489,13 @@ fn push_provider(
             sink: root.sink,
             patience: root.patience.duration(),
             weight: key_weight,
-            free: free_hop(provider_free, listed.as_ref()),
+            free: free_hop(
+                provider_free,
+                listed.as_ref(),
+                context.providers.get(id).is_some_and(|provider| {
+                    crate::rests::preset_records_zero_price(provider.preset.as_deref())
+                }),
+            ),
             stays: effective_stays(root, &context.providers, &context.subscriptions),
             cold_after,
             service_tier: service_tier.clone(),
@@ -1571,8 +1579,18 @@ fn hop_output(listed: Option<&hofund_plugin_api::ModelSpec>) -> Option<u64> {
         .filter(|output| *output > 0)
 }
 
-fn free_hop(manual: bool, listed: Option<&hofund_plugin_api::ModelSpec>) -> bool {
-    manual || listed.is_some_and(hofund_plugin_api::ModelSpec::costs_nothing)
+fn free_hop(
+    manual: bool,
+    listed: Option<&hofund_plugin_api::ModelSpec>,
+    zero_price_free: bool,
+) -> bool {
+    if manual {
+        return true;
+    }
+    let Some(listed) = listed else {
+        return false;
+    };
+    listed.free() == Some(true) || (zero_price_free && listed.costs_nothing())
 }
 
 #[derive(Clone, Copy)]
@@ -2601,7 +2619,8 @@ mod tests {
         let paid = hofund_plugin_api::ModelSpec::new("paid", None)
             .expect("model")
             .with_prices(1, 2, 0);
-        // A false catalog flag does not hide an all-zero price.
+        // A false catalog flag does not hide an all-zero price when the
+        // preset gate is open. Outside that gate the price is not a free hop.
         let flagged_paid_zero = hofund_plugin_api::ModelSpec::new("paid", None)
             .expect("model")
             .with_prices(0, 0, 0)
@@ -2611,13 +2630,15 @@ mod tests {
             .with_prices(0, 1, 0)
             .with_free(false);
 
-        assert!(super::free_hop(true, None));
-        assert!(super::free_hop(false, Some(&free)));
-        assert!(super::free_hop(false, Some(&zero)));
-        assert!(!super::free_hop(false, Some(&paid)));
-        assert!(super::free_hop(false, Some(&flagged_paid_zero)));
-        assert!(!super::free_hop(false, Some(&flagged_paid)));
-        assert!(!super::free_hop(false, None));
+        assert!(super::free_hop(true, None, false));
+        assert!(super::free_hop(false, Some(&free), false));
+        assert!(!super::free_hop(false, Some(&zero), false));
+        assert!(super::free_hop(false, Some(&zero), true));
+        assert!(!super::free_hop(false, Some(&paid), true));
+        assert!(!super::free_hop(false, Some(&flagged_paid_zero), false));
+        assert!(super::free_hop(false, Some(&flagged_paid_zero), true));
+        assert!(!super::free_hop(false, Some(&flagged_paid), true));
+        assert!(!super::free_hop(false, None, true));
     }
 
     #[test]
@@ -2630,8 +2651,34 @@ mod tests {
         ];
         let found = super::listed_model(models.clone(), "mixed-case").expect("listed");
         assert_eq!(found.id(), "Mixed-Case");
-        assert!(super::free_hop(false, Some(&found)));
+        assert!(super::free_hop(false, Some(&found), false));
         assert!(super::listed_model(models, "absent").is_none());
+    }
+
+    #[test]
+    fn d271_zero_price_free_hop_follows_the_go_preset_only() {
+        let zero = hofund_plugin_api::ModelSpec::new("legacy-zero", None)
+            .expect("model")
+            .with_prices(0, 0, 0);
+        let paid = hofund_plugin_api::ModelSpec::new("paid-model", None)
+            .expect("model")
+            .with_prices(1, 2, 0);
+        for (preset, free) in [("openai", false), ("opencode-go", true)] {
+            let config = hofund_config::load(&format!(
+                "[[providers]]\nid = \"relay\"\npreset = \"{preset}\"\n[[routes]]\nmodel = \"legacy-zero\"\nupstreams = [\"relay\"]\n"
+            ))
+            .expect("config");
+            let host = super::ModelsHost::new(
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(1),
+            );
+            host.seed_models("relay", &[zero.clone(), paid.clone()]);
+            let (routes, _) = super::route_plan(&config, Some(&host), None, &BTreeMap::new());
+            assert_eq!(
+                routes["legacy-zero"][0].free, free,
+                "{preset} zero-price hop"
+            );
+        }
     }
 
     #[test]

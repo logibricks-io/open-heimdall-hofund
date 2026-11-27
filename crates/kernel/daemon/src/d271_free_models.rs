@@ -148,3 +148,43 @@ async fn d271_model_refusals_leave_the_other_model_served_through_daemon_dispatc
         server.verify().await;
     }
 }
+
+#[tokio::test]
+async fn d271_paid_ordinary_rate_limit_rests_the_whole_key_through_daemon_dispatch() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": [
+                {"id": "paid-model", "go": {"monthly_usage": {"go": 200}}},
+                {"id": "free-model", "go": {"monthly_usage": null}}
+            ]})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "600")
+                .set_body_string(
+                    r#"{"error":{"message":"rate limit exceeded","type":"rate_limit_error"}}"#,
+                ),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let (_dir, snapshot, cooldowns) = snapshot(&server.uri()).await;
+    let member = super::membership::member_id("relay");
+    let refused = snapshot
+        .load()
+        .dispatch(&Request::new("paid-model"), "openai-chat")
+        .await;
+    assert!(refused.is_err(), "paid ordinary rate limit answered");
+    assert!(
+        cooldowns.cooling(&member).is_some(),
+        "paid ordinary rate limit did not rest the key"
+    );
+    server.verify().await;
+}

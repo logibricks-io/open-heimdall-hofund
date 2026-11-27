@@ -137,7 +137,9 @@ async fn d271_explicit_null_monthly_usage_marks_only_free_models() {
         .expect(1)
         .mount(&server)
         .await;
-    let listed = openai(endpoint(&server, "/v1"))
+    let mut endpoint = endpoint(&server, "/v1");
+    endpoint.preset = Some("opencode-go".to_owned());
+    let listed = openai(endpoint)
         .list_models(&ListQuery::new())
         .await
         .expect("list");
@@ -156,6 +158,54 @@ async fn d271_explicit_null_monthly_usage_marks_only_free_models() {
         .find(|model| model.id() == "legacy-zero")
         .expect("zero-priced row");
     assert!(legacy.costs_nothing());
+}
+
+#[tokio::test]
+async fn d271_all_zero_text_price_is_recorded_only_for_the_go_preset() {
+    let body = json!({"data": [{"id": "legacy-zero", "cost": {"text": {
+        "input": {"price": 0, "cache": {"read": 0, "write": 0}},
+        "output": {"price": 0}
+    }}}]});
+    let plain = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body.clone()))
+        .expect(1)
+        .mount(&plain)
+        .await;
+    let unscoped = openai(endpoint(&plain, "/v1"))
+        .list_models(&ListQuery::new())
+        .await
+        .expect("list");
+    let unscoped = unscoped
+        .models()
+        .iter()
+        .find(|model| model.id() == "legacy-zero")
+        .expect("zero-priced row");
+    assert!(
+        !unscoped.costs_nothing(),
+        "an all-zero price outside the go preset must not be free"
+    );
+
+    let gated = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .expect(1)
+        .mount(&gated)
+        .await;
+    let mut endpoint = endpoint(&gated, "/v1");
+    endpoint.preset = Some("opencode-go".to_owned());
+    let listed = openai(endpoint)
+        .list_models(&ListQuery::new())
+        .await
+        .expect("list");
+    let listed = listed
+        .models()
+        .iter()
+        .find(|model| model.id() == "legacy-zero")
+        .expect("zero-priced row");
+    assert!(listed.costs_nothing());
 }
 
 #[tokio::test]

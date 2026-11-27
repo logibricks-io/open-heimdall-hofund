@@ -3,8 +3,60 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use hofund_plugin_api::MemberId;
+use hofund_plugin_api::{MemberId, ModelSpec};
+use hofund_router::quota::QuotaStore;
 use hofund_router::{Cooldowns, PersistedRest};
+
+/// Whether this preset records an all-zero text price as a free hop.
+pub(crate) fn preset_records_zero_price(preset: Option<&str>) -> bool {
+    preset == Some("opencode-go")
+}
+
+/// Members whose saved windows already name models that do not count.
+pub(crate) fn members_with_exclusions(quotas: &QuotaStore) -> HashSet<String> {
+    quotas
+        .alert_cards()
+        .into_iter()
+        .filter(|(_, windows)| {
+            windows
+                .iter()
+                .any(|window| !window.excluded_models.is_empty())
+        })
+        .filter_map(|(quota, _)| {
+            let route = if quota.member.is_empty() {
+                quota.provider
+            } else {
+                quota.member
+            };
+            member_label(&route)
+        })
+        .collect()
+}
+
+/// A catalog that contains both a window-free model and a paid model.
+pub(crate) fn mixed_free_and_paid(models: &[ModelSpec]) -> bool {
+    let mut free = false;
+    let mut paid = false;
+    for model in models {
+        if model.free() == Some(true) || model.costs_nothing() {
+            free = true;
+        } else {
+            paid = true;
+        }
+    }
+    free && paid
+}
+
+fn member_label(route: &str) -> Option<String> {
+    if route.is_empty() {
+        return None;
+    }
+    if let Some((provider, key)) = route.split_once('#') {
+        crate::membership::try_key_member_id(provider, key).map(|id| id.to_string())
+    } else {
+        Some(crate::membership::member_id(route).to_string())
+    }
+}
 
 pub(crate) struct RestStore {
     path: PathBuf,
@@ -41,7 +93,7 @@ impl RestStore {
                 return;
             }
         };
-        let scoped = self.scoped_members();
+        let scoped = members_with_exclusions(&self.quota_store());
         let before = rests.len();
         let rests = rests
             .into_iter()
@@ -57,31 +109,25 @@ impl RestStore {
         self.last = Some(snapshot);
     }
 
-    fn scoped_members(&self) -> HashSet<String> {
+    fn quota_store(&self) -> hofund_router::quota::QuotaStore {
         let root = self.path.parent().unwrap_or_else(|| Path::new("."));
-        let quotas = hofund_router::quota::QuotaStore::new(root);
-        quotas
-            .alert_cards()
-            .into_iter()
-            .filter(|(_, windows)| {
-                windows
-                    .iter()
-                    .any(|window| !window.excluded_models.is_empty())
-            })
-            .filter_map(|(quota, _)| {
-                let route = if quota.member.is_empty() {
-                    quota.provider
-                } else {
-                    quota.member
-                };
-                if let Some((provider, key)) = route.split_once('#') {
-                    crate::membership::try_key_member_id(provider, key)
-                } else {
-                    Some(crate::membership::member_id(&route))
-                }
-            })
-            .map(|id| id.to_string())
-            .collect()
+        QuotaStore::new(root)
+    }
+
+    /// Drops whole-member API-key credit rests for `members` and rewrites the file.
+    pub(crate) fn release_members(&mut self, cooldowns: &Cooldowns, members: &HashSet<String>) {
+        if !cooldowns.release_whole_credit_rests(members) {
+            return;
+        }
+        let snapshot = cooldowns.credit_snapshot(SystemTime::now());
+        if let Err(error) = self.write_atomic(&encoded(&snapshot)) {
+            tracing::warn!(
+                path = %self.path.display(),
+                %error,
+                "released credit rests were not saved"
+            );
+        }
+        self.last = Some(snapshot);
     }
 
     pub(crate) fn save(&mut self, cooldowns: &Cooldowns) {

@@ -116,7 +116,8 @@ impl ModelClient {
             let learned = *learned.lock().unwrap_or_else(|error| error.into_inner());
             match result {
                 Ok(rows) => {
-                    let (models, dropped) = model_specs(&rows, false)?;
+                    let zero_price_free = self.endpoint.preset.as_deref() == Some("opencode-go");
+                    let (models, dropped) = model_specs(&rows, false, zero_price_free)?;
                     if models.is_empty() {
                         errors.push(PluginError::decode(format!(
                             "{}: no models listed",
@@ -151,7 +152,7 @@ impl ModelClient {
             })
             .await
             .map_err(|error| self.redact_error(error.0))?;
-        let (models, mut dropped) = model_specs(&rows, true)?;
+        let (models, mut dropped) = model_specs(&rows, true, false)?;
         dropped.extend(method_dropped);
         if models.is_empty() {
             return Err(PluginError::decode("no models listed"));
@@ -516,7 +517,11 @@ pub(crate) async fn scope_refusal(
     error.with_model_scope()
 }
 
-fn model_specs(rows: &[Value], gemini: bool) -> Result<(Vec<ModelSpec>, Vec<String>), PluginError> {
+fn model_specs(
+    rows: &[Value],
+    gemini: bool,
+    zero_price_free: bool,
+) -> Result<(Vec<ModelSpec>, Vec<String>), PluginError> {
     let mut models = Vec::new();
     let mut dropped = Vec::new();
     for row in rows {
@@ -525,7 +530,7 @@ fn model_specs(rows: &[Value], gemini: bool) -> Result<(Vec<ModelSpec>, Vec<Stri
                 .and_then(Value::as_str)
                 .or_else(|| row.get("name").and_then(Value::as_str))
         });
-        if let Some(model) = model_spec(row, gemini)? {
+        if let Some(model) = model_spec(row, gemini, zero_price_free)? {
             models.push(model);
         } else if let Some(id) = id.filter(|id| !id.is_empty()) {
             dropped.push(id.to_owned());
@@ -536,14 +541,24 @@ fn model_specs(rows: &[Value], gemini: bool) -> Result<(Vec<ModelSpec>, Vec<Stri
 
 /// Parses OpenAI-compatible or Anthropic model rows and reports dropped ids.
 ///
+/// `zero_price_free` records an all-zero text price. Callers pass it only for
+/// the preset that treats that price as window-free.
+///
 /// # Errors
 ///
 /// Returns [`PluginError`] when a row has an invalid model id.
-pub fn parse_model_rows(rows: &[Value]) -> Result<(Vec<ModelSpec>, Vec<String>), PluginError> {
-    model_specs(rows, false)
+pub fn parse_model_rows(
+    rows: &[Value],
+    zero_price_free: bool,
+) -> Result<(Vec<ModelSpec>, Vec<String>), PluginError> {
+    model_specs(rows, false, zero_price_free)
 }
 
-pub(crate) fn model_spec(row: &Value, gemini: bool) -> Result<Option<ModelSpec>, PluginError> {
+pub(crate) fn model_spec(
+    row: &Value,
+    gemini: bool,
+    zero_price_free: bool,
+) -> Result<Option<ModelSpec>, PluginError> {
     if let Value::String(id) = row {
         if hofund_plugin_sdk::classify::classify_model(id, "").is_none() {
             return Ok(None);
@@ -607,7 +622,7 @@ pub(crate) fn model_spec(row: &Value, gemini: bool) -> Result<Option<ModelSpec>,
     {
         model = model.with_free(true);
     }
-    if all_zero_cost(row.get("cost")) {
+    if zero_price_free && all_zero_cost(row.get("cost")) {
         model = model.with_prices(0, 0, 0);
     }
     model = model
