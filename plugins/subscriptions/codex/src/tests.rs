@@ -741,7 +741,83 @@ fn reasoning_request(id: &str, seal: &str) -> Request {
     request
 }
 
+fn d272_raw_item_request(item: Value) -> Request {
+    let mut fields = json::Map::new();
+    fields.insert("sealed_item".to_owned(), item);
+    let part = ContentPart::Thinking(ThinkingPart {
+        text: String::new(),
+        signature: None,
+        redacted: false,
+        data: None,
+        extensions: Extensions::from_map(fields),
+    });
+    let mut request = streaming_request();
+    request.messages.push(Message {
+        role: Role::User,
+        content: vec![ContentPart::text("continue"), part],
+        extensions: Extensions::new(),
+    });
+    request
+}
+
 const UNREADABLE_JSON: &[(&str, &str)] = &[("content-type", "application/json")];
+
+#[test]
+fn d272_agent_message_refusal_retries_execute_path_as_a_user_turn() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = host(&dir);
+    let id = seed(&host, &access_token("first", 10_000));
+    host.http().enqueue_response(
+        400,
+        UNREADABLE_JSON,
+        br#"{"error":{"message":"Unsupported input item: agent_message","type":"invalid_request_error"}}"#
+            .to_vec(),
+    );
+    host.http()
+        .enqueue(b"event: response.completed\ndata: {}\n\n".to_vec());
+    let item = json!({
+        "type": "agent_message",
+        "id": "amsg_task",
+        "author": "/root",
+        "recipient": "/root/research",
+        "content": [{"type": "input_text", "text": "Message Type: NEW_TASK\nPayload:\nresearch the failure"}]
+    });
+    block_on(
+        upstream_for(&host, &id).execute(d272_raw_item_request(item), ProtocolId::OPENAI_RESPONSES),
+    )
+    .expect("retried");
+    assert_eq!(host.http().calls().len(), 2);
+    let first: Value = json::from_slice(host.http().calls()[0].body()).expect("first body");
+    let second: Value = json::from_slice(host.http().calls()[1].body()).expect("second body");
+    assert!(first["input"].as_array().is_some_and(|items| {
+        items
+            .iter()
+            .any(|item| item.get("type") == Some(&json!("agent_message")))
+    }));
+    let rewritten = second["input"]
+        .as_array()
+        .expect("input")
+        .iter()
+        .find(|item| {
+            item.get("content")
+                .and_then(Value::as_array)
+                .is_some_and(|parts| {
+                    parts.iter().any(|part| {
+                        part.get("text").and_then(Value::as_str)
+                            == Some("From /root to /root/research\n\n")
+                    })
+                })
+        })
+        .expect("rewritten item");
+    assert_eq!(rewritten["type"], "message");
+    assert_eq!(rewritten["role"], "user");
+    assert!(rewritten["content"].as_array().is_some_and(|parts| {
+        parts.iter().any(|part| {
+            part.get("text").and_then(Value::as_str)
+                == Some("Message Type: NEW_TASK\nPayload:\nresearch the failure")
+        })
+    }));
+}
 
 #[test]
 fn r47j_unreadable_item_refusal_retries_with_trimmed_body() {

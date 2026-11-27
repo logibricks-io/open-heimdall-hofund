@@ -1,4 +1,4 @@
-//! Recovery when a member cannot read another member's sealed reasoning.
+//! Recovery when a member cannot read another member's sealed input.
 
 use std::collections::{BTreeMap, BTreeSet, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
@@ -165,16 +165,24 @@ fn without_sealed(body: &[u8]) -> Option<Vec<u8>> {
 fn rewrite(body: &[u8], refused: impl Fn(u64) -> bool) -> Option<Vec<u8>> {
     let mut value = serde_json::from_slice::<Value>(body).ok()?;
     let input = value.get_mut("input")?.as_array_mut()?;
-    let before = input.len();
-    input.retain(|item| {
-        let Some((_, seal)) = sealed_item(item) else {
-            return true;
-        };
-        !refused(seal)
-    });
-    if input.len() == before {
+    let mut changed = false;
+    let mut kept = Vec::with_capacity(input.len());
+    for item in input.drain(..) {
+        if sealed_item(&item).is_some_and(|(_, seal)| refused(seal)) {
+            changed = true;
+            continue;
+        }
+        if let Some(replacement) = without_sealed_agent_message(&item, &refused) {
+            changed = true;
+            kept.push(replacement);
+        } else {
+            kept.push(item);
+        }
+    }
+    if !changed {
         return None;
     }
+    value["input"] = Value::Array(kept);
     serde_json::to_vec(&value).ok()
 }
 
@@ -187,9 +195,28 @@ fn sealed_items(body: &[u8]) -> Vec<(String, u64)> {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|item| {
-            let (encrypted, seal) = sealed_item(item)?;
-            Some((encrypted.to_owned(), seal))
+        .flat_map(|item| {
+            let mut seals = Vec::new();
+            if let Some((encrypted, seal)) = sealed_item(item) {
+                seals.push((encrypted.to_owned(), seal));
+            }
+            if item.get("type").and_then(Value::as_str) == Some("agent_message") {
+                for part in item
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    if part.get("type").and_then(Value::as_str) == Some("encrypted_content")
+                        && let Some(encrypted) =
+                            part.get("encrypted_content").and_then(Value::as_str)
+                        && !encrypted.is_empty()
+                    {
+                        seals.push((encrypted.to_owned(), seal_hash(encrypted)));
+                    }
+                }
+            }
+            seals
         })
         .collect()
 }
@@ -203,9 +230,62 @@ fn sealed_item(item: &Value) -> Option<(&str, u64)> {
     if encrypted.is_empty() {
         return None;
     }
+    Some((encrypted, seal_hash(encrypted)))
+}
+
+fn without_sealed_agent_message(item: &Value, refused: &impl Fn(u64) -> bool) -> Option<Value> {
+    if item.get("type").and_then(Value::as_str)? != "agent_message" {
+        return None;
+    }
+    let parts = item.get("content")?.as_array()?;
+    let message = parts.iter().any(|part| {
+        part.get("type").and_then(Value::as_str) == Some("input_text")
+            && part
+                .get("text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| text.starts_with("Message Type: MESSAGE\n"))
+    });
+    if !message {
+        return None;
+    }
+    let matching = |part: &Value| {
+        part.get("type").and_then(Value::as_str) == Some("encrypted_content")
+            && part
+                .get("encrypted_content")
+                .and_then(Value::as_str)
+                .is_some_and(|seal| !seal.is_empty() && refused(seal_hash(seal)))
+    };
+    if !parts.iter().any(&matching) {
+        return None;
+    }
+    let author = item
+        .get("author")
+        .and_then(Value::as_str)
+        .filter(|author| !author.is_empty())
+        .unwrap_or("another agent");
+    let note = format!(
+        "[This message from {author} was sealed by the server that answered that agent, and only that server can open it, so it was left out here. An agent's final result still reaches the agent that spawned it as text.]"
+    );
+    let mut replacement = item.clone();
+    replacement["content"] = Value::Array(
+        parts
+            .iter()
+            .map(|part| {
+                if matching(part) {
+                    serde_json::json!({"type": "input_text", "text": note})
+                } else {
+                    part.clone()
+                }
+            })
+            .collect(),
+    );
+    Some(replacement)
+}
+
+fn seal_hash(encrypted: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     encrypted.hash(&mut hasher);
-    Some((encrypted, hasher.finish()))
+    hasher.finish()
 }
 
 fn foreign_reasoning(text: &str) -> bool {
@@ -296,6 +376,100 @@ mod tests {
         let hook = SealedHook::new(
             SealedState::default(),
             &Conversation::new("demo|empty", 1, false).with_body(br#"{"input":[]}"#.to_vec()),
+            None,
+        );
+        assert!(
+            hook.retry(&attempt(), 400, b"invalid_encrypted_content")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn d272_foreign_agent_message_seal_is_replaced_and_remembered() {
+        let message = serde_json::json!({
+            "type": "agent_message",
+            "id": "amsg_old",
+            "author": "/root/sub",
+            "recipient": "/root",
+            "content": [
+                {"type": "input_text", "text": "Message Type: MESSAGE\nTask name: /root\nSender: /root/sub\nPayload:\n"},
+                {"type": "encrypted_content", "encrypted_content": "old-agent-seal"}
+            ]
+        });
+        let task = serde_json::json!({
+            "type": "agent_message",
+            "id": "amsg_task",
+            "author": "/root",
+            "recipient": "/root/sub",
+            "content": [
+                {"type": "input_text", "text": "Message Type: NEW_TASK\nTask name: /root/sub\nPayload:\n"},
+                {"type": "encrypted_content", "encrypted_content": "sealed-task"}
+            ]
+        });
+        let original = serde_json::json!({"input": [message.clone(), task.clone()]});
+        let body = serde_json::to_vec(&original).expect("body");
+        let hook = SealedHook::new(
+            SealedState::default(),
+            &Conversation::new("demo|agent", 2, false).with_body(body),
+            None,
+        );
+        let replacement = hook
+            .retry(&attempt(), 400, b"invalid_encrypted_content on amsg_old")
+            .expect("retry without the foreign agent message seal");
+        let replacement: serde_json::Value =
+            serde_json::from_slice(&replacement).expect("replacement");
+        assert_eq!(replacement["input"][0]["id"], "amsg_old");
+        assert_eq!(replacement["input"][0]["content"][0], message["content"][0]);
+        assert_eq!(replacement["input"][0]["content"][1]["type"], "input_text");
+        let note = replacement["input"][0]["content"][1]["text"]
+            .as_str()
+            .expect("note");
+        assert!(note.contains("/root/sub"));
+        assert!(note.contains("left out"));
+        assert!(note.contains("final result"));
+        assert_eq!(replacement["input"][1], task);
+
+        let mut current = message;
+        current["content"][1]["encrypted_content"] = "new-agent-seal".into();
+        current["id"] = "amsg_new".into();
+        let later = serde_json::to_vec(&serde_json::json!({"input": [
+            original["input"][0].clone(), current.clone(), task
+        ]}))
+        .expect("later body");
+        let prepared = hook
+            .prepare(&attempt(), &later)
+            .expect("the refused seal is remembered");
+        let prepared: serde_json::Value = serde_json::from_slice(&prepared).expect("prepared");
+        assert_eq!(prepared["input"][0]["content"][1]["type"], "input_text");
+        assert_eq!(prepared["input"][1], current);
+        assert_eq!(
+            prepared["input"][2]["content"][1]["encrypted_content"],
+            "sealed-task"
+        );
+
+        let other = Attempt {
+            member: MemberAttempt {
+                provider_id: "first".to_owned(),
+                ..MemberAttempt::default()
+            },
+            inbound_protocol: "responses".to_owned(),
+        };
+        assert!(hook.prepare(&other, &later).is_none());
+    }
+
+    #[test]
+    fn d272_sealed_new_task_alone_does_not_retry() {
+        let body = serde_json::to_vec(&serde_json::json!({"input": [{
+            "type": "agent_message",
+            "content": [
+                {"type": "input_text", "text": "Message Type: NEW_TASK\nPayload:\n"},
+                {"type": "encrypted_content", "encrypted_content": "sealed-task"}
+            ]
+        }]}))
+        .expect("body");
+        let hook = SealedHook::new(
+            SealedState::default(),
+            &Conversation::new("demo|task", 2, false).with_body(body),
             None,
         );
         assert!(
