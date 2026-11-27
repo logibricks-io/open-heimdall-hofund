@@ -512,6 +512,14 @@ pub trait Subscription: Send + Sync + 'static {
         None
     }
 
+    /// Address and region of this subscription's way out.
+    ///
+    /// Absent when the subscription does not check. The text is produced by
+    /// the subscription, so the kernel does not name a vendor.
+    fn way_out_place(&self) -> Option<String> {
+        None
+    }
+
     /// Looks up the way out when this subscription's cadence says to.
     ///
     /// The daemon calls this on the account tick. A subscription that does not

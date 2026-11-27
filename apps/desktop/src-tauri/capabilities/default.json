@@ -12,6 +12,7 @@
     "allow-stop-gateway",
     "allow-set-agent",
     "allow-usage-summary",
-    "allow-open-config"
+    "allow-open-config",
+    "allow-check-way-out"
   ]
 }

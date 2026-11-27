@@ -104,6 +104,9 @@ pub struct ProviderListResponse {
     /// Warnings about a subscription's way out. Empty when there are none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub way_out_warnings: Vec<String>,
+    /// Address and region of a subscription way out. Empty when none is known.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub way_out_place: String,
 }
 
 impl Default for ProviderListResponse {
@@ -112,6 +115,7 @@ impl Default for ProviderListResponse {
             version: API_VERSION,
             providers: Vec::new(),
             way_out_warnings: Vec::new(),
+            way_out_place: String::new(),
         }
     }
 }
@@ -689,6 +693,9 @@ pub struct WayOutCheckResponse {
     /// Warnings about a subscription's way out. Empty when there are none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// Address and region after the check. Empty when none is known.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub place: String,
 }
 
 impl Default for WayOutCheckResponse {
@@ -696,6 +703,7 @@ impl Default for WayOutCheckResponse {
         Self {
             version: API_VERSION,
             warnings: Vec::new(),
+            place: String::new(),
         }
     }
 }

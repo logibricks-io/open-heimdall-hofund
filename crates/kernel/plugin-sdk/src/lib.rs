@@ -50,6 +50,7 @@ pub async fn timeout<F: Future>(duration: std::time::Duration, future: F) -> Opt
 }
 
 pub mod account_off;
+pub mod address;
 pub mod bedrock;
 pub mod checkin;
 pub mod classify;

@@ -17,6 +17,9 @@ Reply
 TokenError
 account_off::fn account_off_words (message : & str) -> bool
 account_off::fn messages_account_off (base_url : & str , error : PluginError , stream_event : bool) -> PluginError
+address::fn canonical_ip (text : & str) -> Option < String >
+address::fn is_ip_or_prefix (text : & str) -> bool
+address::fn prefix_contains (prefix : & str , address : & str) -> bool
 after_id
 apply_quirks
 async_trait
@@ -126,6 +129,7 @@ jwt::RsaSigner
 jwt::RsaSigner::fn from_pem (text : & str) -> Result < Self , KeyError >
 jwt::RsaSigner::fn sign (& self , header : & Value , claims : & Value) -> Result < String , KeyError >
 mod account_off
+mod address
 mod bedrock
 mod checkin
 mod classify

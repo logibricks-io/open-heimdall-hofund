@@ -726,6 +726,7 @@ impl App {
                     snapshot.disk_revision,
                 );
                 app.providers.set_way_out(snapshot.warnings);
+                app.providers.set_way_out_place(snapshot.way_out_place);
             }
             Err(message) => app.set_flash_ttl(message, false),
         });
@@ -1346,6 +1347,7 @@ mod tests {
                 presets: vec![preset],
                 disk_revision: "ab".repeat(32),
                 warnings: Vec::new(),
+                way_out_place: String::new(),
                 presets_error: None,
             }),
         });
@@ -1533,6 +1535,7 @@ mod tests {
                 presets: Vec::new(),
                 disk_revision: nibble.repeat(32),
                 warnings: Vec::new(),
+                way_out_place: String::new(),
                 presets_error: None,
             }),
         });
