@@ -462,7 +462,8 @@ impl StrategyState {
 
     /// Marks every pool currently kept on `key` past a whole-member quota or
     /// credit refusal. The next pace-drain order leaves that seat even when
-    /// it renews first. Drain ordering ignores the mark.
+    /// it renews first, and does not pick it for that transition when another
+    /// seat is available. Drain ordering ignores the mark.
     pub fn drained(&self, key: &str) {
         if key.is_empty() {
             return;
