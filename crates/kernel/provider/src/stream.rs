@@ -255,7 +255,7 @@ mod tests {
     use hofund_codec::{AnthropicMessages, Codec, OpenAiResponses};
     use hofund_ir::StreamEvent;
 
-    use super::SseEvents;
+    use super::{SseEvents, failure_of, message_from};
     use reqwest::Error as ReqwestError;
 
     const THOUGHT: &str = concat!(
@@ -266,6 +266,26 @@ mod tests {
         "event: error\n",
         "data: {\"type\":\"error\",\"error\":{\"code\":\"content_filter\",\"message\":\"refused\"}}\n\n"
     );
+
+    #[test]
+    fn d274_r1_message_from_extracts_the_remote_refusal_text() {
+        let body = br#"{"error":{"code":null,"message":"first: The request was blocked. (HTTP 451)\ngateway: m refused this request (safety filter: 451) via first","type":"invalid_request_error"}}"#;
+        assert_eq!(
+            message_from(body),
+            "first: The request was blocked. (HTTP 451)\ngateway: m refused this request (safety filter: 451) via first"
+        );
+    }
+
+    #[test]
+    fn d274_r1_numeric_legal_stream_error_is_non_cooling() {
+        let event = StreamEvent::Unknown(hofund_ir::UnknownEvent {
+            name: "error".to_owned(),
+            payload: serde_json::json!({"error":{"code":451,"message":"The request was blocked."}}),
+        });
+        let error = failure_of(&event).expect("legal refusal");
+        assert_eq!(error.status, Some(451));
+        assert!(!error.cools());
+    }
 
     fn events(bytes: Vec<u8>) -> SseEvents {
         let incoming = stream::iter(vec![Ok::<Bytes, ReqwestError>(Bytes::from(bytes))]);

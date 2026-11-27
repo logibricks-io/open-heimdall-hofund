@@ -486,9 +486,12 @@ static REMOTE_REFUSAL: LazyLock<Regex> = LazyLock::new(|| {
     re(r"(?:^|\n)[a-z][a-z0-9_-]*: [^\n]* refused this request \(safety filter: [^)\s]+\) via ")
 });
 
-/// Whether a JSON error body is the vendor's safety filter refusing the
-/// request (`reference: internal/gateway/fallback.go:3381-3425`).
+/// Whether an error body or its extracted message is the vendor's safety
+/// filter refusing the request (`reference: internal/gateway/fallback.go:3381-3425`).
 fn policy_refusal(raw: &str) -> bool {
+    if REMOTE_REFUSAL.is_match(raw) {
+        return true;
+    }
     let Ok(serde_json::Value::Object(body)) = serde_json::from_str::<serde_json::Value>(raw) else {
         return false;
     };
@@ -511,9 +514,10 @@ fn policy_refusal(raw: &str) -> bool {
         || REMOTE_REFUSAL.is_match(message)
 }
 
-/// Tells an exhausted legal refusal as this gateway's own safety refusal.
+/// Tells an exhausted legal refusal not already worded as a policy refusal
+/// as this gateway's own safety refusal.
 pub(crate) fn refusal_told(error: PluginError, model: &str, upstream: &str) -> PluginError {
-    if !legal_refused(&error) {
+    if !legal_refused(&error) || policy_refusal(error.message()) {
         return error;
     }
     let billed = error.billed().cloned();
@@ -851,6 +855,28 @@ mod tests {
         assert!(!policy_refusal(
             r#"{"choices":[{"message":{"content":"gateway: m refused this request (safety filter: 451) via first"}}]}"#
         ));
+    }
+
+    #[test]
+    fn d274_r1_extracted_remote_refusal_text_is_recognized() {
+        let text = "first: The request was blocked. (HTTP 451)\ngateway: m refused this request (safety filter: 451) via first";
+        let error = PluginError::status_error(400, text);
+        assert!(policy_refusal(text));
+        assert!(allows(&error, false, &none()));
+        assert!(content_refused(&error));
+        assert!(!rests(&error));
+        assert!(!policy_refusal(
+            r#"{"choices":[{"message":{"content":"gateway: m refused this request (safety filter: 451) via first"}}]}"#
+        ));
+    }
+
+    #[test]
+    fn d274_r1_recognized_legal_policy_refusal_is_not_rewritten() {
+        let body = r#"{"error":{"code":"content_filter","message":"The request was blocked."}}"#;
+        let error = PluginError::status_error(451, body);
+        let told = refusal_told(error, "demo", "first");
+        assert_eq!(told.status(), Some(451));
+        assert_eq!(told.message(), body);
     }
 
     #[test]

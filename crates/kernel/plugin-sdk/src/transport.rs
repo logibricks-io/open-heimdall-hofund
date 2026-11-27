@@ -640,11 +640,22 @@ pub fn carried_error(body: &[u8], allocation_quota_rate: bool) -> Option<PluginE
     })
 }
 
+fn numeric_legal_refusal(body: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+    ["/error/code", "/response/error/code", "/code"]
+        .into_iter()
+        .any(|path| value.pointer(path).and_then(serde_json::Value::as_u64) == Some(451))
+}
+
 /// The status an upstream error carried without one stands for.
 #[must_use]
 pub fn status_for_error(body: &[u8]) -> u16 {
     let text = error_text(body);
-    if is_context_overflow_error(400, body) {
+    if numeric_legal_refusal(body) {
+        451
+    } else if is_context_overflow_error(400, body) {
         400
     } else if text.contains("overloaded") {
         529
