@@ -131,7 +131,8 @@ pub fn openai_compat(
             .headers(headers)
             .quirks(quirks)
             .preset(preset)
-            .allocation_quota_rate(allocation_quota_rate),
+            .allocation_quota_rate(allocation_quota_rate)
+            .missing_v1_retry(adapter.base_learning()),
         secret,
         counts: false,
         bridged,
@@ -268,7 +269,7 @@ impl UpstreamProvider for Direct {
     }
 
     fn attempt_base(&self) -> String {
-        self.target.base_url().to_owned()
+        self.target.current_base()
     }
 
     fn attempt_protocol(&self) -> String {

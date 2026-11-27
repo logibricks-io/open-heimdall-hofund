@@ -66,6 +66,8 @@ impl From<PageError> for ListFailure {
 pub(crate) struct Page {
     pub status: u16,
     pub retry_after: Option<Duration>,
+    pub content_type: String,
+    pub content_encoding: String,
     pub body: Vec<u8>,
 }
 
@@ -217,6 +219,17 @@ impl ModelClient {
     pub fn page_bytes(&self, url: &str, page: Page, probe: bool) -> Result<Vec<u8>, PluginError> {
         // reference: internal/catalog/live.go:542 and internal/catalog/gemini_list.go:81
         if page.status == 200 || (probe && (200..300).contains(&page.status)) {
+            if let Some(why) = hofund_plugin_sdk::transport::not_an_api_reply(
+                page.status,
+                &page.content_type,
+                &page.content_encoding,
+                &page.body,
+            ) {
+                return Err(self.redact_error(PluginError::status_error(
+                    502,
+                    format!("{}: {why}", safe_url(url)),
+                )));
+            }
             return Ok(page.body);
         }
         let detail = if probe {
@@ -669,6 +682,16 @@ pub(crate) async fn read_page(
 ) -> Result<Page, PluginError> {
     let status = response.status().as_u16();
     let retry_after = crate::http::retry_after(response.headers());
+    let header = |name: reqwest::header::HeaderName| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let content_type = header(reqwest::header::CONTENT_TYPE);
+    let content_encoding = header(reqwest::header::CONTENT_ENCODING);
     if exact_cap
         && response
             .content_length()
@@ -704,6 +727,8 @@ pub(crate) async fn read_page(
     Ok(Page {
         status,
         retry_after,
+        content_type,
+        content_encoding,
         body,
     })
 }

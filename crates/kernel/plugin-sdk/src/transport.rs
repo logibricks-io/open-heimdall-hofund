@@ -33,6 +33,146 @@ pub type HttpRequest = http::Request<Body>;
 /// Response type plugins use so they do not name the `http` crate.
 pub type HttpResponse = http::Response<BodyStream>;
 
+const PAGE_MARKER: &str = " with a web page (";
+
+/// Why a successful response cannot be a model API reply, or `None` when its
+/// status and first body bytes are acceptable. A 204 has no body by definition.
+/// Compressed bodies other than HTML are left to their decoder.
+#[must_use]
+pub fn not_an_api_reply(
+    status: u16,
+    content_type: &str,
+    content_encoding: &str,
+    head: &[u8],
+) -> Option<String> {
+    if !(200..300).contains(&status) || status == 204 {
+        return None;
+    }
+    let content_type = content_type.to_ascii_lowercase();
+    let status = http::StatusCode::from_u16(status).unwrap_or(http::StatusCode::OK);
+    let answered = format!(
+        "answered {} {}",
+        status.as_u16(),
+        status.canonical_reason().unwrap_or("")
+    );
+    if content_type.starts_with("text/html") {
+        let kind = content_type.split(';').next().unwrap_or("text/html");
+        return Some(page_reason(&answered, kind, head));
+    }
+    if head.is_empty() {
+        return Some(format!("{answered} with nothing in it, not an API reply"));
+    }
+    if !content_encoding.is_empty() && !content_encoding.eq_ignore_ascii_case("identity") {
+        return None;
+    }
+    let text = String::from_utf8_lossy(head);
+    let trimmed = text
+        .trim_start_matches(|character: char| character.is_whitespace() || character == '\u{feff}');
+    if html_start(trimmed) && !content_type.contains("xml") {
+        let kind = if content_type.is_empty() {
+            "no Content-Type"
+        } else {
+            content_type.split(';').next().unwrap_or("no Content-Type")
+        };
+        return Some(page_reason(&answered, kind, head));
+    }
+    if content_type.contains("json")
+        && !trimmed.is_empty()
+        && !trimmed.starts_with(['{', '['])
+        && !events_start(trimmed)
+    {
+        let snippet = trimmed.chars().take(200).collect::<String>();
+        let ellipsis = if trimmed.chars().count() > 200 {
+            "..."
+        } else {
+            ""
+        };
+        return Some(format!(
+            "{answered} with a reply that isn't JSON, not an API reply: {snippet}{ellipsis}"
+        ));
+    }
+    None
+}
+
+/// Whether an error produced by [`not_an_api_reply`] says a web page answered.
+#[must_use]
+pub fn served_page(message: &str) -> bool {
+    message.contains(PAGE_MARKER)
+}
+
+/// The `/v1` base to try when `base_url` has no version path segment.
+/// Returns `None` for an empty, invalid, or already-versioned base.
+#[must_use]
+pub fn missing_v1_base(base_url: &str) -> Option<String> {
+    let base = base_url.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return None;
+    }
+    let parsed = url::Url::parse(base).ok()?;
+    let versioned = parsed.path_segments().is_some_and(|segments| {
+        segments.into_iter().any(|segment| {
+            let mut chars = segment.chars();
+            matches!(chars.next(), Some('v' | 'V'))
+                && chars.next().is_some_and(|digit| digit.is_ascii_digit())
+        })
+    });
+    (!versioned).then(|| format!("{base}/v1"))
+}
+
+fn page_reason(answered: &str, kind: &str, head: &[u8]) -> String {
+    let mut why = format!("{answered}{PAGE_MARKER}{kind}), not an API reply");
+    if let Some(title) = page_title(head) {
+        why.push_str(": \"");
+        why.push_str(&title);
+        why.push('"');
+    }
+    why
+}
+
+fn page_title(head: &[u8]) -> Option<String> {
+    let lower = head.to_ascii_lowercase();
+    let start = windows_at(&lower, b"<title")?;
+    let after = lower[start + 6..]
+        .iter()
+        .position(|byte| *byte == b'>')
+        .map(|offset| start + 7 + offset)?;
+    let close = windows_at(&lower[after..], b"</title>")? + after;
+    let text = String::from_utf8_lossy(&head[after..close]);
+    let title = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if title.is_empty() {
+        return None;
+    }
+    let mut short = title.chars().take(120).collect::<String>();
+    if title.chars().count() > 120 {
+        short.push_str("...");
+    }
+    Some(short)
+}
+
+fn windows_at(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn html_start(head: &str) -> bool {
+    let lower = head.to_ascii_lowercase();
+    if lower.starts_with("<!doctype html") {
+        return true;
+    }
+    ["<html", "<head", "<body"].into_iter().any(|prefix| {
+        lower.strip_prefix(prefix).is_some_and(|rest| {
+            rest.starts_with('>') || rest.chars().next().is_some_and(char::is_whitespace)
+        })
+    })
+}
+
+fn events_start(head: &str) -> bool {
+    ["event:", "data:", ":"]
+        .into_iter()
+        .any(|prefix| head.starts_with(prefix))
+}
+
 const MAX_ATTEMPTS: u8 = 3;
 const STATUS_SNIPPET: usize = 256;
 const BACKOFF_BASE: Duration = Duration::from_millis(20);
@@ -1539,8 +1679,9 @@ mod tests {
     use super::{
         Call, backoff, carried_error, classify, classify_with_reset, credit_soon,
         is_allocation_quota_rate, is_context_overflow_error, is_credit_error, is_quota_error,
-        parse_reset_after_headers, parse_retry_after, parse_retry_after_headers,
-        reset_after_from_body, retries, retry_after_from_body, text_response,
+        missing_v1_base, not_an_api_reply, parse_reset_after_headers, parse_retry_after,
+        parse_retry_after_headers, reset_after_from_body, retries, retry_after_from_body,
+        served_page, text_response,
     };
 
     fn secret(value: &str) -> SecretString {
@@ -2358,5 +2499,57 @@ mod tests {
             retry_after_from_body(b"Third-party quota reached. Resets in 3h22m19s."),
             Some(Duration::from_secs(12_139))
         );
+    }
+
+    #[test]
+    fn d277_not_an_api_reply_names_pages_empty_bodies_and_non_json() {
+        let page = not_an_api_reply(
+            200,
+            "text/html; charset=utf-8",
+            "",
+            b"<!doctype html><title>Relay</title>",
+        )
+        .expect("page");
+        assert_eq!(
+            page,
+            "answered 200 OK with a web page (text/html), not an API reply: \"Relay\""
+        );
+        assert!(served_page(&page));
+        let unlabelled = not_an_api_reply(200, "", "", b" <html><title>Relay</title></html>")
+            .expect("unlabelled");
+        assert!(unlabelled.contains("no Content-Type"));
+        assert!(unlabelled.contains("\"Relay\""));
+        assert_eq!(
+            not_an_api_reply(200, "application/json", "", b"").as_deref(),
+            Some("answered 200 OK with nothing in it, not an API reply")
+        );
+        let prose =
+            not_an_api_reply(200, "application/json", "", b"this is not JSON").expect("prose");
+        assert!(prose.contains("isn't JSON, not an API reply: this is not JSON"));
+        assert!(not_an_api_reply(200, "application/json", "", b"{\"ok\":true}").is_none());
+        assert!(
+            not_an_api_reply(200, "application/json", "", b"data: {\"ok\":true}\n\n").is_none()
+        );
+        assert!(not_an_api_reply(200, "application/json", "gzip", b"not-json").is_none());
+        assert!(not_an_api_reply(204, "text/html", "", b"<html>").is_none());
+        assert!(!served_page(
+            "answered 200 OK with nothing in it, not an API reply"
+        ));
+    }
+
+    #[test]
+    fn d277_missing_v1_base_skips_a_version_already_in_the_path() {
+        assert_eq!(
+            missing_v1_base("http://relay.example"),
+            Some("http://relay.example/v1".to_owned())
+        );
+        assert_eq!(
+            missing_v1_base("http://relay.example/openai"),
+            Some("http://relay.example/openai/v1".to_owned())
+        );
+        assert_eq!(missing_v1_base("http://relay.example/v1"), None);
+        assert_eq!(missing_v1_base("http://relay.example/v1beta"), None);
+        assert_eq!(missing_v1_base("http://relay.example/api/v3"), None);
+        assert_eq!(missing_v1_base("not a url"), None);
     }
 }
