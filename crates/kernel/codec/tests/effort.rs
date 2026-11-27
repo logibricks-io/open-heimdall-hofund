@@ -97,6 +97,54 @@ fn a_level_is_rewritten_for_the_outbound_protocol() {
 }
 
 #[test]
+fn d270_generative_xhigh_respects_model_generation() {
+    for (model, effort, expected) in [
+        ("gemini-4-neon", Effort::Low, "low"),
+        ("gemini-4-neon", Effort::Medium, "medium"),
+        ("gemini-4-neon", Effort::High, "high"),
+        ("gemini-4-neon", Effort::Xhigh, "xhigh"),
+        ("models/GEMINI-4-NEON", Effort::Xhigh, "xhigh"),
+        ("gemini-10-pro", Effort::Xhigh, "xhigh"),
+        (
+            "gemini-999999999999999999999999-pro",
+            Effort::Xhigh,
+            "xhigh",
+        ),
+        ("gemini-3.8-flash", Effort::Xhigh, "high"),
+        ("gemini-flash-latest", Effort::Xhigh, "high"),
+        ("argon-gemini-4", Effort::Xhigh, "high"),
+        ("gemma-4-27b-it", Effort::Xhigh, "high"),
+        ("claude-sonnet-4-5", Effort::Xhigh, "high"),
+        ("gemini-4-neon", Effort::Max, "high"),
+    ] {
+        let mut request = Request::new(model);
+        request.params.effort = Some(effort);
+        let bytes = GenerativeLanguage.encode_request(&request).expect("encode");
+        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(
+            value["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+            json!(expected),
+            "{model} at {effort:?}"
+        );
+    }
+}
+
+#[test]
+fn d270_original_thinking_level_stays_on_same_protocol_encode() {
+    let request = GenerativeLanguage
+        .decode_request(
+            br#"{"model":"gemini-3.8-flash","contents":[],"generationConfig":{"thinkingConfig":{"thinkingLevel":"xhigh","includeThoughts":true}}}"#,
+        )
+        .expect("decode");
+    let encoded = GenerativeLanguage.encode_request(&request).expect("encode");
+    let value: serde_json::Value = serde_json::from_slice(&encoded).expect("json");
+    assert_eq!(
+        value["generationConfig"]["thinkingConfig"],
+        json!({"thinkingLevel": "xhigh", "includeThoughts": true})
+    );
+}
+
+#[test]
 fn the_original_field_stays_when_the_extension_bag_is_kept() {
     let codec = AnthropicMessages;
     let bytes = br#"{"model":"demo","max_tokens":8,"messages":[],"thinking":{"type":"enabled","budget_tokens":128}}"#;

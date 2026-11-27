@@ -116,6 +116,46 @@ async fn versioned_base_lists_only_models_and_classifies_rows_with_metadata() {
 }
 
 #[tokio::test]
+async fn d276_decision_type_rows_are_not_offered_as_chat_models() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {"id": "plain-chat", "type": "chat"},
+                {"id": "route-one", "kind": "chat", "type": "decision"},
+                {"id": "route-two", "type": "DeCiSiOn"},
+                {"id": "legacy-route", "kind": "decision", "type": "chat"}
+            ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let listed = openai(endpoint(&server, "/v1"))
+        .list_models(&ListQuery::new())
+        .await
+        .expect("list");
+    for id in ["route-one", "route-two", "legacy-route"] {
+        assert!(
+            listed
+                .models()
+                .iter()
+                .find(|model| model.id() == id)
+                .expect("decision row")
+                .decides(),
+            "{id} must be tagged as a decision model"
+        );
+    }
+    let chat = listed
+        .models()
+        .iter()
+        .filter(|model| !model.draws() && !model.films() && !model.decides())
+        .map(|model| model.id())
+        .collect::<Vec<_>>();
+    assert_eq!(chat, ["plain-chat"]);
+}
+
+#[tokio::test]
 async fn unversioned_base_uses_direct_v1_fallback_and_sets_the_flag() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
