@@ -153,11 +153,15 @@ and `hofund <command> --help` print that command's usage.
 ### Routing
 
 A route accepts `routing = "smart"`, `"order"`, `"rotate"`, `"usage"`,
-`"pace"`, `"weight"`, `"free"`, `"fast"`, `"cheap"`, `"drain"`, or `"fit"`;
-the default is `smart`. `order` keeps the listed order, `rotate` advances a
-per-route turn, `weight` uses smooth weighted round robin, `free` puts free
-models first in their listed order, and `drain` keeps one member until it is
-used up or unavailable, then moves to the next in listed order. `fit` (small
+`"pace"`, `"weight"`, `"free"`, `"fast"`, `"cheap"`, `"drain"`, `"pace-drain"`,
+or `"fit"`; the default is `smart`. `order` keeps the listed order, `rotate`
+advances a per-route turn, `weight` uses smooth weighted round robin, `free`
+puts free models first in their listed order, and `drain` keeps one member
+until it is used up or unavailable, then moves to the next in listed order.
+`pace-drain` (before expiry, one by one; also `pace-then-drain` and
+`expiry-one-by-one`) picks the member whose allowance a reset would waste
+soonest, then stays on it until it is used up or fails, and picks the next
+the same way. `fit` (small
 context first) is a group's only: it keeps Smart's order, then stably sorts
 by band and by known context window, smallest first, with an unknown window
 last. A member set to be used first stays ahead while it still has room, and

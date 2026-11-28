@@ -10,7 +10,7 @@ pub(super) fn spreads_sessions(mode: Stays, routing: &str) -> bool {
 }
 
 pub(super) fn keeps_week_low_routing(routing: &str) -> bool {
-    matches!(routing, "" | "smart" | "pace")
+    matches!(routing, "" | "smart" | "pace" | "pace-drain")
 }
 
 pub(super) fn back_to_main(candidates: &[Candidate], at: usize) -> bool {
@@ -151,6 +151,11 @@ mod tests {
         let kept = candidate(true, true);
         let candidates = vec![candidate(false, false), kept];
         assert!(ready_for_new(&candidates, 1));
+    }
+
+    #[test]
+    fn d275_pace_drain_keeps_a_low_week_with_seats_that_have_room() {
+        assert!(keeps_week_low_routing("pace-drain"));
     }
 
     #[test]

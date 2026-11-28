@@ -1771,14 +1771,27 @@ fn normalized_account_weights(
     Ok(weights)
 }
 
-pub(crate) const ROUTING_NAMES: [&str; 11] = [
-    "smart", "order", "rotate", "usage", "pace", "weight", "free", "fast", "cheap", "drain", "fit",
+pub(crate) const ROUTING_NAMES: [&str; 12] = [
+    "smart",
+    "order",
+    "rotate",
+    "usage",
+    "pace",
+    "weight",
+    "free",
+    "fast",
+    "cheap",
+    "drain",
+    "pace-drain",
+    "fit",
 ];
 
 /// `small-first` and `small-context-first` are names for `fit`.
+/// `pace-then-drain` and `expiry-one-by-one` are names for `pace-drain`.
 pub(crate) fn canonical_routing(routing: &str) -> &str {
     match routing {
         "small-first" | "small-context-first" => "fit",
+        "pace-then-drain" | "expiry-one-by-one" => "pace-drain",
         other => other,
     }
 }
@@ -3079,7 +3092,17 @@ mod tests {
     #[test]
     fn a2_routing_names_validate_and_cheap_requires_a_group() {
         for name in [
-            "smart", "order", "rotate", "usage", "pace", "weight", "free", "fast", "cheap", "drain",
+            "smart",
+            "order",
+            "rotate",
+            "usage",
+            "pace",
+            "weight",
+            "free",
+            "fast",
+            "cheap",
+            "drain",
+            "pace-drain",
         ] {
             let config = load(&format!(
                 "[[providers]]\nid = \"one\"\npreset = \"openai\"\n[[providers]]\nid = \"two\"\npreset = \"openai\"\n[[routes]]\nmodel = \"demo\"\nrouting = \"{name}\"\nupstreams = [\"one\", \"two\"]\n"
@@ -3157,6 +3180,18 @@ mod tests {
             ))
             .expect_err("alias on a subscription");
             assert!(error.to_string().contains("fit is a group's"), "{error}");
+        }
+    }
+
+    #[test]
+    fn d275_pace_drain_aliases_load_on_a_route_and_a_subscription() {
+        for name in ["pace-drain", "pace-then-drain", "expiry-one-by-one"] {
+            let config = load(&format!(
+                "[[subscriptions]]\nid = \"one\"\naccounts = \"*\"\nrouting = \"{name}\"\n[[routes]]\nmodel = \"demo\"\nrouting = \"{name}\"\nupstreams = [{{ subscription = \"one\" }}]\n"
+            ))
+            .unwrap_or_else(|error| panic!("{name} on a route and subscription: {error}"));
+            assert_eq!(config.routes[0].routing, "pace-drain", "{name}");
+            assert_eq!(config.subscriptions[0].routing, "pace-drain", "{name}");
         }
     }
 

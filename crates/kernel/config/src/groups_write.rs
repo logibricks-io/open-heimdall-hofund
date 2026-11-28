@@ -765,6 +765,35 @@ listen = \"127.0.0.1:0\"\n\
 [[routes]]\nmodel = \"m\"\nupstreams = [\"chat\"]\n";
 
     #[test]
+    fn d275_group_patch_stores_pace_drain_aliases() {
+        let (text, id) = edit_group_create(BASE, "Team", "chat/m").expect("create");
+        for name in ["pace-then-drain", "expiry-one-by-one"] {
+            let (patched, _) = edit_group_patch(
+                &text,
+                &id,
+                Some(name),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("patch routing alias");
+            let config = load(&patched).expect("load patched group");
+            let group = config
+                .routes
+                .iter()
+                .find(|route| route.model == format!("group/{id}"))
+                .expect("group route");
+            assert_eq!(group.routing, "pace-drain", "{name}");
+            assert!(patched.contains("routing = \"pace-drain\""), "{name}");
+        }
+    }
+
+    #[test]
     fn r7a_group_create_and_patch_keep_group_member_refs() {
         let (inner_text, _) = edit_group_create(BASE, "Inner", "chat/m").expect("inner group");
         let (with_outer, _) =

@@ -357,7 +357,15 @@ struct Pools {
     turns: HashMap<String, u64>,
     rounds: HashMap<String, Round>,
     probes: HashMap<String, Probe>,
-    drains: HashMap<String, String>,
+    drains: HashMap<String, DrainAt>,
+}
+
+/// The seat a pool is keeping for drain or pace-drain.
+struct DrainAt {
+    key: String,
+    /// A quota or credit refusal has already moved this pool on, even if the
+    /// seat renews before the next request. Pace-drain reads it. Drain does not.
+    past: bool,
 }
 
 #[derive(Default)]
@@ -443,7 +451,29 @@ impl StrategyState {
     /// Remembers which seat key drain routing keeps for `pool`.
     pub fn record_drain(&self, pool: &str, key: &str) {
         let mut pools = self.lock();
-        pools.drains.insert(pool.to_owned(), key.to_owned());
+        pools.drains.insert(
+            pool.to_owned(),
+            DrainAt {
+                key: key.to_owned(),
+                past: false,
+            },
+        );
+    }
+
+    /// Marks every pool currently kept on `key` past a whole-member quota or
+    /// credit refusal. The next pace-drain order leaves that seat even when
+    /// it renews first, and does not pick it for that transition when another
+    /// seat is available. Drain ordering ignores the mark.
+    pub fn drained(&self, key: &str) {
+        if key.is_empty() {
+            return;
+        }
+        let mut pools = self.lock();
+        for at in pools.drains.values_mut() {
+            if at.key == key {
+                at.past = true;
+            }
+        }
     }
 
     fn speed_probe(&self, pool: &str, unmeasured: &[usize]) -> Option<usize> {
@@ -578,7 +608,7 @@ fn panic_text(payload: &(dyn std::any::Any + Send)) -> &str {
     }
 }
 
-fn builtins() -> [(&'static str, Strategy); 11] {
+fn builtins() -> [(&'static str, Strategy); 12] {
     [
         ("smart", Strategy::new(smart)),
         (
@@ -593,6 +623,7 @@ fn builtins() -> [(&'static str, Strategy); 11] {
         ("fast", Strategy::new(fastest).by_speed()),
         ("cheap", Strategy::new(cheapest).by_price()),
         ("drain", Strategy::new(drain).exact()),
+        ("pace-drain", Strategy::new(pace_drain).exact().by_use()),
         ("fit", Strategy::new(small_first).by_window()),
     ]
 }
@@ -1073,7 +1104,8 @@ fn pick_drain(pool: &str, seats: &[Seat], state: &StrategyState) -> usize {
         .lock()
         .drains
         .get(pool)
-        .and_then(|key| seats.iter().position(|seat| seat.key == *key))
+        .filter(|at| !at.key.is_empty())
+        .and_then(|at| seats.iter().position(|seat| seat.key == at.key))
         .unwrap_or(0);
     first_usable(seats, from).unwrap_or(from)
 }
@@ -1083,6 +1115,92 @@ fn drain(pool: &str, seats: &[Seat], state: &StrategyState) -> Vec<usize> {
     (0..seats.len())
         .map(|offset| (start + offset) % seats.len())
         .collect()
+}
+
+/// A known seat at the pace-drain spent line, unless it still has trial credits.
+/// Resting is a separate reason to leave the seat.
+fn pace_drain_spent(seat: &Seat) -> bool {
+    seat.known && !seat.trial_credits && seat.used >= crate::affinity::spent_share_of("pace-drain")
+}
+
+fn pace_drain_keep(seat: &Seat, pass: u8) -> bool {
+    match pass {
+        0 => !seat.learns && !seat.resting,
+        1 => !seat.resting,
+        _ => true,
+    }
+}
+
+/// Before expiry, one by one. Picks the seat whose allowance a reset would
+/// waste soonest (weekly pace), then stays on it until it is used up, resting,
+/// or marked past by a quota or credit refusal, and picks again the same way.
+/// The refused seat is not eligible for that one re-pick when another is.
+/// A learner is asked once and is not the seat the pool keeps. The kept seat
+/// is stored while ordering, so asking again with nothing changed is the same
+/// order. Drain still stores its seat only after an answer, and ignores `past`.
+fn pace_drain(pool: &str, seats: &[Seat], state: &StrategyState) -> Vec<usize> {
+    if seats.is_empty() {
+        return Vec::new();
+    }
+    let paced = weekly_pace(pool, seats, state);
+    let mut pools = state.lock();
+    let (past, stored_key) = pools
+        .drains
+        .get(pool)
+        .map(|at| (at.past, at.key.clone()))
+        .unwrap_or((false, String::new()));
+    let mut at = if stored_key.is_empty() {
+        None
+    } else {
+        seats.iter().position(|seat| seat.key == stored_key)
+    };
+    let refused = if past { at } else { None };
+    let leave =
+        at.is_none_or(|index| past || pace_drain_spent(&seats[index]) || seats[index].resting);
+    if leave {
+        let mut pick = None;
+        for pass in 0..3 {
+            if let Some(index) = paced.iter().copied().find(|index| {
+                Some(*index) != refused
+                    && !pace_drain_spent(&seats[*index])
+                    && pace_drain_keep(&seats[*index], pass)
+            }) {
+                pick = Some(index);
+                break;
+            }
+        }
+        if let Some(index) = pick {
+            at = Some(index);
+        } else if at.is_none() {
+            at = paced.first().copied();
+        }
+    }
+    let at = at.expect("a non-empty pool has a pace order");
+    pools.drains.insert(
+        pool.to_owned(),
+        DrainAt {
+            key: seats[at].key.clone(),
+            past: false,
+        },
+    );
+    drop(pools);
+
+    let mut out = Vec::with_capacity(seats.len());
+    if !seats[at].learns {
+        for index in &paced {
+            let seat = &seats[*index];
+            if *index != at && seat.learns && !pace_drain_spent(seat) && !seat.resting {
+                out.push(*index);
+            }
+        }
+    }
+    out.push(at);
+    for index in paced {
+        if index != at && !out.contains(&index) {
+            out.push(index);
+        }
+    }
+    out
 }
 
 fn rotate(pool: &str, seats: &[Seat], state: &StrategyState) -> Vec<usize> {
@@ -1266,7 +1384,17 @@ mod tests {
         let strategy = state.registry().find("free").expect("free");
         assert!(strategy.by_free);
         for other in [
-            "smart", "order", "rotate", "usage", "pace", "weight", "fast", "cheap", "fit",
+            "smart",
+            "order",
+            "rotate",
+            "usage",
+            "pace",
+            "weight",
+            "fast",
+            "cheap",
+            "drain",
+            "pace-drain",
+            "fit",
         ] {
             assert!(!state.registry().find(other).expect(other).by_free);
         }
@@ -1793,6 +1921,7 @@ mod tests {
         };
         assert_eq!(state.needs("usage"), usage);
         assert_eq!(state.needs("pace"), usage);
+        assert_eq!(state.needs("pace-drain"), usage);
         assert_eq!(
             state.needs("fast"),
             Needs {
@@ -2099,9 +2228,219 @@ mod tests {
             }
         );
         for name in [
-            "smart", "order", "rotate", "usage", "pace", "weight", "free", "fast", "cheap", "drain",
+            "smart",
+            "order",
+            "rotate",
+            "usage",
+            "pace",
+            "weight",
+            "free",
+            "fast",
+            "cheap",
+            "drain",
+            "pace-drain",
         ] {
             assert!(!state.needs(name).window, "{name}");
         }
+    }
+
+    fn paced(id: &'static str, used: f64, pace: f64) -> Seat {
+        let mut seat = seat(id);
+        seat.known = true;
+        seat.used = used;
+        seat.pace = pace;
+        seat
+    }
+
+    /// Before expiry, one by one: the highest pace is first, and it stays
+    /// there while its pace falls below another's. Pace alone moves.
+    #[test]
+    fn d275_pace_drain_picks_by_pace_and_stays() {
+        let state = StrategyState::with_builtins();
+        let pool = "pool";
+        let a = paced("a", 40.0, 2.0);
+        let b = paced("b", 20.0, 5.0);
+        let c = paced("c", 70.0, 1.0);
+        let seats = [a.clone(), b.clone(), c.clone()];
+        assert_eq!(
+            keys(&seats, &state.order("pace-drain", pool, &seats)),
+            ["b", "a", "c"]
+        );
+        let b_later = paced("b", 85.0, 1.5);
+        let later = [a.clone(), b_later.clone(), c.clone()];
+        assert_eq!(
+            keys(&later, &state.order("pace-drain", pool, &later)),
+            ["b", "a", "c"]
+        );
+        assert_eq!(keys(&later, &state.order("pace", pool, &later))[0], "a");
+        assert_eq!(
+            keys(&later, &state.order("pace-drain", pool, &later)),
+            ["b", "a", "c"]
+        );
+        let almost = [a.clone(), paced("b", 98.0, 0.1), c.clone()];
+        assert_eq!(
+            keys(&almost, &state.order("pace-drain", pool, &almost))[0],
+            "b"
+        );
+        let spent = [a.clone(), paced("b", 100.0, 0.0), c.clone()];
+        assert_eq!(
+            keys(&spent, &state.order("pace-drain", pool, &spent)),
+            ["a", "c", "b"]
+        );
+        let renewed = [a.clone(), paced("b", 0.0, 9.0), c.clone()];
+        assert_eq!(
+            keys(&renewed, &state.order("pace-drain", pool, &renewed))[0],
+            "a"
+        );
+        state.drained("a");
+        let refused = [paced("a", 0.0, 8.0), paced("b", 0.0, 9.0), c];
+        assert_eq!(
+            keys(&refused, &state.order("pace-drain", pool, &refused)),
+            ["b", "a", "c"]
+        );
+    }
+
+    /// A resting seat is left for the next by pace, and that pick stays
+    /// after the rest ends. A used-up pool stays on the last pick.
+    #[test]
+    fn d275_pace_drain_leaves_a_rest_and_a_used_up_pool() {
+        let state = StrategyState::with_builtins();
+        let pool = "group/pool";
+        let a = paced("a", 0.0, 3.0);
+        let b = paced("b", 0.0, 2.0);
+        let c = paced("c", 0.0, 1.0);
+        let seats = [a.clone(), b.clone(), c.clone()];
+        assert_eq!(
+            keys(&seats, &state.order("pace-drain", pool, &seats))[0],
+            "a"
+        );
+        let mut failed = seats.clone();
+        failed[0].resting = true;
+        assert_eq!(
+            keys(&failed, &state.order("pace-drain", pool, &failed))[0],
+            "b"
+        );
+        assert_eq!(
+            keys(&seats, &state.order("pace-drain", pool, &seats))[0],
+            "b"
+        );
+        let mut out = seats.clone();
+        out[1].resting = true;
+        assert_eq!(keys(&out, &state.order("pace-drain", pool, &out))[0], "a");
+        let mut mixed = seats.clone();
+        mixed[0].used = 100.0;
+        mixed[1].resting = true;
+        mixed[2].resting = true;
+        assert_eq!(
+            keys(&mixed, &state.order("pace-drain", pool, &mixed))[0],
+            "b"
+        );
+        let mut used_up = seats.clone();
+        for seat in &mut used_up {
+            seat.used = 100.0;
+        }
+        assert_eq!(
+            keys(&used_up, &state.order("pace-drain", pool, &used_up))[0],
+            "b"
+        );
+        let left = [a, c];
+        assert_eq!(
+            keys(&left, &state.order("pace-drain", pool, &left)),
+            ["a", "c"]
+        );
+    }
+
+    /// A learner is asked once and is not the seat the pool keeps.
+    #[test]
+    fn d275_pace_drain_learns_without_keeping() {
+        let state = StrategyState::with_builtins();
+        let pool = "pool-learn";
+        let a = paced("a", 0.0, 2.0);
+        let b = paced("b", 0.0, 1.0);
+        let mut learner = seat("n");
+        learner.learns = true;
+        let seats = [a.clone(), b.clone(), learner.clone()];
+        assert_eq!(
+            keys(&seats, &state.order("pace-drain", pool, &seats)),
+            ["n", "a", "b"]
+        );
+        let mut known = learner.clone();
+        known.learns = false;
+        known.known = true;
+        known.pace = 0.5;
+        let learnt = [a.clone(), b.clone(), known];
+        assert_eq!(
+            keys(&learnt, &state.order("pace-drain", pool, &learnt)),
+            ["a", "b", "n"]
+        );
+        state.forget(pool);
+        let mut other = seat("m");
+        other.learns = true;
+        other.pace = 1.0;
+        learner.pace = 1.0;
+        let only = [learner.clone(), other.clone()];
+        let first = keys(&only, &state.order("pace-drain", pool, &only))[0].clone();
+        let mut risen = only.clone();
+        let other_index = usize::from(first == "n");
+        risen[other_index].pace = 9.0;
+        assert_eq!(
+            keys(&risen, &state.order("pace-drain", pool, &risen))[0],
+            first
+        );
+    }
+
+    #[test]
+    fn d275_pace_drain_is_builtin_exact_and_weighs_use() {
+        let state = StrategyState::with_builtins();
+        let strategy = state.registry().find("pace-drain").expect("pace-drain");
+        assert!(strategy.exact);
+        assert!(strategy.by_use);
+        assert!(state.registry().served("pace-drain"));
+        assert_eq!(
+            state.needs("pace-drain"),
+            super::Needs {
+                usage: true,
+                ..super::Needs::default()
+            }
+        );
+        assert!((crate::affinity::spent_share_of("pace-drain") - 100.0).abs() < f64::EPSILON);
+    }
+
+    /// Remaining trial credits at a full allowance are still a seat to keep.
+    /// Bought credits at that line are used up. Forgetting the pool picks again.
+    #[test]
+    fn d275_pace_drain_keeps_trial_credits_and_forgets() {
+        let state = StrategyState::with_builtins();
+        let pool = "pool-trial";
+        let a = paced("a", 10.0, 1.0);
+        let mut trial = paced("t", 100.0, 9.0);
+        trial.credits = true;
+        trial.trial_credits = true;
+        let seats = [a, trial.clone()];
+        assert_eq!(
+            keys(&seats, &state.order("pace-drain", pool, &seats))[0],
+            "t"
+        );
+        let risen = [paced("a", 10.0, 20.0), trial];
+        assert_eq!(
+            keys(&risen, &state.order("pace-drain", pool, &risen))[0],
+            "t"
+        );
+        state.forget(pool);
+        assert_eq!(
+            keys(&risen, &state.order("pace-drain", pool, &risen))[0],
+            "a"
+        );
+
+        let mut bought = paced("b", 100.0, 9.0);
+        bought.credits = true;
+        let bought_seats = [paced("a", 10.0, 1.0), bought];
+        assert_eq!(
+            keys(
+                &bought_seats,
+                &state.order("pace-drain", "pool-bought", &bought_seats)
+            )[0],
+            "a"
+        );
     }
 }
