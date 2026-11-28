@@ -3,8 +3,67 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use hofund_plugin_api::MemberId;
+use hofund_plugin_api::{MemberId, ModelSpec};
+use hofund_router::quota::QuotaStore;
 use hofund_router::{Cooldowns, PersistedRest};
+
+/// Whether compiled preset data records an all-zero text price as free.
+pub(crate) fn preset_zero_price_free(
+    registry: &dyn crate::DaemonRegistry,
+    preset: Option<&str>,
+) -> bool {
+    preset.is_some_and(|id| {
+        registry
+            .find_preset(id)
+            .is_some_and(|(row, _)| row.zero_price_free)
+    })
+}
+
+/// Members whose saved windows already name models that do not count.
+pub(crate) fn members_with_exclusions(quotas: &QuotaStore) -> HashSet<String> {
+    quotas
+        .alert_cards()
+        .into_iter()
+        .filter(|(_, windows)| {
+            windows
+                .iter()
+                .any(|window| !window.excluded_models.is_empty())
+        })
+        .filter_map(|(quota, _)| {
+            let route = if quota.member.is_empty() {
+                quota.provider
+            } else {
+                quota.member
+            };
+            member_label(&route)
+        })
+        .collect()
+}
+
+/// A catalog that contains both a window-free model and a paid model.
+pub(crate) fn mixed_free_and_paid(models: &[ModelSpec]) -> bool {
+    let mut free = false;
+    let mut paid = false;
+    for model in models {
+        if model.free() == Some(true) || model.costs_nothing() {
+            free = true;
+        } else {
+            paid = true;
+        }
+    }
+    free && paid
+}
+
+fn member_label(route: &str) -> Option<String> {
+    if route.is_empty() {
+        return None;
+    }
+    if let Some((provider, key)) = route.split_once('#') {
+        crate::membership::try_key_member_id(provider, key).map(|id| id.to_string())
+    } else {
+        Some(crate::membership::member_id(route).to_string())
+    }
+}
 
 pub(crate) struct RestStore {
     path: PathBuf,
@@ -41,9 +100,41 @@ impl RestStore {
                 return;
             }
         };
+        let scoped = members_with_exclusions(&self.quota_store());
+        let before = rests.len();
+        let rests = rests
+            .into_iter()
+            .filter(|rest| rest.model.is_some() || !scoped.contains(&rest.member))
+            .collect::<Vec<_>>();
+        let dropped = before != rests.len();
         let now = SystemTime::now();
         cooldowns.restore_credit(rests, configured, now);
-        self.last = Some(cooldowns.credit_snapshot(now));
+        let snapshot = cooldowns.credit_snapshot(now);
+        if dropped && let Err(error) = self.write_atomic(&encoded(&snapshot)) {
+            tracing::warn!(path = %self.path.display(), %error, "released credit rests were not saved");
+        }
+        self.last = Some(snapshot);
+    }
+
+    fn quota_store(&self) -> hofund_router::quota::QuotaStore {
+        let root = self.path.parent().unwrap_or_else(|| Path::new("."));
+        QuotaStore::new(root)
+    }
+
+    /// Drops whole-member API-key credit rests for `members` and rewrites the file.
+    pub(crate) fn release_members(&mut self, cooldowns: &Cooldowns, members: &HashSet<String>) {
+        if !cooldowns.release_whole_credit_rests(members) {
+            return;
+        }
+        let snapshot = cooldowns.credit_snapshot(SystemTime::now());
+        if let Err(error) = self.write_atomic(&encoded(&snapshot)) {
+            tracing::warn!(
+                path = %self.path.display(),
+                %error,
+                "released credit rests were not saved"
+            );
+        }
+        self.last = Some(snapshot);
     }
 
     pub(crate) fn save(&mut self, cooldowns: &Cooldowns) {
@@ -239,6 +330,67 @@ mod tests {
             .expect("restored model rest");
         assert_eq!(cooling.failures(), 1);
         assert!(restored.cooling_for_model(&id, "model-b").is_none());
+    }
+
+    #[test]
+    fn d271_scoped_plan_releases_only_a_stale_whole_member_rest() {
+        let (mut store, book, id, _, root) = fixture();
+        let other = MemberId::from_preset(
+            PresetId::from_static("other"),
+            MemberKey::from_static("default"),
+        );
+        let now = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_900_000_000);
+        let quotas = hofund_router::quota::QuotaStore::new(root.path());
+        let mut card = hofund_control_proto::Quota {
+            provider: "member".to_owned(),
+            name: "member".to_owned(),
+            kind: hofund_control_proto::QuotaKind::Plan,
+            ..hofund_control_proto::Quota::default()
+        };
+        card.member = "member".to_owned();
+        let window = hofund_plugin_api::QuotaWindow::new("week", 100, Some(100), None)
+            .expect("window")
+            .with_excluded_models(vec!["free-model".to_owned()]);
+        quotas.record_success(
+            card,
+            vec![hofund_router::quota::WindowInfo::from_plugin(&window)],
+            now,
+        );
+        let rests = vec![
+            hofund_router::PersistedRest::new(id.to_string(), now + Duration::from_secs(3600), 3),
+            hofund_router::PersistedRest::for_model(
+                id.to_string(),
+                "paid-model".to_owned(),
+                now + Duration::from_secs(3600),
+                2,
+            ),
+            hofund_router::PersistedRest::new(
+                other.to_string(),
+                now + Duration::from_secs(3600),
+                4,
+            ),
+        ];
+        std::fs::write(
+            root.path().join("rests.json"),
+            serde_json::to_vec(&rests).expect("rests"),
+        )
+        .expect("saved rests");
+
+        store.load(&book, &HashSet::from([id.clone(), other.clone()]));
+
+        assert!(book.cooling(&id).is_none());
+        assert!(book.cooling_for_model(&id, "paid-model").is_some());
+        assert!(book.cooling(&other).is_some());
+        let saved: Vec<hofund_router::PersistedRest> = serde_json::from_slice(
+            &std::fs::read(root.path().join("rests.json")).expect("saved rests"),
+        )
+        .expect("rests");
+        assert_eq!(saved.len(), 2);
+        assert!(
+            saved
+                .iter()
+                .all(|rest| rest.member != id.to_string() || rest.model.is_some())
+        );
     }
 
     #[test]

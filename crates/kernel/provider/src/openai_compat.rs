@@ -190,7 +190,8 @@ impl Provider for OpenAiCompat {
             OpenAiProtocol::Chat => &OpenAiChat,
             OpenAiProtocol::Responses => &OpenAiResponses,
         };
-        http::execute_with_attempt(
+        let model = request.model.clone();
+        let result = http::execute_with_attempt(
             &self.upstream,
             codec,
             request,
@@ -199,7 +200,11 @@ impl Provider for OpenAiCompat {
             &self.attempt,
             hook,
         )
-        .await
+        .await;
+        match result {
+            Ok(completion) => Ok(completion),
+            Err(error) => Err(crate::models::scope_refusal(&self.models, &model, error)),
+        }
     }
 
     async fn list_models(

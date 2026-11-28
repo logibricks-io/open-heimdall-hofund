@@ -101,14 +101,19 @@ impl Provider for Anthropic {
         request: Request,
         inbound_protocol: &str,
     ) -> Result<Completion, ProviderError> {
-        http::execute(
+        let model = request.model.clone();
+        let result = http::execute(
             &self.upstream,
             &AnthropicMessages,
             request,
             None,
             inbound_protocol,
         )
-        .await
+        .await;
+        match result {
+            Ok(completion) => Ok(completion),
+            Err(error) => Err(crate::models::scope_refusal(&self.models, &model, error)),
+        }
     }
 
     async fn list_models(

@@ -813,11 +813,13 @@ PlanWindow::const fn with_optional_reset (mut self , at : Option < SystemTime >)
 PlanWindow::const fn with_resets_at (mut self , at : SystemTime) -> Self
 PlanWindow::const fn with_span (mut self , span : Duration) -> Self
 PlanWindow::fn display (& self) -> & str
+PlanWindow::fn excluded_models (& self) -> & [String]
 PlanWindow::fn name (& self) -> & str
 PlanWindow::fn new (name : impl Into < String > , used : f64) -> Self
 PlanWindow::fn unit (& self) -> & str
 PlanWindow::fn with_count (mut self , amount : f64 , limit : f64 , unit : impl Into < String >) -> Self
 PlanWindow::fn with_display (mut self , display : impl Into < String >) -> Self
+PlanWindow::fn with_excluded_models (mut self , models : Vec < String >) -> Self
 PluginError
 PluginError #[non_exhaustive] derives(Debug, Error)
 PluginError::const fn account_restricted (mut self) -> Self

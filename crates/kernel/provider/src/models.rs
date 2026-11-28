@@ -1,5 +1,6 @@
 //! Bounded live model lists and shared row metadata.
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::StreamExt;
@@ -48,6 +49,8 @@ const BOTH_AUTH_REFUSALS: &[&str] = &[
 pub(crate) struct ModelClient {
     pub endpoint: Endpoint,
     pub client: reqwest::Client,
+    /// Last successful live list. Refusal scoping reads this and does not fetch.
+    listed: Arc<Mutex<Option<ModelList>>>,
 }
 
 struct ListFailure(PluginError);
@@ -84,6 +87,7 @@ impl ModelClient {
         Ok(Self {
             endpoint: endpoint.clone(),
             client,
+            listed: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -118,7 +122,8 @@ impl ModelClient {
             let learned = *learned.lock().unwrap_or_else(|error| error.into_inner());
             match result {
                 Ok(rows) => {
-                    let (models, dropped) = model_specs(&rows, false)?;
+                    let (models, dropped) =
+                        model_specs(&rows, false, self.endpoint.zero_price_free)?;
                     if models.is_empty() {
                         errors.push(PluginError::decode(format!(
                             "{}: no models listed",
@@ -134,6 +139,10 @@ impl ModelClient {
                     if let Some(choice) = learned {
                         list = list.with_auth_choice(choice);
                     }
+                    *self
+                        .listed
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner()) = Some(list.clone());
                     return Ok(list);
                 }
                 Err(error) => errors.push(self.redact_error(error)),
@@ -153,7 +162,7 @@ impl ModelClient {
             })
             .await
             .map_err(|error| self.redact_error(error.0))?;
-        let (models, mut dropped) = model_specs(&rows, true)?;
+        let (models, mut dropped) = model_specs(&rows, true, false)?;
         dropped.extend(method_dropped);
         if models.is_empty() {
             return Err(PluginError::decode("no models listed"));
@@ -496,7 +505,69 @@ pub(crate) fn url_host(base: &str) -> String {
         .unwrap_or_default()
 }
 
-fn model_specs(rows: &[Value], gemini: bool) -> Result<(Vec<ModelSpec>, Vec<String>), PluginError> {
+/// Whether a remembered catalog scopes `model`'s refusal.
+///
+/// An explicit free flag always counts. An all-zero recorded price counts
+/// only when `zero_price_free` is set. Callers pass the last successful list
+/// and do not fetch one.
+#[must_use]
+pub fn catalog_scopes_refusal(
+    models: &[ModelSpec],
+    model: &str,
+    quota_or_credit: bool,
+    zero_price_free: bool,
+) -> bool {
+    let mut requested = None;
+    let mut free = false;
+    let mut paid = false;
+    for listed in models {
+        let explicitly_free =
+            listed.free() == Some(true) || (zero_price_free && listed.costs_nothing());
+        free |= explicitly_free;
+        paid |= !explicitly_free;
+        if listed.id().eq_ignore_ascii_case(model) {
+            requested = Some(explicitly_free);
+        }
+    }
+    let Some(requested_free) = requested else {
+        return false;
+    };
+    free && paid && (requested_free || quota_or_credit)
+}
+
+pub(crate) fn scope_refusal(
+    client: &ModelClient,
+    model: &str,
+    error: crate::ProviderError,
+) -> crate::ProviderError {
+    let quota_or_credit = error.kind == crate::ProviderErrorKind::Quota || error.is_credit();
+    if !quota_or_credit && error.status != Some(429) {
+        return error;
+    }
+    let models = client
+        .listed
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+        .map(|list| list.models().to_vec())
+        .unwrap_or_default();
+    if catalog_scopes_refusal(
+        &models,
+        model,
+        quota_or_credit,
+        client.endpoint.zero_price_free,
+    ) {
+        error.with_model_scope()
+    } else {
+        error
+    }
+}
+
+fn model_specs(
+    rows: &[Value],
+    gemini: bool,
+    zero_price_free: bool,
+) -> Result<(Vec<ModelSpec>, Vec<String>), PluginError> {
     let mut models = Vec::new();
     let mut dropped = Vec::new();
     for row in rows {
@@ -505,7 +576,7 @@ fn model_specs(rows: &[Value], gemini: bool) -> Result<(Vec<ModelSpec>, Vec<Stri
                 .and_then(Value::as_str)
                 .or_else(|| row.get("name").and_then(Value::as_str))
         });
-        if let Some(model) = model_spec(row, gemini)? {
+        if let Some(model) = model_spec(row, gemini, zero_price_free)? {
             models.push(model);
         } else if let Some(id) = id.filter(|id| !id.is_empty()) {
             dropped.push(id.to_owned());
@@ -516,14 +587,24 @@ fn model_specs(rows: &[Value], gemini: bool) -> Result<(Vec<ModelSpec>, Vec<Stri
 
 /// Parses OpenAI-compatible or Anthropic model rows and reports dropped ids.
 ///
+/// `zero_price_free` records an all-zero text price. Callers pass it only for
+/// the preset that treats that price as window-free.
+///
 /// # Errors
 ///
 /// Returns [`PluginError`] when a row has an invalid model id.
-pub fn parse_model_rows(rows: &[Value]) -> Result<(Vec<ModelSpec>, Vec<String>), PluginError> {
-    model_specs(rows, false)
+pub fn parse_model_rows(
+    rows: &[Value],
+    zero_price_free: bool,
+) -> Result<(Vec<ModelSpec>, Vec<String>), PluginError> {
+    model_specs(rows, false, zero_price_free)
 }
 
-pub(crate) fn model_spec(row: &Value, gemini: bool) -> Result<Option<ModelSpec>, PluginError> {
+pub(crate) fn model_spec(
+    row: &Value,
+    gemini: bool,
+    zero_price_free: bool,
+) -> Result<Option<ModelSpec>, PluginError> {
     if let Value::String(id) = row {
         if hofund_plugin_sdk::classify::classify_model(id, "").is_none() {
             return Ok(None);
@@ -579,6 +660,17 @@ pub(crate) fn model_spec(row: &Value, gemini: bool) -> Result<Option<ModelSpec>,
             .with_max_output(positive(row.get("outputTokenLimit")));
         return Ok(Some(model));
     }
+    if row
+        .get("go")
+        .and_then(Value::as_object)
+        .and_then(|go| go.get("monthly_usage"))
+        .is_some_and(Value::is_null)
+    {
+        model = model.with_free(true);
+    }
+    if zero_price_free && all_zero_cost(row.get("cost")) {
+        model = model.with_prices(0, 0, 0);
+    }
     model = model
         .with_context(positive(row.get("context_length")))
         .with_max_output(positive(row.get("max_output_tokens")))
@@ -611,6 +703,25 @@ pub(crate) fn model_spec(row: &Value, gemini: bool) -> Result<Option<ModelSpec>,
     };
     model = model.with_endpoints(endpoints);
     Ok(Some(model))
+}
+
+fn all_zero_cost(cost: Option<&Value>) -> bool {
+    let Some(text) = cost.and_then(|cost| cost.get("text")) else {
+        return false;
+    };
+    let Some(input) = text.get("input") else {
+        return false;
+    };
+    let zero = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_f64)
+            .is_some_and(|price| price == 0.0)
+    };
+    let zero_or_absent = |value: Option<&Value>| value.is_none_or(|value| zero(Some(value)));
+    zero(input.get("price"))
+        && zero(text.get("output").and_then(|output| output.get("price")))
+        && zero_or_absent(input.get("cache").and_then(|cache| cache.get("read")))
+        && zero_or_absent(input.get("cache").and_then(|cache| cache.get("write")))
 }
 
 fn positive(value: Option<&Value>) -> u64 {

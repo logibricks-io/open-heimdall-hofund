@@ -116,6 +116,129 @@ async fn versioned_base_lists_only_models_and_classifies_rows_with_metadata() {
 }
 
 #[tokio::test]
+async fn d271_explicit_null_monthly_usage_marks_only_free_models() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [
+            {"id": "paid-model", "go": {"monthly_usage": {"go": 200}}},
+            {"id": "free-model", "go": {"monthly_usage": null}},
+            {"id": "missing", "go": {}},
+            {"id": "number", "go": {"monthly_usage": 0}},
+            {"id": "object", "go": {"monthly_usage": {}}},
+            {"id": "string", "go": "free"},
+            {"id": "array", "go": [null]},
+            {"id": "absent"},
+            {"id": "legacy-zero", "cost": {"text": {
+                "input": {"price": 0, "cache": {"read": 0, "write": 0}},
+                "output": {"price": 0}
+            }}}
+        ]})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut endpoint = endpoint(&server, "/v1");
+    endpoint.zero_price_free = true;
+    let listed = openai(endpoint)
+        .list_models(&ListQuery::new())
+        .await
+        .expect("list");
+    assert_eq!(listed.models().len(), 9);
+    for model in listed.models() {
+        assert_eq!(
+            model.free(),
+            (model.id() == "free-model").then_some(true),
+            "{}",
+            model.id()
+        );
+    }
+    let legacy = listed
+        .models()
+        .iter()
+        .find(|model| model.id() == "legacy-zero")
+        .expect("zero-priced row");
+    assert!(legacy.costs_nothing());
+}
+
+#[test]
+fn d271_zero_price_refusal_scope_requires_the_gate() {
+    let paid = hofund_plugin_api::ModelSpec::new("paid", None)
+        .expect("paid model")
+        .with_prices(1, 2, 0);
+    let zero_priced = hofund_plugin_api::ModelSpec::new("zero_priced", None)
+        .expect("zero-priced model")
+        .with_prices(0, 0, 0);
+    let models = [paid, zero_priced];
+
+    assert!(!hofund_provider::catalog_scopes_refusal(
+        &models,
+        "zero_priced",
+        false,
+        false,
+    ));
+    assert!(hofund_provider::catalog_scopes_refusal(
+        &models,
+        "zero_priced",
+        false,
+        true,
+    ));
+    assert!(!hofund_provider::catalog_scopes_refusal(
+        &models, "paid", true, false,
+    ));
+    assert!(hofund_provider::catalog_scopes_refusal(
+        &models, "paid", true, true,
+    ));
+}
+
+#[tokio::test]
+async fn d271_all_zero_text_price_is_recorded_only_for_the_gated_preset() {
+    let body = json!({"data": [{"id": "legacy-zero", "cost": {"text": {
+        "input": {"price": 0, "cache": {"read": 0, "write": 0}},
+        "output": {"price": 0}
+    }}}]});
+    let plain = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body.clone()))
+        .expect(1)
+        .mount(&plain)
+        .await;
+    let unscoped = openai(endpoint(&plain, "/v1"))
+        .list_models(&ListQuery::new())
+        .await
+        .expect("list");
+    let unscoped = unscoped
+        .models()
+        .iter()
+        .find(|model| model.id() == "legacy-zero")
+        .expect("zero-priced row");
+    assert!(
+        !unscoped.costs_nothing(),
+        "an all-zero price without the flag must not be free"
+    );
+
+    let gated = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .expect(1)
+        .mount(&gated)
+        .await;
+    let mut endpoint = endpoint(&gated, "/v1");
+    endpoint.zero_price_free = true;
+    let listed = openai(endpoint)
+        .list_models(&ListQuery::new())
+        .await
+        .expect("list");
+    let listed = listed
+        .models()
+        .iter()
+        .find(|model| model.id() == "legacy-zero")
+        .expect("zero-priced row");
+    assert!(listed.costs_nothing());
+}
+
+#[tokio::test]
 async fn d276_decision_type_rows_are_not_offered_as_chat_models() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

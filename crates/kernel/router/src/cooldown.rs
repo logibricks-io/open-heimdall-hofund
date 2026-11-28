@@ -582,6 +582,39 @@ impl Cooldowns {
         }
     }
 
+    /// Drops whole-member API-key credit rests named in `members`.
+    ///
+    /// `members` holds display ids. Model-scoped rests and rests of any other
+    /// cause stay. Returns whether any rest was removed.
+    pub fn release_whole_credit_rests(&self, members: &HashSet<String>) -> bool {
+        if members.is_empty() {
+            return false;
+        }
+        let now = (self.clock)();
+        let mut book = self.lock();
+        self.maintain_locked(&mut book, now);
+        let keys = book
+            .states
+            .iter()
+            .filter(|(key, state)| {
+                key.model.is_none()
+                    && members.contains(&key.member.to_string())
+                    && state.credit_ladder
+                    && state.credit_rung > 0
+                    && state.last_cause == Some(CooldownCause::Credit)
+            })
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        if keys.is_empty() {
+            return false;
+        }
+        for key in keys {
+            book.states.remove(&key);
+            recover(&mut book, key, CooldownCause::Credit);
+        }
+        true
+    }
+
     /// Returns API-key credit-ladder rests, including ended rests retained
     /// for their rung, with wall-clock deadlines and optional model scopes.
     #[must_use]

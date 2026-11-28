@@ -23,6 +23,7 @@ pub struct ProviderError {
     pub retry_after: Option<Duration>,
     /// The delay until a reset named by the upstream, when it sent one.
     pub reset_after: Option<Duration>,
+    model_scoped: bool,
     credit: bool,
     credit_soon: bool,
     cooldown: bool,
@@ -100,6 +101,7 @@ impl ProviderError {
             status: Some(status),
             retry_after: None,
             reset_after: None,
+            model_scoped: false,
             credit: false,
             credit_soon: false,
             cooldown: true,
@@ -132,6 +134,7 @@ impl ProviderError {
                 status: Some(status),
                 retry_after: None,
                 reset_after: None,
+                model_scoped: false,
                 credit: false,
                 credit_soon: false,
                 cooldown: true,
@@ -195,6 +198,7 @@ impl ProviderError {
         converted.account_restricted = account_restricted;
         converted.ordinary_failure = ordinary_failure;
         converted.subscription_suspended = subscription_suspended;
+        converted.model_scoped = error.scopes_model();
         if let Some(after) = error.retry_after() {
             converted = converted.with_retry_after(after);
         }
@@ -281,6 +285,19 @@ impl ProviderError {
         self.reset_after
     }
 
+    /// Rests only the requested model for this refusal.
+    #[must_use]
+    pub const fn with_model_scope(mut self) -> Self {
+        self.model_scoped = true;
+        self
+    }
+
+    /// Whether this refusal rests only the requested model.
+    #[must_use]
+    pub const fn scopes_model(&self) -> bool {
+        self.model_scoped
+    }
+
     /// Marks a credit refusal that can pass soon or for a smaller request.
     #[must_use]
     pub const fn with_credit_soon(mut self) -> Self {
@@ -335,6 +352,7 @@ impl ProviderError {
             status: None,
             retry_after: None,
             reset_after: None,
+            model_scoped: false,
             credit: false,
             credit_soon: false,
             cooldown: true,

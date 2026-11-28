@@ -29,7 +29,7 @@ pub use hofund_ir::api_refused;
 pub use http::{
     ClientRefresh, Credential, Endpoint, PooledClientSlot, pooled_client_slot, pooled_reqwest,
 };
-pub use models::{both_auth_applies, both_auth_refused, parse_model_rows};
+pub use models::{both_auth_applies, both_auth_refused, catalog_scopes_refusal, parse_model_rows};
 pub use openai_compat::{OpenAiCompat, OpenAiProtocol, responses_kept_by_host};
 pub use realtime::{realtime_model_url, realtime_target};
 pub use wire::{ModelPlan, Wire, credential_for};

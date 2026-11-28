@@ -696,6 +696,8 @@ pub struct CompiledPreset {{
     pub config: &'static [(&'static str, &'static str)],
     /// Regions in declared order.
     pub regions: &'static [CompiledRegion],
+    /// An all-zero text price is a free model for this preset.
+    pub zero_price_free: bool,
 }}
 
 /// One alias compiled from a fragment.

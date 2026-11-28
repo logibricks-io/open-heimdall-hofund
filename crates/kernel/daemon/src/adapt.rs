@@ -183,6 +183,9 @@ pub(crate) fn provider_error(error: PluginError) -> ProviderError {
     if error.is_subscription_suspended() {
         converted = converted.subscription_suspended();
     }
+    if error.scopes_model() {
+        converted = converted.with_model_scope();
+    }
     converted
 }
 

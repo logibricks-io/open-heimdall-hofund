@@ -18,8 +18,8 @@ use crate::membership::{self, Table};
 use crate::rests::RestStore;
 use crate::subscriptions::{self, ModelPolls, QuotaPolls, Subscriptions};
 use crate::{
-    Built, DaemonError, DaemonRegistry, Instance, ModelsHost, RouterParts, providers, route_plan,
-    router,
+    Built, DaemonError, DaemonRegistry, Instance, ModelsHost, RouterParts, providers,
+    route_plan_gated, router,
 };
 
 /// Cooldown observer tick. One second keeps cooled/recovered events prompt
@@ -97,6 +97,24 @@ impl Candidate {
     pub(crate) fn config(&self) -> &Arc<Config> {
         &self.config
     }
+}
+
+fn credit_members(provider: &hofund_config::Provider) -> Vec<String> {
+    let entries = provider.key_entries();
+    if entries.len() <= 1 {
+        return vec![membership::member_id(&provider.id).to_string()];
+    }
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let secret = hofund_secrets::resolve(&entry.key).ok()?;
+            if secret.is_empty() {
+                return None;
+            }
+            membership::try_key_member_id(&provider.id, &crate::provider_keys::key_id(&secret))
+                .map(|id| id.to_string())
+        })
+        .collect()
 }
 
 impl Runtime {
@@ -467,6 +485,23 @@ impl Runtime {
     /// Shares the list and probe host so reloads plan through it and
     /// replace its instances.
     pub(crate) fn attach_models(&self, host: Arc<ModelsHost>) {
+        let rests = Arc::clone(&self.rests);
+        let cooldowns = Arc::clone(&self.cooldowns);
+        let quotas = Arc::clone(&self.quotas);
+        let registry = Arc::clone(&self.registry);
+        host.on_listed(Arc::new(move |provider, models| {
+            let provider = provider.clone();
+            let mut members = crate::rests::members_with_exclusions(&quotas);
+            if crate::rests::preset_zero_price_free(registry.as_ref(), provider.preset.as_deref())
+                && crate::rests::mixed_free_and_paid(models)
+            {
+                members.extend(credit_members(&provider));
+            }
+            rests
+                .lock()
+                .expect("credit rest store")
+                .release_members(&cooldowns, &members);
+        }));
         let _ = self.models.set(host);
     }
 
@@ -553,11 +588,12 @@ impl Runtime {
             }
         }
         crate::validate_route_targets(config)?;
-        let (routes, policy) = route_plan(
+        let (routes, policy) = route_plan_gated(
             config,
             self.models.get().map(AsRef::as_ref),
             Some(&built),
             &limits,
+            &|id| crate::rests::preset_zero_price_free(self.registry.as_ref(), Some(id)),
         );
         // Publication cannot fail after the file is written: every routed
         // provider must already be built.
@@ -849,6 +885,7 @@ impl Runtime {
                 user_filter,
             ),
         );
+        self.release_observed_rests();
     }
 
     /// Re-reads every local card when a peer omits `provider`.
@@ -909,6 +946,7 @@ impl Runtime {
                 )
             })
             .await;
+            self.release_observed_rests();
         }
         let order = self.quota_order();
         let now = self.quotas.now();
@@ -916,6 +954,35 @@ impl Runtime {
             self.quotas.report(&order),
             self.quotas.standings(&order, now),
         )
+    }
+
+    /// Releases a stale whole-member credit rest once a plan window excludes
+    /// models or a mixed catalog has been read for that preset.
+    fn release_observed_rests(&self) {
+        let mut members = crate::rests::members_with_exclusions(&self.quotas);
+        let gated = if let (Some(host), Some(config)) = (self.models.get(), self.config.get()) {
+            let config = config.borrow();
+            config
+                .providers
+                .iter()
+                .filter(|provider| {
+                    crate::rests::preset_zero_price_free(
+                        self.registry.as_ref(),
+                        provider.preset.as_deref(),
+                    ) && crate::rests::mixed_free_and_paid(&host.cached(&provider.id).models)
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        for provider in &gated {
+            members.extend(credit_members(provider));
+        }
+        self.rests
+            .lock()
+            .expect("credit rest store")
+            .release_members(&self.cooldowns, &members);
     }
 
     /// Providers then subscriptions, as configured.
